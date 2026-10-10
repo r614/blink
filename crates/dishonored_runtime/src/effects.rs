@@ -121,7 +121,8 @@ impl Material for GlowMaterial {
 /// emitter, so the sprite meshes batch exactly as before; soft.x = 0 draws a plain sprite.
 #[derive(Asset, bevy::render::render_resource::AsBindGroup, Reflect, Debug, Clone, Default)]
 pub struct SoftFade {
-    /// x: the depth-fade scale k (0: off), see `soft_scale`.
+    /// x: the depth-fade scale k (0: off), see `soft_scale`; y: the height-map erosion's
+    /// multiplier (`ParticleShading::erode_scale`, 0: no erosion).
     #[uniform(100)]
     pub soft: Vec4,
 }
@@ -421,9 +422,10 @@ fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Ass
     };
     // Depth-biased alpha (soft particles): Db_Enable_Depth_Biased_Alpha permutations fade by the scene depth.
     let soft = params.map(soft_scale).unwrap_or(0.0);
+    let erode = shading.filter(|s| s.erode).map(|s| s.erode_scale.max(1e-3)).unwrap_or(0.0);
     mats.add(FxMaterial {
         base: StandardMaterial { base_color, base_color_texture: image, unlit: true, alpha_mode, cull_mode: None, double_sided: true, fog_enabled: alpha_mode != AlphaMode::Add, ..default() },
-        extension: SoftFade { soft: Vec4::new(soft, 0.0, 0.0, 0.0) },
+        extension: SoftFade { soft: Vec4::new(soft, erode, 0.0, 0.0) },
     })
 }
 
@@ -884,8 +886,9 @@ pub fn spawn_effect(commands: &mut Commands, meshes: &mut Assets<Mesh>, fx: &mut
 
 /// Write the sprite quads of one emitter into its mesh (Bevy space, facing the camera).
 /// `erode`: the material erodes its opacity map by the particle alpha
-/// (`saturate((H - alpha) x Mask_Multiply)`, `ParticleShading::erode`); the importer baked
-/// `saturate(H x Mask_Multiply)` and the vertex alpha becomes `1 - alpha` (APPROXIMATION: the
+/// (`saturate((H - alpha) x Mask_Multiply)`, `ParticleShading::erode`): the vertex alpha stays 1
+/// and the particle alpha rides in the second UV set, which `particle_soft.wgsl` subtracts from
+/// the baked height (earlier APPROXIMATION, replaced: the
 /// sprite fades where the original's shape shrinks).
 fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right: Vec3, cam_up: Vec3, cam_pos: Vec3, erode: bool, beam_target: Option<Vec3>, mesh: &mut Mesh) {
     let n = sim.particles.len();
@@ -894,6 +897,7 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
     let mut col = Vec::with_capacity(n * 4);
     let mut nrm = Vec::with_capacity(n * 4);
     let mut idx = Vec::with_capacity(n * 6);
+    let mut uv_b: Vec<[f32; 2]> = Vec::new();
     let frames = (em.sub_h * em.sub_v).max(1);
     let look = |p: &Particle| particle_look(em, p, sim.loop_time);
     let world_of = |p: &Particle| particle_world(em, xf, p);
@@ -922,7 +926,8 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
         };
         let rel = (p.age / p.life).clamp(0.0, 1.0);
         let (color, alpha, size) = look(p);
-        let alpha = if erode { 1.0 - alpha.clamp(0.0, 1.0) } else { alpha };
+        let erode_alpha = alpha.clamp(0.0, 1.0);
+        let alpha = if erode { 1.0 } else { alpha };
         let world = world_of(p);
         let c = coords::pos(world);
         // Only `PSA_Square` draws Size.X by Size.X (UE3 sprite dynamic data: Size.Y = Size.X for
@@ -979,6 +984,9 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
         let (w, h) = (1.0 / em.sub_h as f32, 1.0 / em.sub_v as f32);
         for (u, v) in [(0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)] {
             uv.push([(fx + u) * w, (fy + v) * h]);
+            if erode {
+                uv_b.push([erode_alpha, 0.0]);
+            }
         }
         idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -990,6 +998,9 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nrm);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
+    if erode {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv_b);
+    }
     mesh.insert_indices(Indices::U32(idx));
 }
 

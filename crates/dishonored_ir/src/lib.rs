@@ -349,8 +349,12 @@ pub struct ParticleShading {
     /// Constant opacity factor (`D_DiffuseColorTweak.a`, `Opacity`...).
     pub opacity: f32,
     /// The particle's alpha erodes the opacity map instead of scaling it
-    /// (`saturate((H - vertex alpha) x Mask_Multiply)`, the height-map blood materials).
+    /// (`saturate((H - vertex alpha) x Mask_Multiply)`, the height-map blood materials): the
+    /// baked alpha is the height H, `erode_scale` the multiplier (`Mask_Multiply`,
+    /// `Max_Opacity`).
     pub erode: bool,
+    #[serde(default)]
+    pub erode_scale: f32,
     /// The shader ignores the texture's opacity: only the vertex alpha (and `opacity`) count
     /// (`Default_Simple_Translucent_PMAT` without `MA_Use_Masked_Alpha`).
     pub vertex_alpha_only: bool,

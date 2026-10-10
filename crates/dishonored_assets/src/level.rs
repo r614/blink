@@ -2228,15 +2228,17 @@ impl Importer<'_> {
             Colour::Expression(i) => chain.expression_textures.get(*i).copied().and_then(|k| self.texture(k)),
             Colour::White => None,
         };
-        let mut shading = ParticleShading { tint: [1.0; 3], opacity: 1.0, erode: r.erode, vertex_alpha_only: false, opacity_missing: false, radial_power: None };
+        let mut shading = ParticleShading { tint: [1.0; 3], opacity: 1.0, erode: r.erode, erode_scale: 0.0, vertex_alpha_only: false, opacity_missing: false, radial_power: None };
+        if r.erode {
+            shading.erode_scale = r.opacity_scale.map(|(n, d)| scalar(n, d)).unwrap_or(1.0);
+        }
         match &r.opacity {
             Opacity::Texture { param, channel } => {
-                // Eroding materials: the multiplier sharpens the map (alpha = saturate(H x M) at
-                // vertex alpha 0); the runtime fades by the vertex alpha (APPROXIMATION).
-                let hi = if r.erode { r.opacity_scale.map(|(n, d)| scalar(n, d)).unwrap_or(1.0) } else { 1.0 };
+                // Eroding materials keep the height H in the alpha; the sprite shader takes
+                // `saturate((H - vertex alpha) x erode_scale)`.
                 let o = tex_key(param).and_then(|k| self.texture(k));
                 match o {
-                    Some(o) => *diffuse = self.merged_opacity(colour, o, *channel, 0.0, hi).or(colour),
+                    Some(o) => *diffuse = self.merged_opacity(colour, o, *channel, 0.0, 1.0).or(colour),
                     None => {
                         // The opacity texture did not resolve (textures off, or a missing
                         // package): the colour with an opaque alpha, opacity from the vertex.
