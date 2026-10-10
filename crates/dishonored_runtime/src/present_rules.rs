@@ -9,10 +9,10 @@ pub use dishonored_fx::*;
 
 use dishonored_audio::contact::ContactSystem;
 use dishonored_audio::cues;
-use dishonored_sim::events::{DamageCause, SimEvent};
+use dishonored_sim::events::SimEvent;
 use dishonored_sim::input::LeftHand;
 use dishonored_sim::state::{PawnKind, PlayerId, PlayerState, ProjectileState};
-use dishonored_world::{CollisionWorld, WorldQuery};
+use dishonored_world::CollisionWorld;
 use glam::{Mat4, Vec3};
 use std::collections::HashMap;
 

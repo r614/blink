@@ -1552,7 +1552,6 @@ pub fn animate_view_rig(
     mut anim: ResMut<ViewAnim>,
     view: Res<SessionView>,
     session: Res<crate::session::Session>,
-    time: Res<Time>,
     mut last_tick: Local<u64>,
     mut cams: Query<(&GameCamera, &mut Transform), (Without<ViewRoot>, Without<ViewJoint>, Without<WeaponJoint>, Without<BoltJoint>)>,
     mut roots: Query<(&mut Transform, &mut Visibility), (With<ViewRoot>, Without<ViewJoint>, Without<WeaponJoint>, Without<WeaponMesh>)>,
