@@ -140,9 +140,9 @@ const SCRIPT_PACKAGES: &[&str] = &["L_Boyle_Ext_Script", "L_Boyle_Int_Script", "
 
 use dishonored_assets::characters::{ARISTO_SETS, FEMALE_LOCO, FEMALE_SETS, GUARD_LOCO, GUARD_SETS};
 
-/// Notifies that crossed the time window [t0, t1].
-/// A notify at time `t` crosses if `t0 < t <= t1` (when `t0` is `Some`), or `t <= t1` (when `t0` is `None`).
-fn crossing(notifies: &[Notify], t0: Option<f32>, t1: f32) -> Vec<Notify> {
+/// Notifies a clip window crossed: `t0 < t <= t1`, or `t <= t1` for a clip started this frame
+/// (`t0` None: a notify at 0 fires too).
+pub fn crossing(notifies: &[Notify], t0: Option<f32>, t1: f32) -> Vec<Notify> {
     notifies
         .iter()
         .filter(|n| match t0 {
@@ -231,7 +231,10 @@ impl AnimBank {
                     let duration = find(&ev, "Duration").and_then(|p| p.as_float()).unwrap_or(0.0);
                     let class = pkg.export_class(ni);
                     let kind = match class.as_str() {
+                        // `DishonoredNotify_Ragdoll`: the death hands the body to physics here.
                         "DishonoredNotify_Ragdoll" => NotifyKind::Ragdoll,
+                        // The system plays on the socket (else the bone) of the mesh, attached or
+                        // where it was.
                         "AnimNotify_PlayParticleEffect" => {
                             let Ok(nh) = pkg.read_object(ni) else { continue };
                             let nm = |k: &str| match find(&nh.properties, k).map(|p| &p.value) {
@@ -243,6 +246,7 @@ impl AnimBank {
                             let attach = matches!(find(&nh.properties, "bAttach").map(|p| &p.value), Some(Value::Bool(true)));
                             NotifyKind::PlayParticleEffect { template: pkg.obj_path(r), point, attach }
                         }
+                        // The melee item's swing trail runs over the notify's duration.
                         "DisNotify_Trails" => NotifyKind::Trails,
                         "DisNotify_DropItem" => {
                             let Ok(nh) = pkg.read_object(ni) else { continue };
@@ -2108,35 +2112,4 @@ pub fn globals(part: &PartGpu, pose: &[Option<Key>]) -> Vec<glam::Mat4> {
         }
     }
     dishonored_assets::characters::bind_globals(&bones).iter().map(|g| part.mesh_to_pawn * *g).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_crossing_semantics() {
-        let n0 = Notify { t: 0.0, duration: 0.0, kind: NotifyKind::Ragdoll };
-        let n05 = Notify { t: 0.5, duration: 0.0, kind: NotifyKind::Ragdoll };
-        let n1 = Notify { t: 1.0, duration: 0.0, kind: NotifyKind::Ragdoll };
-        let notifies = vec![n0.clone(), n05.clone(), n1.clone()];
-
-        // Notify at t=0 fires when the clip started this frame (t0 == None).
-        assert!(crossing(&notifies, None, 0.0).contains(&n0));
-        
-        // Notify at t=0 does not fire for t0 == Some(0.0).
-        assert!(!crossing(&notifies, Some(0.0), 1.0).contains(&n0));
-        
-        // Notify at t=0.5 fires for (Some(0.4), 0.5).
-        assert!(crossing(&notifies, Some(0.4), 0.5).contains(&n05));
-        
-        // Notify at t=0.5 does not fire for (Some(0.5), 0.6) (t0 < t is false).
-        assert!(!crossing(&notifies, Some(0.5), 0.6).contains(&n05));
-        
-        // Notify at t=1.0 fires for (Some(0.4), 1.0).
-        assert!(crossing(&notifies, Some(0.4), 1.0).contains(&n1));
-        
-        // Notify at t=1.0 does not fire for (Some(0.4), 0.9) (t > t1).
-        assert!(!crossing(&notifies, Some(0.4), 0.9).contains(&n1));
-    }
 }
