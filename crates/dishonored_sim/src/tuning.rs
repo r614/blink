@@ -201,6 +201,17 @@ pub struct CombatTuning {
     pub assassination_times: [f32; 4],
     #[serde(default = "drop_assassination_times")]
     pub drop_assassination_times: [f32; 4],
+    /// The synced short fatality of a killing blow (`DisTweaks_MeleeAttackPlayer`
+    /// `m_ForehandKill_Synced` / `m_BackhandKill_Synced`, 0x00C0A590): its chance
+    /// (`m_fChanceOfSyncedAttack`), the facing the victim needs (0x00BBF9D0 with 45 degrees) and
+    /// the masters' `AnimStateExit` (`Sword_Ready_Fatality_SmallFront_{Right_A, Right_B, Left_A,
+    /// Left_B}_Master` of `Ply_Sword_Fatality_as`: forehand A / B, backhand A / B).
+    #[serde(default = "synced_attack_chance")]
+    pub synced_attack_chance: f32,
+    #[serde(default = "synced_attack_angle")]
+    pub synced_attack_angle: f32,
+    #[serde(default = "short_fatality_times")]
+    pub short_fatality_times: [f32; 4],
     // --- sword timings (LIKELY: Ply_Sword_Attack_as / Ply_Sword_Versus_as notifies;
     // stagger and recoil still SPECULATIVE) ---
     /// Uniform swing phases of AI-driven pawns (guards, civilians): a port approximation,
@@ -497,6 +508,15 @@ fn assassination_times() -> [f32; 4] {
 fn drop_assassination_times() -> [f32; 4] {
     [1.900, 1.900, 1.900, 1.973]
 }
+fn synced_attack_chance() -> f32 {
+    1.0
+}
+fn synced_attack_angle() -> f32 {
+    45.0
+}
+fn short_fatality_times() -> [f32; 4] {
+    [1.299, 1.322, 1.279, 1.272]
+}
 
 fn v(map: &std::collections::BTreeMap<String, f32>, key: &str, default: f32) -> f32 {
     map.get(key).copied().unwrap_or(default)
@@ -540,6 +560,10 @@ impl CombatTuning {
             // Back 1.886; DropFront / DropLeft / DropRight 1.900, DropBack 1.973.
             assassination_times: assassination_times(),
             drop_assassination_times: drop_assassination_times(),
+            // Twk_Inv_SwordCorvo `m_fChanceOfSyncedAttack` 1.0; Ply_Sword_Fatality_as AnimStateExit.
+            synced_attack_chance: synced_attack_chance(),
+            synced_attack_angle: synced_attack_angle(),
+            short_fatality_times: short_fatality_times(),
             // "Small" attacks: DishonoredNotify_AttackZone starts 0.104-0.158 s (mean 0.13),
             // lasts 0.186-0.243 s (mean 0.21); AttackInterruptable at ~0.6 s.
             swing_startup: 0.13,

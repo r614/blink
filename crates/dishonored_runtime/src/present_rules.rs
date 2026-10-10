@@ -1196,6 +1196,10 @@ pub enum HitKind {
     Swing,
     Parried,
     Assassinated,
+    /// A drop assassination's victim (`DisNPCAnim_AssassinationDrop`).
+    AssassinatedDrop,
+    /// A synced short fatality's victim: backhand or forehand, the group (A / B).
+    ShortFatality { backhand: bool, group: u8 },
     /// Knocked out by something other than a choke (sleep dart): falls like a death.
     KnockedOut,
     /// Choke victim: the choke ended (won: knocked out, lost: broke free, cancelled).
@@ -1222,12 +1226,17 @@ pub fn collect_hits(events: &[SimEvent], all: &[&PlayerState]) -> HashMap<u32, V
     for e in events {
         match *e {
             E::Damage { victim, attacker, cause, .. } => {
+                // A sword kill the attacker plays as a paired move (`SwordState::assassination_move`
+                // 8..11): the victim plays its slave.
+                let synced = attacker.and_then(|a| all.iter().find(|p| p.id == a)).filter(|a| a.sword.phase == dishonored_sim::state::SwordPhase::Assassinating && a.sword.assassination_target == Some(victim) && a.sword.assassination_move >= 8).map(|a| a.sword.assassination_move - 8);
                 let k = match cause {
+                    C::Sword | C::SwordCounter if synced.is_some() => synced.map(|m| H::ShortFatality { backhand: m >= 2, group: m % 2 }),
                     C::Sword | C::SwordCounter => Some(H::Melee),
                     C::Pistol | C::Crossbow => Some(H::Projectile),
                     C::PistolHeadshot | C::CrossbowHeadshot => Some(H::Headshot),
                     C::Windblast => Some(H::Windblast),
-                    C::Assassination | C::DropAssassination => Some(H::Assassinated),
+                    C::Assassination => Some(H::Assassinated),
+                    C::DropAssassination => Some(H::AssassinatedDrop),
                     _ => None,
                 };
                 if let Some(k) = k {

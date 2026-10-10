@@ -1211,6 +1211,12 @@ pub fn animate(bank: &mut AnimBank, lib: &CharacterLibrary, model: usize, profil
             }
             HitKind::Parried if p.alive => bank.chain(profile, NpcAnim::Parry, Some(0), 0.0, true, r, "parry"),
             HitKind::Assassinated => bank.chain(profile, NpcAnim::Assassination, None, q, i.armed, r, "assassinated"),
+            // The drop assassination's and the synced short fatality's slaves (kept as the death).
+            HitKind::AssassinatedDrop => bank.chain(profile, NpcAnim::AssassinationDrop, None, q, i.armed, r, "assassinated"),
+            HitKind::ShortFatality { backhand, group } => {
+                let a = if *backhand { NpcAnim::ShortFatalityBackhand } else { NpcAnim::ShortFatalityForehand };
+                bank.chain(profile, a, Some(*group as usize), 0.0, i.armed, r, "assassinated")
+            }
             // A sleep dart's "death" (`m_bSlowDeathOnly`): the death sequence, then the ragdoll.
             HitKind::KnockedOut => bank.chain(profile, NpcAnim::Death, None, q, i.armed, r, "dead").map(|mut c| {
                 c.hold = true;

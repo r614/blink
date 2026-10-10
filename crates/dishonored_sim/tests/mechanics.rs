@@ -499,6 +499,40 @@ fn sword_damage_is_the_attribute_not_a_health_ratio() {
     assert!(!r.events.iter().any(|e| matches!(e, SimEvent::Death { .. })), "an InCombat guard is not assassinated");
 }
 
+/// The player's killing blow on an NPC facing it (0x00C0A590, `m_fChanceOfSyncedAttack` 1): the
+/// synced short fatality (`m_ForehandKill_Synced`), the player locked in its master for the
+/// clip's `AnimStateExit`; from behind (0x00BBF9D0 refuses past 45 degrees) a plain kill.
+#[test]
+fn a_killing_blow_is_a_synced_short_fatality() {
+    use dishonored_sim::state::{SwordPhase, awareness};
+    let t = cfg().tuning;
+    for (yaw, synced) in [(180.0, true), (0.0, false)] {
+        let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.)]);
+        with_guard(&mut r, 100, Vec3::new(120., 0., STAND_Z + 1.), yaw, awareness::IN_COMBAT);
+        r.settle();
+        r.state.player_mut(100).unwrap().vitals.health = 10.0;
+        r.step(&[(1, input(0., 0, buttons::PRIMARY)), (100, input(yaw, 0, 0))]);
+        let mut paired = None;
+        for _ in 0..40 {
+            r.step(&[(1, input(0., 0, 0)), (100, input(yaw, 0, 0))]);
+            let p = r.p(1);
+            if p.sword.phase == SwordPhase::Assassinating && paired.is_none() {
+                paired = Some((p.sword.assassination_move, p.sword.assassination_target, p.sword.lock_time));
+            }
+        }
+        assert!(!r.p(100).alive, "yaw {yaw}: the blow kills");
+        match paired {
+            Some((m, target, lock)) => {
+                assert!(synced, "yaw {yaw}: no fatality from behind");
+                assert!((8..=9).contains(&m), "a first swing is the forehand: {m}");
+                assert_eq!(target, Some(100));
+                assert!((lock - t.short_fatality_times[(m - 8) as usize]).abs() < 1e-6);
+            }
+            None => assert!(!synced, "yaw {yaw}: expected the synced fatality"),
+        }
+    }
+}
+
 /// melee.md F4: the assassinate context (0x00C0D8F0) takes an NPC on any side within its reach
 /// (275) when `m_AssassinateOnAwareness` allows its awareness, and refuses running targets; the
 /// kill plays the move set of the side (0x00BBA970), whose clip sets the lock.

@@ -95,6 +95,7 @@ const SETS: &[&str] = &[
     "Ply_Sword_Versus_as",
     "Ply_Sword_Hit_as",
     "Ply_Sword_Assassination_as",
+    "Ply_Sword_Fatality_as",
     "Ply_Pistol_as",
     "Ply_Crossbow_as",
     "Ply_Guns_as",
@@ -117,6 +118,7 @@ const CLIPS: &[&str] = &[
     "Sword_Stun_In", "Sword_Stun_Loop", "Sword_Ready_Assassination_Generic",
     "Sword_Ready_Assassination_Front_Master", "Sword_Ready_Assassination_Left_Master", "Sword_Ready_Assassination_Right_Master", "Sword_Ready_Assassination_Back_Master",
     "Sword_Ready_Assassination_DropFront_Master", "Sword_Ready_Assassination_DropLeft_Master", "Sword_Ready_Assassination_DropRight_Master", "Sword_Ready_Assassination_DropBack_Master",
+    "Sword_Ready_Fatality_SmallFront_Right_A_Master", "Sword_Ready_Fatality_SmallFront_Right_B_Master", "Sword_Ready_Fatality_SmallFront_Left_A_Master", "Sword_Ready_Fatality_SmallFront_Left_B_Master",
     "Sword_Choke_In_Master", "Sword_Choke_Loop_Master", "Sword_Choke_Win_Master", "Sword_Choke_Lose_Master", "Sword_Choke_Cancel_Master", "Sword_Choke_CarryCorpse_Master",
     "Head_Rope_Climb", "Empty_SwimIdle", "Empty_SwimN",
     // The held gun's aim (additive, `Ply_Guns_as`).
@@ -1825,9 +1827,11 @@ pub fn animate_view_rig(
     }
 }
 
-/// `Ply_Sword_Assassination_as` masters by `SwordState::assassination_move` (front, left, right,
-/// back; then the drop assassinations).
-const ASSASSINATION_MASTERS: [&str; 8] = [
+/// Paired-move masters by `SwordState::assassination_move`: `Ply_Sword_Assassination_as` (front,
+/// left, right, back; then the drop assassinations), then the synced short fatalities of
+/// `Ply_Sword_Fatality_as` (`ShortFatality_Forehand{A,B}` / `Backhand{A,B}`: the slave groups'
+/// `Generic_Fatality_SmallFront_{Right,Left}_{A,B}_Slave` name their masters).
+const ASSASSINATION_MASTERS: [&str; 12] = [
     "Sword_Ready_Assassination_Front_Master",
     "Sword_Ready_Assassination_Left_Master",
     "Sword_Ready_Assassination_Right_Master",
@@ -1836,6 +1840,10 @@ const ASSASSINATION_MASTERS: [&str; 8] = [
     "Sword_Ready_Assassination_DropLeft_Master",
     "Sword_Ready_Assassination_DropRight_Master",
     "Sword_Ready_Assassination_DropBack_Master",
+    "Sword_Ready_Fatality_SmallFront_Right_A_Master",
+    "Sword_Ready_Fatality_SmallFront_Right_B_Master",
+    "Sword_Ready_Fatality_SmallFront_Left_A_Master",
+    "Sword_Ready_Fatality_SmallFront_Left_B_Master",
 ];
 
 /// A body left where its choke or carry ended (Dishonored-space root position and yaw), kept

@@ -359,6 +359,19 @@ pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, g: &Ga
             // the attacker is still not seen (0x00C33DD0 re-tests 0x00BBEF40).
             let offscreen = attacker.sword.offscreen_to == Some(victim.id) && !seen_by(&victim, &attacker, world, mv);
             let dmg = app_ceil(melee_damage(&attacker, &victim, offscreen, g, t));
+            // The player's killing blow on an NPC (0x00C0A590): the synced short fatality
+            // (`m_ForehandKill_Synced` on a first swing, `m_BackhandKill_Synced` on a chained one, A
+            // or B at random), the attacker locked in its master like an assassination, the victim
+            // in the slave (`DisNPCAnim_ShortFatality_*`); the swing's damage still kills.
+            if let Some(m) = synced_kill(&mut state.players[ai], &victim, dmg, t) {
+                let a = &mut state.players[ai];
+                a.sword.phase = SwordPhase::Assassinating;
+                a.sword.timer = 0.0;
+                a.sword.lock_time = t.short_fatality_times[(m - 8) as usize];
+                a.sword.assassination_target = Some(victim.id);
+                a.sword.assassination_move = m;
+                a.velocity = Vec3::ZERO;
+            }
             let v = &mut state.players[vi];
             crate::noise::emit(events, &noise.sword_body, v.position, SoundCategory::SwordImpact, attacker.id, 0.0);
             apply_damage(v, dmg, Some(attacker.id), DamageCause::Sword, events, vitals);
@@ -369,6 +382,33 @@ pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, g: &Ga
             }
         }
     }
+}
+
+/// The synced short fatality of a swing (0x00C0A590), as a paired move (`assassination_move`
+/// 8..11): a player's swing on an NPC that kills it (health no more than the damage, or a
+/// vulnerable target: the port's post-parry stagger stands for `0x00B4A0E0`'s vulnerability
+/// window) when the victim faces the attacker within `synced_attack_angle` (0x00BBF9D0: the
+/// victim's heading against the attacker's reversed, in the plane) and is free to be synced (the
+/// victim state's sync flag, 0x00B73870: a standing pawn in its normal condition), with chance
+/// `m_fChanceOfSyncedAttack`. Forehand on the first swing of a chain, backhand on the chained
+/// one (the port's swing cycle: even clips forehand), A or B at random.
+fn synced_kill(a: &mut PlayerState, v: &PlayerState, dmg: f32, t: &CombatTuning) -> Option<u8> {
+    if a.kind != PawnKind::Human || v.kind == PawnKind::Human || !v.alive || v.condition != Condition::Normal || v.carried_by.is_some() {
+        return None;
+    }
+    if dmg < v.vitals.health && v.sword.phase != SwordPhase::Staggered {
+        return None;
+    }
+    let (fa, fv) = (forward_vector(a.yaw).truncate(), forward_vector(v.yaw).truncate());
+    if (-fa).normalize_or_zero().dot(fv.normalize_or_zero()) < t.synced_attack_angle.to_radians().cos() {
+        return None;
+    }
+    if a.roll() >= t.synced_attack_chance {
+        return None;
+    }
+    let backhand = a.sword.swing_clip % 2 == 1;
+    let b = if a.roll() < 0.5 { 0 } else { 1 };
+    Some(8 + if backhand { 2 } else { 0 } + b)
 }
 
 /// Whether the attacker's view takes in `v` and nothing blocks the melee trace (the sim's
