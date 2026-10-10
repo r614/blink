@@ -2557,6 +2557,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dishonored_fx"
+version = "0.1.0"
+dependencies = [
+ "dishonored_ir",
+ "glam",
+]
+
+[[package]]
 name = "dishonored_ir"
 version = "0.1.0"
 dependencies = [
@@ -2668,6 +2676,7 @@ dependencies = [
  "dishonored_bots",
  "dishonored_content",
  "dishonored_conversation",
+ "dishonored_fx",
  "dishonored_ir",
  "dishonored_kismet",
  "dishonored_mission",
@@ -4637,6 +4646,7 @@ dependencies = [
  "dishonored_audio",
  "dishonored_content",
  "dishonored_conversation",
+ "dishonored_fx",
  "dishonored_ir",
  "dishonored_mission",
  "dishonored_multiplayer",

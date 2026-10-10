@@ -14,7 +14,7 @@ description = "Differential oracle CLI: coverage scan, cached original answers v
 #   cargo build --release -p oracle --no-default-features
 default = ["import", "scenarios"]
 import = ["dep:dishonored_content"]
-scenarios = ["import", "dep:dishonored_sim", "dep:dishonored_multiplayer", "dep:dishonored_mission", "dep:dishonored_ai", "dep:dishonored_audio", "dep:dishonored_assets", "dep:dishonored_conversation"]
+scenarios = ["import", "dep:dishonored_sim", "dep:dishonored_multiplayer", "dep:dishonored_mission", "dep:dishonored_ai", "dep:dishonored_audio", "dep:dishonored_assets", "dep:dishonored_conversation", "dep:dishonored_fx"]
 
 [dependencies]
 anyhow.workspace = true
@@ -34,3 +34,4 @@ dishonored_ai = { workspace = true, optional = true }
 dishonored_conversation = { workspace = true, optional = true }
 dishonored_audio = { path = "../../crates/dishonored_audio", optional = true }
 dishonored_assets = { workspace = true, optional = true }
+dishonored_fx = { workspace = true, optional = true }

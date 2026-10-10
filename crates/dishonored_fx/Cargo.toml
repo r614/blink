@@ -1,0 +1,10 @@
+[package]
+name = "dishonored_fx"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "UE3 Cascade particle emitter simulation over cooked ParticleSystem data"
+
+[dependencies]
+dishonored_ir.workspace = true
+glam.workspace = true
