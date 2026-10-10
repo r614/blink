@@ -107,7 +107,9 @@ Reported from play testing, not yet fixed:
   - particles start early or late against their events and stay too long.
 - **Audio**:
   - throwing a grenade plays a gunshot;
-  - combat sounds are out of sync with their events.
+  - combat sounds are out of sync with their events;
+  - game sounds keep playing while the game is paused or minimized. The original pauses when
+    its window loses focus (`BaseEngine.ini` `[Engine.Engine] bPauseOnLossOfFocus=TRUE`).
 - **NPC animation**:
   - NPC animations are very jerky;
   - alerted and fighting NPCs move out of step with their animations.
