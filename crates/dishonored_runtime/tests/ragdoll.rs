@@ -16,7 +16,7 @@ fn elite_guard_settles_on_the_floor() {
     let part = &m.parts[0];
     let g0: Vec<Mat4> = dishonored_assets::characters::bind_globals(&part.bones).iter().map(|g| part.mesh_to_pawn * *g).collect();
     let a = dishonored_assets::npc_anim::load_physics_asset(&c, &("L_Boyle_Ext_Script".into(), "Npc_EliteGuard.Physics.Skm_EliteGuard_Physics".into())).unwrap();
-    let mut r = Ragdoll::new(&a, &part.bones, &g0, &g0, &|_, _| -hh, &[], -980.0).unwrap();
+    let mut r = Ragdoll::new(&a, &part.bones, &g0, &g0, &g0, &|_, _| -hh, &[], -980.0).unwrap();
     r.settle();
     for b in &r.bodies {
         assert!(b.pos.is_finite(), "{}", part.bones[b.bone].name);
@@ -58,7 +58,7 @@ fn elite_guard_settles_on_a_step() {
     let g0: Vec<Mat4> = dishonored_assets::characters::bind_globals(&part.bones).iter().map(|g| part.mesh_to_pawn * *g).collect();
     let a = dishonored_assets::npc_anim::load_physics_asset(&c, &("L_Boyle_Ext_Script".into(), "Npc_EliteGuard.Physics.Skm_EliteGuard_Physics".into())).unwrap();
     let floor = |x: f32, _y: f32| if x < 0.0 { -hh } else { -hh + 30.0 };
-    let mut r = Ragdoll::new(&a, &part.bones, &g0, &g0, &floor, &[], -980.0).unwrap();
+    let mut r = Ragdoll::new(&a, &part.bones, &g0, &g0, &g0, &floor, &[], -980.0).unwrap();
     r.settle();
     for b in &r.bodies {
         let f = r.floor.at(b.pos.x, b.pos.y);
@@ -95,7 +95,7 @@ fn chain_falls_against_a_wall() {
     let floor = |_: f32, _: f32| -8.0;
     let walls = wall_at_x(20.0);
     let run = |walls: &[[Vec3; 3]]| {
-        let mut r = Ragdoll::new(&asset, &part, &g0, &g_prev, &floor, walls, -980.0).unwrap();
+        let mut r = Ragdoll::new(&asset, &part, &g0, &g0, &g_prev, &floor, walls, -980.0).unwrap();
         r.settle();
         r.bodies.iter().map(|b| b.pos).collect::<Vec<Vec3>>()
     };

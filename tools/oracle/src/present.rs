@@ -338,10 +338,11 @@ impl Presenter {
         }
         // Animation reactions.
         let all: Vec<&PlayerState> = players.iter().collect();
-        let mut hits: Vec<(u32, Vec<(HitKind, Vec3)>)> = collect_hits(events, &all).into_iter().collect();
+        let stamped_events: Vec<(u64, SimEvent)> = events.iter().map(|e| (world.tick, *e)).collect();
+        let mut hits: Vec<(u32, Vec<(HitKind, Vec3, u64)>)> = collect_hits(&stamped_events, &all).into_iter().collect();
         hits.sort_by_key(|h| h.0);
         for (id, v) in hits {
-            for (k, _) in v {
+            for (k, _, _) in v {
                 out.push(PresentEvent { kind: "Anim", object: id, name: format!("{k:?}"), detail: String::new() });
             }
         }
