@@ -169,10 +169,10 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             }
             let out = game.step(&inputs, world, sim);
             let w = game.world();
-            // Events are produced during step_world, before the tick is incremented. Since the
-            // tick is incremented at the end of step_world, events should be stamped with the
-            // tick value before the increment (the tick whose step produced them).
-            let event_tick = w.tick.saturating_sub(1);
+            // Events carry the tick `view.tick` reports for this step (`step_world` increments
+            // the tick at its end): a reaction started in the same frame has age 0, and the age
+            // only grows when presentation runs behind the simulation.
+            let event_tick = w.tick;
             view.audio_events.extend(out.events.iter().copied());
             view.anim_events.extend(out.events.iter().map(|e| (event_tick, *e)));
             for e in &out.events {
