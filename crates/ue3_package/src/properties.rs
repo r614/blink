@@ -335,6 +335,20 @@ pub fn format_value(pkg: &Package, v: &Value) -> String {
         }
         Value::Array(b) => {
             let n = b.get(..4).map(|x| i32::from_le_bytes(x.try_into().unwrap())).unwrap_or(-1);
+            // An array of 8-byte elements whose first words are name indices and second small
+            // instance numbers: names (`array<name>`).
+            if n > 0 && b.len() == 4 + 8 * n as usize {
+                let names: Option<Vec<String>> = b[4..]
+                    .chunks_exact(8)
+                    .map(|c| {
+                        let (i, k) = (i32::from_le_bytes(c[..4].try_into().unwrap()), i32::from_le_bytes(c[4..].try_into().unwrap()));
+                        (i >= 0 && (i as usize) < pkg.names.len() && (0..1000).contains(&k)).then(|| if k > 0 { format!("{}_{}", pkg.names[i as usize].name, k - 1) } else { pkg.names[i as usize].name.clone() })
+                    })
+                    .collect();
+                if let Some(v) = names {
+                    return format!("names{v:?}");
+                }
+            }
             format!("[{n} elems, {} bytes]", b.len())
         }
         Value::Raw(t, b) => format!("<{t} {} bytes>", b.len()),

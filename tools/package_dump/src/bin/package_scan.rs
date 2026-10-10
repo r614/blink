@@ -1,6 +1,7 @@
 //! Open every package in a directory and report parse failures and class histograms.
 //!
-//! `package_scan <dir> [--class NAME] [--props] [--prefix L_Boyle]`
+//! `package_scan <dir> [--class NAME] [--name NAME] [--props] [--prefix L_Boyle]`
+//! `--name` lists the packages whose name table holds NAME (case-insensitive).
 //! `--props` additionally parses the UObject header + tagged properties of every
 //! non-script export and reports failures by class.
 use anyhow::Result;
@@ -20,6 +21,7 @@ fn main() -> Result<()> {
     let filter = opt("--class").map(|s| s.to_ascii_lowercase());
     let prefix = opt("--prefix").map(|s| s.to_ascii_lowercase());
     let check_props = args.iter().any(|a| a == "--props");
+    let name = opt("--name").map(|s| s.to_ascii_lowercase());
     let mut ok = 0;
     let mut failed = 0;
     let mut classes: BTreeMap<String, usize> = BTreeMap::new();
@@ -40,6 +42,11 @@ fn main() -> Result<()> {
         match Package::open(&p) {
             Ok(pkg) => {
                 ok += 1;
+                if let Some(n) = &name {
+                    if pkg.names.iter().any(|e| e.name.to_ascii_lowercase() == *n) {
+                        println!("name {n} in {}", pkg.name);
+                    }
+                }
                 for i in 0..pkg.exports.len() {
                     let c = pkg.export_class(i);
                     if let Some(f) = &filter {
