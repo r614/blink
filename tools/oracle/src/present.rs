@@ -358,11 +358,101 @@ fn nearest(players: &[PlayerState], at: Vec3) -> PlayerId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::path::Path;
 
     #[test]
     fn rules_compile_with_the_runtime_tables() {
         assert!(GAMEPLAY_PARTICLES.contains(&"Vfx_GamePlay.Blink.Blink_Ground_01"));
         assert!(!one_shot_finished(&[EmitterSim::default()]), "a fresh emitter (time 0, not done) is not finished");
         assert!(one_shot_finished(&[EmitterSim { done: true, ..Default::default() }]));
+    }
+
+    #[test]
+    fn fx_simulation_matches_the_golden_hashes() {
+        let cache_root = dishonored_oracle::cache::root();
+        let Ok(lib) = FxLibrary::load(&cache_root) else {
+            eprintln!("skipping fx_simulation test: no particle systems decoded");
+            return;
+        };
+
+        let golden_path = Path::new("fixtures/fx_golden.json");
+        let mut golden: BTreeMap<String, String> = if golden_path.exists() {
+            match std::fs::read_to_string(golden_path) {
+                Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+                Err(_) => BTreeMap::new(),
+            }
+        } else {
+            BTreeMap::new()
+        };
+
+        let mut result = BTreeMap::new();
+        for (path, sys) in &lib.systems {
+            let mut seed: u64 = 0x1234_5678;
+            let mut rnd = || {
+                use dishonored_fx::next_rand;
+                next_rand(&mut seed)
+            };
+
+            let mut sims = std::iter::repeat_with(EmitterSim::default)
+                .take(sys.system.emitters.len())
+                .collect::<Vec<_>>();
+            let xf = Mat4::IDENTITY;
+
+            for _ in 0..120 {
+                for (em, sim) in sys.system.emitters.iter().zip(sims.iter_mut()) {
+                    dishonored_fx::step(em, sim, &xf, 1.0 / 60.0, &mut rnd, None);
+                }
+                dishonored_fx::dispatch_events(&sys.system.emitters, &mut sims, &xf, &mut rnd);
+            }
+
+            for (em_idx, sim) in sims.iter().enumerate() {
+                let mut hash = dishonored_oracle::cache::fnv64(&[]);
+                for p in &sim.particles {
+                    let pos_str = format!("{:.3},{:.3},{:.3}", p.pos.x, p.pos.y, p.pos.z);
+                    let vel_str = format!("{:.3},{:.3},{:.3}", p.vel.x, p.vel.y, p.vel.z);
+                    let size_str = format!("{:.3},{:.3},{:.3}", p.size.x, p.size.y, p.size.z);
+                    let color_str = format!("{:.3},{:.3},{:.3}", p.color.x, p.color.y, p.color.z);
+                    let alpha_str = format!("{:.3}", p.alpha);
+                    let rot_str = format!("{:.3}", p.rot);
+                    let age_str = format!("{:.3}", p.age);
+                    let life_str = format!("{:.3}", p.life);
+                    let particle_str = format!("{};{};{};{};{};{};{};{}", pos_str, vel_str, size_str, color_str, alpha_str, rot_str, age_str, life_str);
+                    hash = dishonored_oracle::cache::fnv64_more(hash, particle_str.as_bytes());
+                }
+
+                let emitter_str = format!("time={:.3}|loops={}|done={}", sim.time, sim.loops, sim.done);
+                hash = dishonored_oracle::cache::fnv64_more(hash, emitter_str.as_bytes());
+
+                let key = format!("{}:emitter_{}", path, em_idx);
+                result.insert(key, format!("{:016x}", hash));
+            }
+        }
+
+        let is_new = golden.is_empty();
+        let mut mismatches = Vec::new();
+
+        for (key, hash) in &result {
+            match golden.get(key) {
+                None if !is_new => mismatches.push(format!("new: {}", key)),
+                Some(old) if old != hash => mismatches.push(format!("{}: {} != {}", key, old, hash)),
+                _ => {},
+            }
+        }
+
+        for key in golden.keys() {
+            if !result.contains_key(key) && !is_new {
+                mismatches.push(format!("removed: {}", key));
+            }
+        }
+
+        if is_new {
+            let mut sorted_result = result;
+            std::fs::create_dir_all("fixtures").ok();
+            std::fs::write(golden_path, serde_json::to_string_pretty(&sorted_result).unwrap()).unwrap();
+            println!("generated {}: {} emitter systems", golden_path.display(), sorted_result.len());
+        } else {
+            assert!(mismatches.is_empty(), "particle simulation hashes differ:\n{}", mismatches.join("\n"));
+        }
     }
 }
