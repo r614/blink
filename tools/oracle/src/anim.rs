@@ -51,6 +51,11 @@ struct FullFrame {
     tick: u64,
     bones: HashMap<String, BoneTransform>,
     nodes: HashMap<String, NodeState>,
+    /// The bones this frame's `cs` rewrote. The original recomposes `SpaceBases` only for the
+    /// bones the mesh's current LOD requires (on detect_1300, 37 of 118 on most ticks), and the
+    /// delta encoding carries the others' stale values forward: a comparison reads a bone only
+    /// in the frames that refresh it (ORACLE.md "Comparing the port").
+    fresh: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -184,6 +189,7 @@ fn reconstruct_frames(body: &CaptureBody) -> Result<Vec<FullFrame>> {
         let tick = cf.t.unwrap_or(0);
 
         // Update bones (delta encoded)
+        let mut fresh = std::collections::HashSet::new();
         if let Some(cs) = &cf.cs {
             for (bone_idx, values) in cs {
                 if values.len() >= 7 {
@@ -205,6 +211,7 @@ fn reconstruct_frames(body: &CaptureBody) -> Result<Vec<FullFrame>> {
                         .find(|(idx, _)| idx.to_string() == *bone_idx)
                         .map(|(_, name)| name.clone())
                         .unwrap_or_else(|| format!("bone_{}", bone_idx));
+                    fresh.insert(bone_name.clone());
                     last_bones.insert(bone_name, BoneTransform { q, t });
                 }
             }
@@ -253,6 +260,7 @@ fn reconstruct_frames(body: &CaptureBody) -> Result<Vec<FullFrame>> {
             tick,
             bones: last_bones.clone(),
             nodes: last_nodes.clone(),
+            fresh,
         });
     }
 
@@ -394,7 +402,7 @@ fn find_best_offset(
 
             for bone in bones {
                 if let (Some(c_bone), Some(p_bone)) =
-                    (cf.bones.get(bone), pf.bones.iter().find(|b| &b.name == bone))
+                    (cf.fresh.contains(bone).then(|| cf.bones.get(bone)).flatten(), pf.bones.iter().find(|b| &b.name == bone))
                 {
                     let angle = bone_angle_degrees(c_bone.q, p_bone.q);
                     total_error += angle;
@@ -451,7 +459,7 @@ fn compare_animations(
         let (mut tick_sum, mut tick_n, mut tick_worst) = (0.0f32, 0usize, (String::new(), 0.0f32));
         for bone in bones {
             if let (Some(c_bone), Some(p_bone)) =
-                (cf.bones.get(bone), pf.bones.iter().find(|b| &b.name == bone))
+                (cf.fresh.contains(bone).then(|| cf.bones.get(bone)).flatten(), pf.bones.iter().find(|b| &b.name == bone))
             {
                 let angle = bone_angle_degrees(c_bone.q, p_bone.q);
                 let trans_diff = ((c_bone.t[0] - p_bone.t[0]).powi(2)
@@ -810,6 +818,9 @@ fn compare_clip_frames(
         // Compare
         let (mut frame_sum, mut frame_n, mut frame_worst) = (0.0f32, 0usize, (String::new(), 0.0f32));
         for bone_name in compare_bones {
+            if !frame.fresh.contains(bone_name) {
+                continue;
+            }
             if let Some(bone_idx) = bones.iter().position(|b| b.name.eq_ignore_ascii_case(bone_name)) {
                 if let Some(capture_bone) = frame.bones.get(bone_name) {
                     let capture_q = Quat::from_array(capture_bone.q);
@@ -937,7 +948,7 @@ fn print_clip_report(
     best_mean: f32,
     bones: &[String],
 ) {
-    println!("Frames compared: {}, skipped: {}", stats_0.frames_compared, stats_0.frames_skipped);
+    println!("Frames compared: {}, skipped: {} (a bone counts only in the frames that refresh it: the original recomposes the LOD's bones only)", stats_0.frames_compared, stats_0.frames_skipped);
     println!("Bones: {}", bones.len());
     println!();
 
@@ -1107,7 +1118,7 @@ mod tests {
             [q.x, q.y, q.z, q.w]
         };
         let capture_frames: Vec<FullFrame> = (0..8)
-            .map(|i| FullFrame { tick: i as u64, bones: vec![("bone_0".to_string(), BoneTransform { q: turn(i), t: [0.0; 3] })].into_iter().collect(), nodes: HashMap::new() })
+            .map(|i| FullFrame { tick: i as u64, bones: vec![("bone_0".to_string(), BoneTransform { q: turn(i), t: [0.0; 3] })].into_iter().collect(), nodes: HashMap::new(), fresh: std::iter::once("bone_0".to_string()).collect() })
             .collect();
         let port_frames: Vec<PortFrame> = (0..5)
             .map(|i| PortFrame { tick: (i + 3) as u64, id: 1, pos: [0.0; 3], yaw: 0.0, modifier: None, vel: None, phase: None, full: None, upper: None, ragdoll: false, bones: vec![PortBone { name: "bone_0".into(), q: turn(i), t: [0.0; 3] }] })
