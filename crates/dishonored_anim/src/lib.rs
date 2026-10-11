@@ -43,6 +43,6 @@ pub mod lookat;
 pub mod pose;
 pub mod tree;
 
-pub use clip::{AnimSets, BakedClip, ClipRef, Clips, SetFlags};
+pub use clip::{AnimSets, BakedClip, ClipRef, Clips, SetFlags, bind_tracks};
 pub use pose::Pose;
 pub use tree::{AnimTreeInstance, FilterTarget, LocoInput, LookInput, SeqState, SlotAction, SlotRequest, StackChannel, TreeInputs, TreeShape, TreeState};

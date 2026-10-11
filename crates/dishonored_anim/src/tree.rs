@@ -572,7 +572,14 @@ impl AnimTreeInstance {
 }
 
 impl TreeState {
-    fn update(&mut self, shape: &TreeShape, clips: &dyn Clips, inputs: &TreeInputs, dt: f32) {
+    /// The last update's root motion ([`AnimTreeInstance::root_delta`]).
+    pub fn root_delta(&self) -> (Vec3, f32) {
+        self.root_motion
+    }
+
+    /// [`AnimTreeInstance::update`] on a state kept apart from its shape (the simulation keeps
+    /// the state per NPC and shares the shape); `shape` must be the one the state was made from.
+    pub fn update(&mut self, shape: &TreeShape, clips: &dyn Clips, inputs: &TreeInputs, dt: f32) {
         self.root_motion = (Vec3::ZERO, 0.0);
         for n in self.nodes.iter_mut() {
             if let Some(s) = n.seq.as_mut() {
@@ -608,7 +615,8 @@ impl TreeState {
         }
     }
 
-    fn pose(&self, shape: &TreeShape, clips: &dyn Clips) -> Pose {
+    /// [`AnimTreeInstance::pose`] of a state kept apart from its shape.
+    pub fn pose(&self, shape: &TreeShape, clips: &dyn Clips) -> Pose {
         match shape.root {
             Some(r) => self.eval(shape, r, clips, Fill::Bind),
             None => shape.bind.clone(),
