@@ -11,7 +11,7 @@ fn main() -> Result<()> {
     if let Some(dir) = std::path::Path::new(&out).parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&out, serde_json::to_string_pretty(&cfg)?)?;
+    std::fs::write(&out, serde_json::to_string(&cfg)?)?;
     println!("wrote {out}");
     println!("{:#?}", cfg.movement);
     Ok(())
