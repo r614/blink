@@ -89,13 +89,14 @@ pub fn read_package(pkg: &Package) -> HashMap<String, ClipNotifies> {
 }
 
 impl ClipNotifies {
-    /// Notifies with time in (from, to] (sequence seconds); a looping clip that wrapped
-    /// passes `to < from` and gets both ends.
+    /// Notifies with time in [from, to) (sequence seconds), the original's half-open window
+    /// (`UAnimNodeSequence` 0x00598440 -> 0x00599A50, research/dishonored/systems/tick_order.md
+    /// section 4); a looping clip that wrapped passes `to < from` and gets both ends.
     pub fn window(&self, from: f32, to: f32) -> Vec<&SoundNotify> {
         if to >= from {
-            self.notifies.iter().filter(|n| n.time > from && n.time <= to).collect()
+            self.notifies.iter().filter(|n| n.time >= from && n.time < to).collect()
         } else {
-            self.notifies.iter().filter(|n| n.time > from || n.time <= to).collect()
+            self.notifies.iter().filter(|n| n.time >= from || n.time < to).collect()
         }
     }
 }

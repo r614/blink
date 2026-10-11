@@ -140,17 +140,12 @@ const SCRIPT_PACKAGES: &[&str] = &["L_Boyle_Ext_Script", "L_Boyle_Int_Script", "
 
 use dishonored_assets::characters::{ARISTO_SETS, FEMALE_LOCO, FEMALE_SETS, GUARD_LOCO, GUARD_SETS};
 
-/// Notifies a clip window crossed: `t0 < t <= t1`, or `t <= t1` for a clip started this frame
-/// (`t0` None: a notify at 0 fires too).
+/// Notifies a clip window crossed: the original's half-open window `t0 <= t < t1`
+/// (`UAnimNodeSequence` 0x00598440 -> 0x00599A50, research/dishonored/systems/tick_order.md
+/// section 4); a clip started this frame (`t0` None) fires from its start, a notify at 0 too.
 pub fn crossing(notifies: &[Notify], t0: Option<f32>, t1: f32) -> Vec<Notify> {
-    notifies
-        .iter()
-        .filter(|n| match t0 {
-            Some(t0) => t0 < n.t && n.t <= t1,
-            None => n.t <= t1,
-        })
-        .cloned()
-        .collect()
+    let t0 = t0.unwrap_or(0.0);
+    notifies.iter().filter(|n| t0 <= n.t && n.t < t1).cloned().collect()
 }
 
 impl AnimBank {

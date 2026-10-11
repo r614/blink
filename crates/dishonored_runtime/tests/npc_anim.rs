@@ -63,12 +63,12 @@ fn notify_crossing_window() {
     let n = |t: f32| Notify { t, duration: 0.0, kind: NotifyKind::Ragdoll };
     let notifies = vec![n(0.0), n(0.5), n(1.0)];
     let times = |t0: Option<f32>, t1: f32| -> Vec<f32> { crossing(&notifies, t0, t1).iter().map(|n| n.t).collect() };
-    // A clip started this frame fires from its start: the notify at 0 too.
-    assert_eq!(times(None, 0.0), vec![0.0]);
+    // The original's window is half-open at the end, [t0, t1) (tick_order.md section 4): a
+    // clip started this frame fires from its start, the notify at 0 included, once it advances.
+    assert_eq!(times(None, 0.0), Vec::<f32>::new());
     assert_eq!(times(None, 0.6), vec![0.0, 0.5]);
-    // Afterwards the window is half-open: (t0, t1].
-    assert_eq!(times(Some(0.0), 1.0), vec![0.5, 1.0]);
-    assert_eq!(times(Some(0.4), 0.5), vec![0.5]);
-    assert_eq!(times(Some(0.5), 0.6), Vec::<f32>::new());
+    assert_eq!(times(Some(0.0), 1.0), vec![0.0, 0.5]);
+    assert_eq!(times(Some(0.4), 0.5), Vec::<f32>::new());
+    assert_eq!(times(Some(0.5), 0.6), vec![0.5]);
     assert_eq!(times(Some(0.4), 0.9), vec![0.5]);
 }
