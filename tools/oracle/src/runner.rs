@@ -295,7 +295,7 @@ fn event_detail(e: &impl std::fmt::Debug, name_of: &dyn Fn(u32) -> String) -> (S
     if !cur.trim().is_empty() {
         parts.push(cur);
     }
-    let ids = ["id", "victim", "attacker", "killer", "defender", "host", "by", "carrier", "body", "owner", "source", "rat", "target"];
+    let ids = ["id", "victim", "attacker", "killer", "defender", "host", "by", "carrier", "body", "owner", "source", "rat", "target", "pawn"];
     let fields: Vec<String> = parts
         .iter()
         .filter_map(|p| {

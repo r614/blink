@@ -92,10 +92,14 @@ Original: the swing is an animation-driven context (`DisItemContext_MeleeAttackP
 zone holds, every tick the context gathers hits (0x00BFF7B0) and applies them (0x00C13640 loop ->
 slot 119 per hit). `DishonoredNotify_AttackInterruptable` ends the swing (`m_bAttackNowInterruptable`);
 chains use `m_ChainInputZone`, `m_bQueuedChain`, `m_fMaxChainAttackTime` (assassinate 1.0 s).
-Port: `combat.rs:update_sword` phases Startup (press to damage-zone start), Active (damage zone,
-0.05 s = 3 ticks), Recovery (to the AttackInterruptable time), from `SwingTiming::PLAYER` (5 clips:
-four ready attacks cycling, one sneak). **Match** for the first hit: press to damage 0.300 s measured
-(HOOK_TRIAGE U-590). `Unverified`: chained follow-up swings (the port returns to Idle after Recovery
+Port (2026-10-11, `dishonored_sim::anim`): the swing plays its clip (`Ply_Sword_Attack_as`: four
+ready attacks cycling, one sneak; the elite guard its `AttackShort` / `Medium` / `Long` /
+`StepBack` / `Jump` chains) on a layer from the press's own tick; the clip's `AttackZone` handler
+moves `combat.rs:update_sword`'s phase to Active (damage zone, 0.05 s) and to Recovery during the
+advance, its `AttackInterruptable` (else `AnimStateExit` or its end) ends it on the next tick. The
+first hit lands 17 ticks (0.283 s) after the press, one tick before the hook's 0.300 s (U-976: the
+decoded order against that measurement; the port of 2026-10-08 matched it by counting from the
+tick after the press). `Unverified`: chained follow-up swings (the port returns to Idle after Recovery
 and re-triggers on the press edge; the original has a chain input window and the next clip may start
 earlier), the crouch/sneak clip choice, a held attack (`m_fCurHoldAttackTime`, purpose unread).
 

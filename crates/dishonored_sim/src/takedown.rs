@@ -26,17 +26,27 @@ use dishonored_ir::gameplay::GameplayConfig;
 use dishonored_world::{WorldQuery, channel};
 use glam::Vec3;
 
-/// `Ply_Sword_Choke_as` timings: `Sword_Choke_In_Master` length, `AnimStateExit` of the Win,
-/// Lose and Cancel sequences, and `Sword_Choke_CarryCorpse_Master` exit.
-pub const CHOKE_IN: f32 = 0.667;
-pub const CHOKE_WIN_EXIT: f32 = 2.470;
-pub const CHOKE_LOSE_EXIT: f32 = 2.229;
-pub const CHOKE_CANCEL_EXIT: f32 = 1.457;
-pub const CHOKE_CARRY_EXIT: f32 = 1.618;
-/// `Ply_Empty_CarryCorpse_as`: lift end, low drop release / end.
-pub const LIFT_END: f32 = 0.967;
-pub const DROP_RELEASE: f32 = 0.500;
-pub const DROP_END: f32 = 1.100;
+/// The choke's and the carry's timings, read from the sequence table (the choke and carry states
+/// count time against them; their sequences are not yet played on the pawn's layers):
+/// `Ply_Sword_Choke_as` `Sword_Choke_In_Master` length, the `AnimStateExit` of the Win, Lose,
+/// Cancel and `CarryCorpse` masters; `Ply_Empty_CarryCorpse_as` `Empty_CarryCorpse_In_Master`
+/// `DisNotify_EndLiftCorpse` (the lift's end) and `Empty_CarryCorpse_DropLow_Master`
+/// `DishonoredNotify_EndDropCorpse` (the low drop's end).
+pub fn choke_in(g: &GameplayConfig) -> f32 {
+    crate::anim::info(g, crate::anim::CHOKE_SET, "Sword_Choke_In_Master").play_length()
+}
+pub fn choke_exit(g: &GameplayConfig, master: &str) -> f32 {
+    crate::anim::exit_time(g, crate::anim::CHOKE_SET, master)
+}
+fn carry_notify(g: &GameplayConfig, seq: &str, class: &str) -> f32 {
+    crate::anim::info(g, crate::anim::CARRY_SET, seq).notify_time(class).unwrap_or_else(|| panic!("{seq} has no {class}"))
+}
+pub fn lift_end(g: &GameplayConfig) -> f32 {
+    carry_notify(g, "Empty_CarryCorpse_In_Master", "DisNotify_EndLiftCorpse")
+}
+pub fn drop_end(g: &GameplayConfig) -> f32 {
+    carry_notify(g, "Empty_CarryCorpse_DropLow_Master", "DishonoredNotify_EndDropCorpse")
+}
 
 /// Seconds a sleep dart takes to put an aware NPC to sleep (`m_fTimeBeforeSleep` of
 /// `DisDamageType_Arrow_Sleep`, DefaultWeapon.ini).
@@ -143,7 +153,7 @@ pub fn step_choke(state: &mut WorldState, ai: usize, input: &PlayerInput, dt: f3
                 }
                 return true;
             }
-            if a.choke.phase == ChokePhase::In && p.choke.phase_time >= CHOKE_IN {
+            if a.choke.phase == ChokePhase::In && p.choke.phase_time >= choke_in(cfg) {
                 set_phase(p, ChokePhase::Loop);
             }
             if p.choke.phase == ChokePhase::Loop && !held {
@@ -178,19 +188,19 @@ pub fn step_choke(state: &mut WorldState, ai: usize, input: &PlayerInput, dt: f3
                     let pid = p.id;
                     set_phase(&mut state.players[ai], ChokePhase::None);
                     state.players[ai].choke.target = None;
-                    lift(state, pid, v, events);
-                    state.players[ai].carry_anim = CHOKE_CARRY_EXIT;
+                    lift(state, pid, v, cfg, events);
+                    state.players[ai].carry_anim = choke_exit(cfg, "Sword_Choke_CarryCorpse_Master");
                     return true;
                 }
             }
-            if p.choke.phase_time >= CHOKE_WIN_EXIT {
+            if p.choke.phase_time >= choke_exit(cfg, "Sword_Choke_Win_Master") {
                 set_phase(p, ChokePhase::None);
                 p.choke.target = None;
             }
             true
         }
         ChokePhase::Lose | ChokePhase::Cancel => {
-            let exit = if a.choke.phase == ChokePhase::Lose { CHOKE_LOSE_EXIT } else { CHOKE_CANCEL_EXIT };
+            let exit = choke_exit(cfg, if a.choke.phase == ChokePhase::Lose { "Sword_Choke_Lose_Master" } else { "Sword_Choke_Cancel_Master" });
             if p.choke.phase_time >= exit {
                 set_phase(p, ChokePhase::None);
                 p.choke.target = None;
@@ -202,14 +212,15 @@ pub fn step_choke(state: &mut WorldState, ai: usize, input: &PlayerInput, dt: f3
 }
 
 /// Lift a body (`StatePlayerGrabCorpse`).
-pub fn lift(state: &mut WorldState, carrier: PlayerId, body: PlayerId, events: &mut Vec<SimEvent>) {
+pub fn lift(state: &mut WorldState, carrier: PlayerId, body: PlayerId, cfg: &GameplayConfig, events: &mut Vec<SimEvent>) {
+    let lift = lift_end(cfg);
     if let Some(b) = state.player_mut(body) {
         b.carried_by = Some(carrier);
         b.velocity = Vec3::ZERO;
     }
     if let Some(c) = state.player_mut(carrier) {
         c.carrying = Some(body);
-        c.carry_anim = LIFT_END;
+        c.carry_anim = lift;
         c.crouched = c.crouched && c.mode == MoveMode::Walking;
     }
     events.push(SimEvent::BodyLifted { carrier, body });
@@ -289,7 +300,7 @@ pub fn step_carry(state: &mut WorldState, ci: usize, input: &PlayerInput, dt: f3
     // `Attribute_ThrowStrength` is only read by the carried-object release (0x00C45340, U-106).
     // Attack leaving the state drops the body the same way (LIKELY).
     if ready && (c.just_pressed(input, buttons::USE) || c.just_pressed(input, buttons::PRIMARY)) {
-        state.players[ci].action_lock = DROP_END;
+        state.players[ci].action_lock = drop_end(cfg);
         release(state, c.id, Vec3::ZERO, world, cfg, events);
         return;
     }

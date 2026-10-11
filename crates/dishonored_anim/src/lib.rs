@@ -5,7 +5,10 @@
 //! the blink), advances it by a fixed `dt` from the gameplay layer's [`TreeInputs`], and
 //! evaluates the local pose of every bone from the clips a [`Clips`] implementation resolves.
 //! Bevy-free and deterministic (no wall clock; nodes, groups and sets are iterated in index or
-//! name order), with ARCHITECTURE.md rule 2's shape: state + assets + inputs -> outputs.
+//! name order), with ARCHITECTURE.md rule 2's shape: state + assets + inputs -> outputs. The
+//! instance is a [`TreeShape`] shared through an `Arc` (what the tree, the skeleton and the mesh
+//! rotation fix) and a serializable [`TreeState`] (what a tick changes), so the simulation keeps
+//! one state per pawn in its snapshots.
 //!
 //! Node classes and confidence (research/dishonored/ANIMATION.md sections 2, 3, 6, 9;
 //! research/dishonored/animation/ANIMTREE_NPC_HUMAN.md), measured against the oracle capture of
@@ -40,6 +43,6 @@ pub mod lookat;
 pub mod pose;
 pub mod tree;
 
-pub use clip::{AnimSets, BakedClip, ClipRef, Clips, SetFlags};
+pub use clip::{AnimSets, BakedClip, ClipRef, Clips, SetFlags, bind_tracks};
 pub use pose::Pose;
-pub use tree::{AnimTreeInstance, FilterTarget, LocoInput, LookInput, SeqState, SlotAction, SlotRequest, StackChannel, TreeInputs};
+pub use tree::{AnimTreeInstance, FilterTarget, LocoInput, LookInput, SeqState, SlotAction, SlotRequest, StackChannel, TreeInputs, TreeShape, TreeState};

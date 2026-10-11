@@ -122,6 +122,23 @@ pub struct AnimSets {
     sets: Vec<BoundSet>,
 }
 
+/// A set's linkup to `skeleton` (`FAnimSetMeshLinkup::BuildLinkup`): per Edge joint (the set's
+/// tracks in Edge joint order) the bone of that name and whether the clip's translation is used.
+pub fn bind_tracks(tracks: &[String], flags: &SetFlags, skeleton: &[BoneAsset]) -> (Vec<Option<usize>>, Vec<bool>) {
+    let bones: Vec<Option<usize>> = tracks.iter().map(|t| skeleton.iter().position(|b| b.name.eq_ignore_ascii_case(t))).collect();
+    let listed = |names: &[String], t: &str| names.iter().any(|n| n.eq_ignore_ascii_case(t));
+    let translate = tracks
+        .iter()
+        .zip(&bones)
+        .map(|(t, b)| {
+            let root = *b == Some(0);
+            let anim = !flags.rotation_only || root || listed(&flags.use_translation, t);
+            anim && !listed(&flags.force_mesh_translation, t)
+        })
+        .collect();
+    (bones, translate)
+}
+
 impl AnimSets {
     pub fn new() -> Self {
         Self::default()
@@ -130,17 +147,7 @@ impl AnimSets {
     /// Add a set (later sets win a name): its tracks in Edge joint order, its baked clips and
     /// its translation flags, bound to `skeleton` by bone name.
     pub fn push(&mut self, tracks: &[String], clips: impl IntoIterator<Item = (String, BakedClip)>, flags: &SetFlags, skeleton: &[BoneAsset]) {
-        let bones: Vec<Option<usize>> = tracks.iter().map(|t| skeleton.iter().position(|b| b.name.eq_ignore_ascii_case(t))).collect();
-        let listed = |names: &[String], t: &str| names.iter().any(|n| n.eq_ignore_ascii_case(t));
-        let translate = tracks
-            .iter()
-            .zip(&bones)
-            .map(|(t, b)| {
-                let root = *b == Some(0);
-                let anim = !flags.rotation_only || root || listed(&flags.use_translation, t);
-                anim && !listed(&flags.force_mesh_translation, t)
-            })
-            .collect();
+        let (bones, translate) = bind_tracks(tracks, flags, skeleton);
         let clips = clips.into_iter().map(|(n, c)| (n.to_ascii_lowercase(), c)).collect();
         self.sets.push(BoundSet { bones, translate, clips });
     }

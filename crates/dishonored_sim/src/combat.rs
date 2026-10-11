@@ -4,25 +4,41 @@
 //! Hit geometry (range 210, sweep width 60, assassinate range 275) is CONFIRMED tweak data. A hit
 //! deals `appCeil(m_fAttackDamageMultiplier x (Attribute_MeleeDamage + Attribute_MeleeDamageBonus))`
 //! (0x00C131C0 -> slot 132: 0x00C07C80, NPC 0x00C33DD0); the health ratios 0.2 / 0.7 only pick the
-//! contact effect. The player's swing phases come from its attack clips' notifies (the hit
-//! lands in the damage zone at the end of the attack zone, U-590); stagger and recoil are
-//! SPECULATIVE (see `CombatTuning`).
-//! Simulation owns timing; animation only presents it.
+//! contact effect. A swing's phases come from the attack sequence it plays (`crate::anim`): its
+//! `DishonoredNotify_AttackZone` opens the damage zone (Active) and ends it (Recovery) during the
+//! animation advance, its `DishonoredNotify_AttackInterruptable` (else its `AnimStateExit` or its
+//! end) ends the swing on the next tick (U-590); the player plays `Ply_Sword_Attack_as`, the elite
+//! guard its attack chains. Stagger and the block's recoil are SPECULATIVE (see `CombatTuning`).
 
+use crate::anim::{PawnAnim, SeqTable, layer, token};
 use crate::events::{DamageCause, SimEvent, SoundCategory};
 use crate::input::{PlayerInput, buttons};
 use crate::movement::{eye_position, forward_vector, half_height, view_vector};
 use crate::state::{Condition, MoveMode, PawnKind, PlayerId, PlayerState, SwordPhase, WorldState};
-use crate::tuning::CombatTuning;
+use crate::tuning::{CombatTuning, SwingTiming};
 use crate::vitals::{apply_damage, kill};
 use dishonored_ir::ai::DIFFICULTY_NORMAL;
 use dishonored_ir::gameplay::{GameplayConfig, MovementConfig};
 use dishonored_world::{WorldQuery, channel, geom::closest_segment_segment};
 use glam::Vec3;
 
-/// Advance the attacker-side state machine and collect swing requests.
-pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, dt: f32, events: &mut Vec<SimEvent>) {
+/// The layer a pawn's swings play on (the player's upper body, an NPC's full body).
+pub fn swing_layer(p: &PlayerState) -> usize {
+    if p.kind == PawnKind::Human { layer::UPPER_BODY } else { layer::FULL_BODY }
+}
+
+/// Advance the attacker-side state machine and collect swing requests. `anim` is the pawn's
+/// animation state as the last advance left it: the swing's notifies drive its phases there.
+pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, anim: Option<&PawnAnim>, table: &SeqTable, dt: f32, events: &mut Vec<SimEvent>) {
     let (swing_startup, swing_active, swing_recovery) = swing_phases(p, t);
+    let played = anim.and_then(|a| a.with(swing_layer(p), token::SWING | p.sword.swings as u32)).cloned();
+    let paired = anim.and_then(|a| {
+        let tok = token::PAIRED | p.sword.assassination_move as u32;
+        a.with(layer::FULL_BODY, tok).or(a.with(layer::UPPER_BODY, tok))
+    }).map(|l| l.done());
+    // A swing whose sequence was cut (a block) recovers for the rest of its sequence after the
+    // attack zone (the port's recoil comes first: `resolve_sword_hits` sets the timer below 0).
+    let cut_rest = table.info(p.sword.swing_seq).and_then(SwingTiming::of).map(|w| w.phases().2);
     let s = &mut p.sword;
     s.timer += dt;
     match s.phase {
@@ -56,6 +72,17 @@ pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, 
                 s.force_block = 0.0;
             }
         }
+        // A swing that plays its sequence: the attack zone's handler moves it to Active and to
+        // Recovery during the advance; `AttackInterruptable` (`m_bAttackNowInterruptable`), else
+        // the sequence's `AnimStateExit` or end, ends it here on the next tick.
+        SwordPhase::Startup | SwordPhase::Active if played.is_some() => {}
+        SwordPhase::Recovery if played.as_ref().is_some_and(|l| l.interruptible || l.done()) => {
+            s.phase = SwordPhase::Idle;
+            s.timer = 0.0;
+        }
+        SwordPhase::Recovery if played.is_some() => {}
+        // A swing without a sequence (a special class's move, whose set the table does not hold,
+        // U-600): the timed phases.
         SwordPhase::Startup if s.timer >= swing_startup => {
             s.phase = SwordPhase::Active;
             s.timer = 0.0;
@@ -64,7 +91,7 @@ pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, 
             s.phase = SwordPhase::Recovery;
             s.timer = 0.0;
         }
-        SwordPhase::Recovery if s.timer >= swing_recovery => {
+        SwordPhase::Recovery if s.timer >= cut_rest.unwrap_or(swing_recovery) => {
             s.phase = SwordPhase::Idle;
             s.timer = 0.0;
         }
@@ -72,7 +99,9 @@ pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, 
             s.phase = SwordPhase::Idle;
             s.timer = 0.0;
         }
-        SwordPhase::Assassinating if s.timer >= s.lock_time => {
+        // The paired move ends when its master raises `AnimStateExit` (`lock_time` when no layer
+        // plays it).
+        SwordPhase::Assassinating if paired.unwrap_or(s.timer >= s.lock_time) => {
             s.phase = SwordPhase::Idle;
             s.timer = 0.0;
             s.assassination_target = None;
@@ -81,14 +110,11 @@ pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, 
     }
 }
 
-/// Phase lengths of the current swing. The player's come from its attack clip: the hit is
-/// only possible in the damage zone at the end of the clip's attack zone (U-590, see
-/// [`crate::tuning::SwingTiming`]). AI pawns keep the uniform port values (U-600).
-pub fn swing_phases(p: &PlayerState, t: &CombatTuning) -> (f32, f32, f32) {
-    match p.kind {
-        PawnKind::Human => t.player_swings[(p.sword.swing_clip as usize).min(4)].phases(),
-        _ => (t.swing_startup, t.swing_active, t.swing_recovery),
-    }
+/// Phase lengths of a swing that plays no sequence: the special classes' moves (their sets are
+/// not in the sequence table) take the mean of the player's small attacks (U-600, read from the
+/// table: `CombatTuning::swing_startup`).
+pub fn swing_phases(_p: &PlayerState, t: &CombatTuning) -> (f32, f32, f32) {
+    (t.swing_startup, t.swing_active, t.swing_recovery)
 }
 
 pub fn sword_locks_movement(p: &PlayerState) -> bool {
@@ -125,15 +151,25 @@ pub(crate) fn body_distance(eye: Vec3, dir: Vec3, range: f32, v: &PlayerState, m
 
 /// `UDisItemContext_MeleeBlockPlayer` blocked-attack handler (0x00C22B60): the hit is
 /// parried when the block started less than `m_fTapForPerfectParryWindow` ago or the
-/// block animation's `DisNotify_BlockParryZone` is active (t = 0.001..0.431 s of
-/// Sword_Block, U-021), unless the post-tap forced block is still running.
-pub fn parries(s: &crate::state::SwordState, t: &CombatTuning) -> bool {
+/// block animation's `DisNotify_BlockParryZone` window is open (`zone`: the window on the
+/// defender's layer, [`parry_zone`]), unless the post-tap forced block is still running.
+pub fn parries(s: &crate::state::SwordState, t: &CombatTuning, zone: bool) -> bool {
     if s.force_block > 1e-8 {
         return false;
     }
     let tap = s.block_time < t.parry_tap_window;
-    let zone = s.block_time >= 0.001 && s.block_time <= 0.001 + t.parry_window;
     tap || zone
+}
+
+/// Whether a blocking pawn's `DisNotify_BlockParryZone` window is open: on its block sequence's
+/// layer (the player's `Sword_Ready_ParryIdle_In`); a pawn whose block plays no sequence (the
+/// NPCs: their block sets are not in the table) takes the player's window by its block time
+/// (`CombatTuning::parry_zone`, read from the table: an approximation, U-600).
+pub fn parry_zone(v: &PlayerState, anim: Option<&PawnAnim>, table: &SeqTable, t: &CombatTuning) -> bool {
+    match anim.and_then(|a| a.with(layer::UPPER_BODY, token::BLOCK)) {
+        Some(_) => anim.is_some_and(|a| a.window_open(layer::UPPER_BODY, table, "DisNotify_BlockParryZone")),
+        None => v.sword.block_time >= t.parry_zone[0] && v.sword.block_time <= t.parry_zone[0] + t.parry_zone[1],
+    }
 }
 
 fn angle_deg(a: Vec3, b: Vec3) -> f32 {
@@ -226,8 +262,12 @@ fn running(v: &PlayerState) -> bool {
     v.last_input.buttons & buttons::SPRINT != 0 && v.velocity.truncate().length() > 1.0
 }
 
-/// Resolve sword hits for this tick. Runs after every player's state machine advanced.
-pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, g: &GameplayConfig, t: &CombatTuning, events: &mut Vec<SimEvent>) {
+/// Resolve sword hits for this tick: the melee contexts' sweep (0x00C13640), after every pawn's
+/// states, animation advance and root motion (tick_order.md section 4: the camera update and the
+/// item's post-update component, after the pose).
+pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, cfg: &crate::SimConfig, events: &mut Vec<SimEvent>) {
+    let g = &cfg.gameplay;
+    let t = &cfg.tuning;
     let mv = &g.movement;
     let vitals = &g.vitals;
     let noise = &g.ai.noise;
@@ -272,7 +312,6 @@ pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, g: &Ga
                     a.sword.lock_time = if drop { t.drop_assassination_times[dir] } else { t.assassination_times[dir] };
                     a.sword.assassination_target = Some(vid);
                     a.sword.assassination_move = dir as u8 + if drop { 4 } else { 0 };
-                    a.sword.root_t = 0.0;
                     a.sword.root_yaw = a.yaw;
                     a.velocity = Vec3::ZERO;
                 }
@@ -338,7 +377,15 @@ pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, g: &Ga
             // `m_MainAttack.m_bUnblockable` (the bash, the stomp, the hound's jump attack).
             let unblockable = attacker.kind != PawnKind::Human && g.ai.special.attack(attacker.sword.npc_move).is_some_and(|s| s.unblockable);
             if victim.sword.phase == SwordPhase::Blocking && facing && !unblockable {
-                if parries(&victim.sword, t) {
+                let zone = parry_zone(&victim, state.anim.get(&victim.id), &cfg.anim, t);
+                // The blocked swing's sequence is cut (the defender's block reaction replaces it).
+                if let Some(a) = state.anim.get_mut(&attacker.id) {
+                    let l = swing_layer(&attacker);
+                    if a.layers[l].as_ref().is_some_and(|s| s.token & token::KIND == token::SWING) {
+                        a.stop(l);
+                    }
+                }
+                if parries(&victim.sword, t, zone) {
                     let a = &mut state.players[ai];
                     a.sword.phase = SwordPhase::Staggered;
                     a.sword.timer = 0.0;
@@ -373,17 +420,22 @@ pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, g: &Ga
                 a.sword.lock_time = t.short_fatality_times[(m - 8) as usize];
                 a.sword.assassination_target = Some(victim.id);
                 a.sword.assassination_move = m;
-                a.sword.root_t = 0.0;
                 a.sword.root_yaw = a.yaw;
                 a.velocity = Vec3::ZERO;
             }
             let v = &mut state.players[vi];
             crate::noise::emit(events, &noise.sword_body, v.position, SoundCategory::SwordImpact, attacker.id, 0.0);
             apply_damage(v, dmg, Some(attacker.id), DamageCause::Sword, events, vitals);
-            // Interrupt the victim's own swing.
+            // Interrupt the victim's own swing (and its sequence).
             if v.alive && matches!(v.sword.phase, SwordPhase::Startup) {
                 v.sword.phase = SwordPhase::Idle;
                 v.sword.timer = 0.0;
+                let (vid, l) = (v.id, swing_layer(v));
+                if let Some(a) = state.anim.get_mut(&vid) {
+                    if a.layers[l].as_ref().is_some_and(|s| s.token & token::KIND == token::SWING) {
+                        a.stop(l);
+                    }
+                }
             }
         }
     }

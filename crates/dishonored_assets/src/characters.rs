@@ -504,12 +504,7 @@ pub fn load_anim_set(content: &Content, pkg_name: &str, set_path: &str, wanted: 
         if !wanted.is_empty() && !wanted.iter().any(|w| w.eq_ignore_ascii_case(&name)) {
             continue;
         }
-        let data = pkg.export_data(e)?;
-        let mut r = Reader::at(data, h.native_offset);
-        let _raw_tracks = r.i32()?;
-        let len = r.count(1)?;
-        let clip = crate::edge_anim::EdgeClip::parse(r.bytes(len)?)?;
-        match clip.bake() {
+        match decode_sequence(&pkg, e, h.native_offset)? {
             Ok(b) => {
                 clips.insert(name, b);
             }
@@ -517,6 +512,88 @@ pub fn load_anim_set(content: &Content, pkg_name: &str, set_path: &str, wanted: 
         }
     }
     Ok(AnimLibrary { tracks, clips })
+}
+
+/// An `AnimSequence` export's Edge clip, baked: `Err` reading the export, `Ok(Err)` a clip that
+/// does not bake.
+fn decode_sequence(pkg: &ue3_package::Package, export: usize, native_offset: usize) -> Result<Result<dishonored_anim::BakedClip>> {
+    use ue3_package::reader::Reader;
+    let data = pkg.export_data(export)?;
+    let mut r = Reader::at(data, native_offset);
+    let _raw_tracks = r.i32()?;
+    let len = r.count(1)?;
+    let clip = crate::edge_anim::EdgeClip::parse(r.bytes(len)?)?;
+    Ok(clip.bake())
+}
+
+/// One set of [`LazyAnimSets`]: its linkup and its sequences (lowercase name, export) in name
+/// order, each baked on first use.
+struct LazySet {
+    pkg: std::sync::Arc<ue3_package::Package>,
+    bones: Vec<Option<usize>>,
+    translate: Vec<bool>,
+    seqs: Vec<(String, usize, usize, std::sync::OnceLock<Option<dishonored_anim::BakedClip>>)>,
+}
+
+/// AnimSets bound to a skeleton whose clips decode on first use (`dishonored_anim::Clips`, for
+/// the simulation's NPC trees: the install's sets do not fit in memory at once, and a tree only
+/// asks for the sequences it plays). A sequence is found from the last set to the first
+/// (`FindAnimSequence`); decoding is deterministic, so when a clip loads changes nothing.
+pub struct LazyAnimSets {
+    sets: Vec<LazySet>,
+}
+
+impl LazyAnimSets {
+    /// Bind `sets` ((package, set path), in the pawn tweak's order) to `skeleton`, the tracks in
+    /// the Edge order of `reference` (as [`bind_anim_sets`]); no clip is decoded yet.
+    pub fn bind(content: &Content, sets: &[(String, String)], reference: &[BoneAsset], skeleton: &[BoneAsset]) -> Result<Self> {
+        use ue3_package::properties::{Value, find};
+        let mut out = Vec::new();
+        for (pkg_name, path) in sets {
+            let pkg = content.package(pkg_name)?;
+            let set = (0..pkg.exports.len()).find(|&i| pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(path)).with_context(|| format!("{path} not in {pkg_name}"))?;
+            let props = pkg.read_object(set)?.properties;
+            let names = |n: &str| -> Vec<String> {
+                let Some((count, raw)) = find(&props, n).and_then(|p| p.array_raw()) else { return Vec::new() };
+                let mut r = ue3_package::reader::Reader::new(raw);
+                (0..count.min(4096)).filter_map(|_| ue3_package::FName::read(&mut r).ok().map(|f| pkg.name(f))).collect()
+            };
+            let mut tracks = names("TrackBoneNames");
+            let idx = |n: &String| reference.iter().position(|b| b.name.eq_ignore_ascii_case(n)).unwrap_or(usize::MAX);
+            tracks.sort_by_key(idx);
+            let flags = dishonored_anim::SetFlags {
+                rotation_only: matches!(find(&props, "bAnimRotationOnly").map(|p| &p.value), Some(Value::Bool(true))),
+                use_translation: names("UseTranslationBoneNames"),
+                force_mesh_translation: names("ForceMeshTranslationBoneNames"),
+            };
+            let (bones, translate) = dishonored_anim::bind_tracks(&tracks, &flags, skeleton);
+            let mut seqs = Vec::new();
+            for s in find(&props, "Sequences").context("Sequences")?.array_objects()? {
+                let ObjRef::Export(e) = ObjRef::from_index(s) else { continue };
+                let h = pkg.read_object(e)?;
+                let Some(Value::Name(name)) = find(&h.properties, "SequenceName").map(|p| &p.value) else { continue };
+                seqs.push((name.to_ascii_lowercase(), e, h.native_offset, std::sync::OnceLock::new()));
+            }
+            seqs.sort_by(|a, b| a.0.cmp(&b.0));
+            out.push(LazySet { pkg, bones, translate, seqs });
+        }
+        Ok(Self { sets: out })
+    }
+}
+
+impl dishonored_anim::Clips for LazyAnimSets {
+    fn find(&self, name: &str) -> Option<dishonored_anim::ClipRef<'_>> {
+        if name.is_empty() || name.eq_ignore_ascii_case("None") {
+            return None;
+        }
+        let key = name.to_ascii_lowercase();
+        self.sets.iter().rev().find_map(|s| {
+            let i = s.seqs.binary_search_by(|x| x.0.as_str().cmp(&key)).ok()?;
+            let (_, e, offset, cell) = &s.seqs[i];
+            let clip = cell.get_or_init(|| decode_sequence(&s.pkg, *e, *offset).ok().and_then(|c| c.ok())).as_ref()?;
+            Some(dishonored_anim::ClipRef { clip, bones: &s.bones, translate: &s.translate })
+        })
+    }
 }
 
 /// The bones of a skeletal mesh: names, parents and the local bind pose as stored.

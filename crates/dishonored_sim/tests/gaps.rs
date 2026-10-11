@@ -104,14 +104,18 @@ fn seed_for(below: bool, x: f32) -> u32 {
 #[test]
 fn reload_stages_follow_the_reload_context() {
     // In + m_fReloadTime / ReloadSpeed + Out; the magazine loads at the end of the timed stage.
-    let (load, end) = ReloadTiming::PISTOL.stages(0.0, 0.0);
-    assert!((load - (0.426 + 0.75)).abs() < 1e-6 && (end - (0.426 + 0.75 + 0.302)).abs() < 1e-6);
+    // The In / Out actions' exits are the sequence table's `AnimStateExit` (0.426 / 0.302 s).
+    let g = Run::new(&[]).cfg.gameplay;
+    let pistol = ReloadTiming::pistol(&g);
+    assert!((pistol.reload_in - 0.426).abs() < 1e-3 && (pistol.reload_out - 0.302).abs() < 1e-3, "{pistol:?}");
+    let (load, end) = pistol.stages(0.0, 0.0);
+    assert!((load - (pistol.reload_in + 0.75)).abs() < 1e-6 && (end - (pistol.reload_in + 0.75 + pistol.reload_out)).abs() < 1e-6);
     // Pistol Reload 1 (Attribute_ReloadSpeed 2) halves only the timed stage.
-    let (load, _) = ReloadTiming::PISTOL.stages(2.0, 0.0);
-    assert!((load - (0.426 + 0.375)).abs() < 1e-6);
+    let (load, _) = pistol.stages(2.0, 0.0);
+    assert!((load - (pistol.reload_in + 0.375)).abs() < 1e-6);
     // Attribute_FastReload: the fast action's timer is the attribute itself, no ReloadOut.
-    assert_eq!(ReloadTiming::PISTOL.stages(202.0, 1.0), (1.0, 1.0));
-    assert_eq!(ReloadTiming::CROSSBOW.stages(0.0, 0.3), (0.3, 0.3));
+    assert_eq!(pistol.stages(202.0, 1.0), (1.0, 1.0));
+    assert_eq!(ReloadTiming::crossbow(&g).stages(0.0, 0.3), (0.3, 0.3));
 }
 
 #[test]
@@ -161,7 +165,7 @@ fn crossbow_fast_reload_loads_the_next_bolt_with_the_shot() {
     r.steps(40, &[(1, bow(0))]);
     r.step(&[(1, bow(buttons::SECONDARY))]);
     let n = r.until(300, bow(0), |p| p.left.bolts_loaded == 1).expect("loads") as f32 * TICK;
-    let want = 0.398 + ReloadTiming::CROSSBOW.reload_in + 1.0;
+    let want = 0.398 + ReloadTiming::crossbow(&r.cfg.gameplay).reload_in + 1.0;
     assert!((n - want).abs() < 0.04, "{n} vs {want}");
 }
 

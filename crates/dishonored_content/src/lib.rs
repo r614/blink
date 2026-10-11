@@ -110,16 +110,52 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     // v26: items.auto_equip_charm (m_bAutoEquipBoneCharm).
     // v27: ai.panic.caught_reaction / beg_time.
     // v33: GameplayConfig.fatality (the sword's finisher kills).
-    let path = cache_dir().join("gameplay_config.v35.json");
+    // v36: GameplayConfig.sequences / npc_anim (the sequences the simulation plays, its notifies).
+    let path = cache_dir().join("gameplay_config.v36.json");
+    let anim: std::sync::Arc<dyn dishonored_sim::anim::AnimSource> = std::sync::Arc::new(InstallAnim::default());
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
-            return Ok(c);
+            return Ok(c.with_anim_source(anim));
         }
     }
     let cfg = dishonored_assets::gameplay::load_gameplay_config(content)?;
     std::fs::create_dir_all(cache_dir()).ok();
     std::fs::write(&path, serde_json::to_string(&cfg)?).ok();
-    Ok(SimConfig::new(cfg))
+    Ok(SimConfig::new(cfg).with_anim_source(anim))
+}
+
+/// The install's animation for the simulation's NPC trees (`dishonored_sim::anim::AnimSource`):
+/// the NPC profile's trees, skeleton, locomotion config and sets
+/// (`dishonored_assets::sim_anim::load_npc_tree_data`), loaded when the first NPC tree asks and
+/// kept; the clips decode one by one as the trees play them. The server, the runtime and the
+/// oracle get it through [`load_sim_config`].
+#[derive(Default)]
+pub struct InstallAnim {
+    loaded: std::sync::OnceLock<Option<[dishonored_sim::anim::NpcTreeAssets; 2]>>,
+}
+
+impl dishonored_sim::anim::AnimSource for InstallAnim {
+    fn npc_tree(&self, dead: bool) -> Option<dishonored_sim::anim::NpcTreeAssets> {
+        let trees = self.loaded.get_or_init(|| {
+            let content = Content::locate().ok()?;
+            let data = match dishonored_assets::sim_anim::load_npc_tree_data(&content) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("warning: no NPC animation trees for the simulation: {e:#}");
+                    return None;
+                }
+            };
+            let clips: std::sync::Arc<dyn dishonored_anim::Clips + Send + Sync> = std::sync::Arc::new(data.clips);
+            let loco = std::sync::Arc::new(data.loco);
+            let tree = |t: &dishonored_ir::anim_tree::AnimTreeAsset| dishonored_sim::anim::NpcTreeAssets {
+                shape: std::sync::Arc::new(dishonored_anim::tree::TreeShape::new(t, &data.skeleton, data.mesh_rotation)),
+                clips: clips.clone(),
+                loco: loco.clone(),
+            };
+            Some([tree(&data.human), tree(&data.dead)])
+        });
+        trees.as_ref().map(|t| t[dead as usize].clone())
+    }
 }
 
 /// The map's original navigation mesh (the `L_*_Nav` pylons plus doors and nav blockers),

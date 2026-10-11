@@ -7,51 +7,32 @@
 //! action's `m_bDoNotRotateSlave` is off; the presentation's `viewmodel::BodyFrames`). No
 //! placement of either pawn was found (U-969).
 //!
-//! The motion runs along the master's yaw at the move's start (`SwordState::root_yaw`), from the
-//! clip time it last reached (`SwordState::root_t`) to the sword timer.
+//! The motion is the master's playhead on the pawn's full-body layer (`crate::anim::root_delta`:
+//! the root-motion keys between the tick's step start and end, in the frame of the pawn's yaw at
+//! the move's start), applied at the pose barrier: after every pawn's physics, states and
+//! animation advance, before the melee sweep (tick_order.md section 5: `RMM_Translate` moves the
+//! owner at once, `0x00746280`).
 
-use crate::fatality::FATALITY_MOVE;
-use crate::movement::{MoveCtx, forward_vector, right_vector};
-use crate::state::{PawnKind, PlayerState, SwordPhase, WorldState};
-use dishonored_ir::gameplay::{ASSASSINATION_MASTERS, GameplayConfig, RootMotion};
+use crate::SimConfig;
+use crate::movement::MoveCtx;
+use crate::state::{PawnKind, WorldState};
 use dishonored_world::WorldQuery;
 
-/// The master clip of the paired move `p` plays, if it moves the pawn.
-pub fn master<'a>(p: &PlayerState, g: &'a GameplayConfig) -> Option<&'a RootMotion> {
-    if p.sword.phase != SwordPhase::Assassinating {
-        return None;
+/// Move every pawn in a paired move by its master's root motion of this tick's advance.
+pub fn step(state: &mut WorldState, world: &dyn WorldQuery, cfg: &SimConfig) {
+    for i in 0..state.players.len() {
+        step_one(state, i, world, cfg);
     }
-    let name = match p.sword.assassination_move {
-        m if (m as usize) < ASSASSINATION_MASTERS.len() => ASSASSINATION_MASTERS[m as usize],
-        FATALITY_MOVE => {
-            let run = p.sword.fatality?;
-            let clip = g.fatality.moves.get(run.action as usize)?.get(run.variant as usize)?;
-            if clip.upper_body {
-                return None;
-            }
-            clip.master.as_str()
-        }
-        _ => return None,
-    };
-    g.root_motion.get(name)
 }
 
-/// Move every pawn in a paired move by its master's root motion since the last tick.
-pub fn step(state: &mut WorldState, world: &dyn WorldQuery, g: &GameplayConfig) {
-    for p in state.players.iter_mut() {
-        if p.kind != PawnKind::Human || !p.alive {
-            continue;
-        }
-        let Some(rm) = master(p, g) else { continue };
-        let (t0, t1) = (p.sword.root_t, p.sword.timer);
-        if t1 <= t0 {
-            continue;
-        }
-        let (a, b) = (rm.at(t0), rm.at(t1));
-        let delta = forward_vector(p.sword.root_yaw) * (b[0] - a[0]) + right_vector(p.sword.root_yaw) * (b[1] - a[1]);
-        let mvc = crate::powers::effective_movement(p, g);
-        let ctx = MoveCtx { world, cfg: &mvc, dt: crate::DT * p.time_scale.max(1e-3) };
-        crate::movement::walk_move(p, delta, &ctx);
-        p.sword.root_t = t1;
+/// [`step`] for one pawn.
+pub fn step_one(state: &mut WorldState, i: usize, world: &dyn WorldQuery, cfg: &SimConfig) {
+    let p = state.players[i];
+    if p.kind != PawnKind::Human || !p.alive {
+        return;
     }
+    let Some(delta) = state.anim.get(&p.id).and_then(|a| crate::anim::root_delta(a, &p, cfg)) else { return };
+    let mvc = crate::powers::effective_movement(&p, &cfg.gameplay);
+    let ctx = MoveCtx { world, cfg: &mvc, dt: crate::DT * p.time_scale.max(1e-3) };
+    crate::movement::walk_move(&mut state.players[i], delta, &ctx);
 }

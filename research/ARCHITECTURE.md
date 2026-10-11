@@ -60,13 +60,14 @@ is timers in the sim modules and pickers in the runtime.
 
 ## What moves where
 
-- **Animation state into the sim.** `PlayerState` gains an animation state (tree instance,
-  chain / state, playheads, blend weights, locomotion modifier and phase; tens of bytes, replicated
-  like the rest). Notifies fire at tick boundaries from the sim's playhead and replace the copied
-  constants (`SwingTiming::PLAYER`, `SWING_TAIL`, the `gameplay_config.json` notify times). Root
-  motion feeds movement for every clip that has it, generalizing `sync_motion`. The sim evaluates
-  only what gameplay reads (root motion, notifies, playheads, weights); the renderer evaluates the
-  full pose from the same state with the same code.
+- **Animation state into the sim.** Each pawn gains an animation state beside its `PlayerState`
+  (`WorldState::anim`: the layers' sequence ids into the config's table, playheads, the flags
+  their notifies raised; an NPC's tree state with the install), replicated in the snapshot's
+  extras. Notifies fire during the advance from the sim's playhead and replace the copied
+  constants (`SwingTiming::PLAYER`, the assassination and cast times; the runtime's `SWING_TAIL`
+  goes with step 7). Root motion feeds movement for every clip that has it, generalizing
+  `sync_motion`. The sim evaluates only what gameplay reads (root motion, notifies, playheads,
+  weights); the renderer evaluates the full pose from the same state with the same code.
 - **The AI requests chains and locomotion transitions** through the pawn states, the way
   `ArkComponentLocomotion` and the item contexts do; `npc_move: u8` retires.
 - **`dishonored_anim`**: Edge sampling, a generic evaluator over the cooked AnimTree graph (the
@@ -98,6 +99,22 @@ it.
 4. Tick-stamped animation events and fixed-`DT` presentation clocks (removes the drift before the
    larger move).
 5. Animation state into the sim; notifies replace the copied constants; root motion generalized.
+   **Done 2026-10-11** (LOG.md): `dishonored_sim::anim`. Moved: the sequence table
+   (`GameplayConfig::sequences`: every notify of the player's, the crossbow's and the elite
+   guard's sets, extracted with the config so the CI and the tests run without the install);
+   per-pawn layers (`WorldState::anim`, in the snapshot's extras) advanced by `DT x` the time
+   scale in the decoded order, every crossed notify a `SimEvent::AnimNotify`; the swing's phases
+   from its `AttackZone` / `AttackInterruptable` (the player's and the elite guard's chains), the
+   paired moves' ends and root motion, the casts, the grenade, the crossbow mesh's shot, the
+   Spring Razor, the throw's ragdoll, the finishers' bend windows from the playhead; the
+   hand-copied notify times of `tuning.rs` and friends read from the table; with the install the
+   host's `AnimSource` gives each NPC an `AnimTreeInstance` state (`NPC_Human_at` /
+   `NPC_Dead_at`, the `TreeState` split from a shared `TreeShape`). Stays: the choke, carry and
+   reload stages count time against the table's exits (their sequences are not played, or play
+   for their notifies only); the Windblast warmup and the mantle keep their decoded config values;
+   the NPC tree's root motion is published, not applied (U-977); one NPC profile (the doorman's)
+   for every NPC and timed swings for the special classes (U-978); the runtime's pickers still
+   draw (step 7).
 6. Pawn states and item contexts as one subsystem; the AI requests through them.
 7. The runtime's pickers deleted as the generic path covers each case.
 

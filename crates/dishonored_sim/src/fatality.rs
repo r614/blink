@@ -177,9 +177,8 @@ pub fn try_start(state: &mut WorldState, ai: usize, slot: Slot, world: &dyn Worl
     a.sword.lock_time = clip.exit;
     a.sword.assassination_target = synced.then_some(v.id);
     a.sword.assassination_move = FATALITY_MOVE;
-    a.sword.root_t = 0.0;
     a.sword.root_yaw = a.yaw;
-    a.sword.fatality = Some(FatalityRun { action: action as u8, variant: variant as u8, slow_motion: exclusive && !(slomo && realtime), victim: v.id, pending: !synced, clock: 0.0 });
+    a.sword.fatality = Some(FatalityRun { action: action as u8, variant: variant as u8, slow_motion: exclusive && !(slomo && realtime), victim: v.id, pending: !synced });
     a.velocity = Vec3::ZERO;
     let attacker = a.id;
     if slot == Slot::Bash {
@@ -219,47 +218,60 @@ fn set_dilation(state: &mut WorldState, caster: PlayerId, world: f32, player: f3
     }
 }
 
-/// The finishers' tick, after the swords advanced: an ended finisher lets go of its dilation, a
-/// running one opens and closes its master's bend-time windows, and a generic swing kills its
-/// victim when its damage zone opens.
-pub fn step(state: &mut WorldState, g: &GameplayConfig, events: &mut Vec<SimEvent>) {
-    let single = state.players.iter().filter(|p| p.kind == PawnKind::Human).count() <= 1;
+/// The finishers' tick, after the sweep: an ended finisher lets go of its dilation. A running
+/// one's master opens and closes its bend-time windows ([`bend_window`]) and a generic swing kills
+/// its victim ([`generic_hit`]) from the master's notifies during the advance (`crate::anim`).
+pub fn step(state: &mut WorldState, _g: &GameplayConfig) {
     for ai in 0..state.players.len() {
         let a = state.players[ai];
-        let Some(run) = a.sword.fatality else { continue };
+        if a.sword.fatality.is_none() {
+            continue;
+        }
         if a.sword.phase != SwordPhase::Assassinating || a.sword.assassination_move != FATALITY_MOVE || !a.alive {
             state.players[ai].sword.fatality = None;
             set_dilation(state, a.id, 1.0, 1.0, 0.0);
-            continue;
         }
-        let Some(clip) = g.fatality.moves.get(run.action as usize).and_then(|m| m.get(run.variant as usize)) else { continue };
-        let (t0, t1) = (run.clock, a.sword.timer);
-        if single {
-            for w in clip.bends.iter().filter(|w| !w.adrenaline || run.slow_motion) {
-                if t0 < w.start && w.start <= t1 {
-                    set_dilation(state, a.id, w.world, w.player, w.blend_in);
-                }
-                let end = w.start + w.duration;
-                if t0 < end && end <= t1 {
-                    set_dilation(state, a.id, 1.0, 1.0, w.blend_out);
-                }
-            }
+    }
+}
+
+/// A finisher master's `DisNotify_BendTime_Ranged` window (with the adrenaline class, only for an
+/// exclusive finisher that does not play in real time, 0x00A972D0): at its start the world and
+/// the caster go to `m_fWorldTimeScale` / `m_fPlayerTimeScale` over `m_fTransitionInTime`, at its
+/// end back to 1 over `m_fTransitionOutTime` (the dilation helper 0x009FA0D0, channel 4); in a
+/// world with a single human pawn.
+pub fn bend_window(state: &mut WorldState, ai: usize, n: &dishonored_ir::gameplay::NotifyInfo, start: bool) {
+    let a = state.players[ai];
+    let Some(run) = a.sword.fatality.filter(|_| a.sword.phase == SwordPhase::Assassinating && a.sword.assassination_move == FATALITY_MOVE) else { return };
+    if state.players.iter().filter(|p| p.kind == PawnKind::Human).count() > 1 {
+        return;
+    }
+    if n.class == "DisNotify_AdrenalineBendTime_Ranged" && !run.slow_motion {
+        return;
+    }
+    // A property neither the notify nor its class default sets reads 1 (as the config's
+    // `BendWindow`s, `dishonored_assets::fatality`).
+    let f = |k: &str| n.payload.get(k).copied().unwrap_or(1.0);
+    if start {
+        set_dilation(state, a.id, f("m_fWorldTimeScale"), f("m_fPlayerTimeScale"), f("m_fTransitionInTime"));
+    } else {
+        set_dilation(state, a.id, 1.0, 1.0, f("m_fTransitionOutTime"));
+    }
+}
+
+/// A generic finisher's swing reaching its damage zone (its `DishonoredNotify_AttackZone`,
+/// 0x00A8E760): the victim dies.
+pub fn generic_hit(state: &mut WorldState, ai: usize, g: &GameplayConfig, events: &mut Vec<SimEvent>) {
+    let a = state.players[ai];
+    let Some(run) = a.sword.fatality.filter(|r| r.pending && a.sword.phase == SwordPhase::Assassinating) else { return };
+    if let Some(vi) = state.players.iter().position(|p| p.id == run.victim) {
+        let victim = &mut state.players[vi];
+        if victim.alive {
+            crate::noise::emit(events, &g.ai.noise.sword_body, victim.position, SoundCategory::SwordImpact, a.id, 0.0);
+            crate::vitals::kill(victim, Some(a.id), DamageCause::Sword, events);
         }
-        if run.pending && clip.hit.is_some_and(|h| t0 < h && h <= t1 || t0 == 0.0 && h <= t1) {
-            if let Some(vi) = state.players.iter().position(|p| p.id == run.victim) {
-                let victim = &mut state.players[vi];
-                if victim.alive {
-                    crate::noise::emit(events, &g.ai.noise.sword_body, victim.position, SoundCategory::SwordImpact, a.id, 0.0);
-                    crate::vitals::kill(victim, Some(a.id), DamageCause::Sword, events);
-                }
-            }
-            if let Some(r) = state.players[ai].sword.fatality.as_mut() {
-                r.pending = false;
-            }
-        }
-        if let Some(r) = state.players[ai].sword.fatality.as_mut() {
-            r.clock = t1;
-        }
+    }
+    if let Some(r) = state.players[ai].sword.fatality.as_mut() {
+        r.pending = false;
     }
 }
 

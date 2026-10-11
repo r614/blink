@@ -225,8 +225,10 @@ impl NetClient {
             self.history.pop_front();
         }
 
-        // Rebase and replay unacknowledged inputs.
-        self.predicted = WorldState { tick: s.tick, players: s.players, projectiles: s.projectiles, next_projectile_id: 0, windblasts: s.windblasts, ..Default::default() };
+        // Rebase and replay unacknowledged inputs. The snapshot's extras carry the pawns'
+        // animation layers; the NPC trees this client evaluated carry over (`set_extras`).
+        let trees = std::mem::take(&mut self.predicted.anim);
+        self.predicted = WorldState { tick: s.tick, players: s.players, projectiles: s.projectiles, next_projectile_id: 0, windblasts: s.windblasts, anim: trees, ..Default::default() };
         self.predicted.set_extras(s.extras);
         self.history.clear();
         let pending: Vec<PlayerInput> = self.pending.iter().copied().collect();

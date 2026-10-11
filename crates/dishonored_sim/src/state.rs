@@ -97,9 +97,14 @@ pub struct SwordState {
     /// (`DisItemContext_MeleeAttackNPCBase.m_bEffectivelyOffscreen`, set at the start 0x00C24020).
     #[serde(default)]
     pub offscreen_to: Option<PlayerId>,
-    /// Length of the current assassination (the played clip's `AnimStateExit`).
+    /// Length of the current paired move (its master's `AnimStateExit`): the move ends when the
+    /// master's layer raises that notify (`crate::anim`); this is its length when no layer plays it.
     #[serde(default)]
     pub lock_time: f32,
+    /// The sequence the current swing plays (`crate::anim::SeqId`), for the recovery of a swing
+    /// whose sequence was cut (a block).
+    #[serde(default)]
+    pub swing_seq: u16,
     /// The current paired move: an assassination's direction from the victim (0 front, 1 left,
     /// 2 right, 3 back, 0x00BBA970), plus 4 for a drop assassination (the master
     /// `Sword_Ready_Assassination_{Front,Left,Right,Back}_Master` / `_Drop*_Master`); 8..11 the
@@ -111,10 +116,9 @@ pub struct SwordState {
     /// [`crate::fatality::FATALITY_MOVE`].
     #[serde(default)]
     pub fatality: Option<FatalityRun>,
-    /// The paired move's root motion (`crate::sync_motion`): the master clip time it has moved the
-    /// pawn to, and the yaw it runs along (the master's at the move's start).
-    #[serde(default)]
-    pub root_t: f32,
+    /// The pawn's yaw at the paired move's start: the frame its master's root motion runs in
+    /// (the master's layer keeps it too, `crate::anim::SeqPlay::yaw`) and the presentation draws
+    /// the victim's slave in.
     #[serde(default)]
     pub root_yaw: f32,
 }
@@ -131,8 +135,6 @@ pub struct FatalityRun {
     /// The victim, and whether an unsynced swing has yet to kill it.
     pub victim: PlayerId,
     pub pending: bool,
-    /// The master time the tick last processed (bend windows, the swing's hit).
-    pub clock: f32,
 }
 
 /// `DisItemContext_Finisher` / `_Fatality` pacing of a player (0x00C09ED0, 0x00C0DFD0): fast
@@ -988,6 +990,9 @@ pub struct WorldState {
     /// The active map's physics props (`DishonoredMovable`): picked up, carried, dropped, thrown.
     #[serde(default)]
     pub movables: Vec<MovableState>,
+    /// Each pawn's animation state (`crate::anim`), by pawn id.
+    #[serde(default)]
+    pub anim: std::collections::BTreeMap<PlayerId, crate::anim::PawnAnim>,
 }
 
 /// A movable prop the player holds (`DishonoredItemEmpty.m_pGrabbed_Movable`, 0x00C3D030).
@@ -1098,11 +1103,18 @@ pub struct WorldExtras {
     pub finisher_dilation: Vec<FinisherDilation>,
     #[serde(default)]
     pub movables: Vec<MovableState>,
+    /// The pawns' animation layers (`WorldState::anim`): a late joiner and a corrected client step
+    /// the same sequences and fire the same notifies. The NPC trees' evaluator states stay out
+    /// (a few kilobytes per NPC against the snapshot's datagram; they drive no gameplay yet, so
+    /// each peer evaluates its own from the layers).
+    #[serde(default)]
+    pub anim: std::collections::BTreeMap<PlayerId, crate::anim::PawnAnim>,
 }
 
 impl WorldState {
     pub fn extras(&self) -> WorldExtras {
         WorldExtras {
+            anim: self.anim.iter().map(|(id, a)| (*id, crate::anim::PawnAnim { layers: a.layers.clone(), rng: a.rng, tree: None })).collect(),
             movables: self.movables.clone(),
             pickups: self.pickups.clone(),
             abstract_items: self.abstract_items.clone(),
@@ -1124,6 +1136,14 @@ impl WorldState {
         self.blink_layers = e.blink_layers;
         self.finisher_dilation = e.finisher_dilation;
         self.movables = e.movables;
+        // The layers are the snapshot's; a pawn keeps the NPC tree this world evaluated.
+        let mut anim = e.anim;
+        for (id, a) in anim.iter_mut() {
+            if a.tree.is_none() {
+                a.tree = self.anim.get_mut(id).and_then(|o| o.tree.take());
+            }
+        }
+        self.anim = anim;
     }
 }
 
@@ -1256,6 +1276,13 @@ pub struct ThrownState {
     /// `m_fOldTimeDilation`: the pawn's time dilation at the previous test.
     #[serde(default)]
     pub prev_scale: f32,
+    /// The throw's sequence plays on the pawn's full body (`crate::anim::play_throw`): its
+    /// `DishonoredNotify_Ragdoll` ends the flight, not `ragdoll_at`.
+    #[serde(default)]
+    pub by_notify: bool,
+    /// `m_ThrowDirection` (`movement::throw_direction`): the throw sequence's step.
+    #[serde(default)]
+    pub direction: u8,
 }
 
 /// A Windblast: the cast animation's notify after the cast, the origin and direction are taken from

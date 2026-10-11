@@ -1187,15 +1187,18 @@ pub fn start_throw(p: &mut PlayerState, momentum: Vec3, th: &dishonored_ir::game
         p.fall_time = 0.0;
         p.jump.active = false;
         p.slide.active = false;
+        let direction = throw_direction(p.yaw, m);
         p.thrown = crate::state::ThrownState {
             active: true,
             time: anim_dt,
-            ragdoll_at: th.windblast_ragdoll_notify[throw_direction(p.yaw, m)],
+            ragdoll_at: th.windblast_ragdoll_notify[direction],
             air_speed: v.length(),
             friction: th.fluid_friction * 0.5,
             ragdoll: false,
             rest_timer: THROW_REST_TEST_DELAY,
             prev_scale: 0.0,
+            by_notify: false,
+            direction: direction as u8,
         };
     }
 }
@@ -1267,7 +1270,10 @@ pub(crate) fn flying(p: &mut PlayerState, ctx: &MoveCtx) {
     p.velocity = (p.position - old) / dt;
     p.velocity.z += cfg.gravity_z * dt;
     p.thrown.time += dt;
-    if p.thrown.time >= p.thrown.ragdoll_at {
+    // The throw sequence's `DishonoredNotify_Ragdoll` hands the pawn to the ragdoll during the
+    // animation advance (`crate::anim`); a throw without its sequence on the pawn's layer
+    // (`start_throw` alone) counts to the notify's time.
+    if !p.thrown.by_notify && p.thrown.time >= p.thrown.ragdoll_at {
         p.thrown.active = false;
         p.thrown.ragdoll = true;
     }

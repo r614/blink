@@ -447,7 +447,7 @@ pub fn use_target(state: &mut WorldState, who: usize, c: Crosshair, world: &dyn 
     match c.target {
         TargetRef::Pawn(_) => false,
         TargetRef::Body(b) => {
-            takedown::lift(state, pid, b, events);
+            takedown::lift(state, pid, b, g, events);
             true
         }
         TargetRef::Prop(id) => {

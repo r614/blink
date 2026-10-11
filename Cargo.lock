@@ -2497,6 +2497,7 @@ dependencies = [
  "dishonored_assets",
  "dishonored_ir",
  "glam",
+ "serde",
  "serde_json",
 ]
 
@@ -2541,6 +2542,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dishonored_ai",
+ "dishonored_anim",
  "dishonored_assets",
  "dishonored_audio",
  "dishonored_conversation",
@@ -2748,6 +2750,7 @@ name = "dishonored_sim"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dishonored_anim",
  "dishonored_ir",
  "dishonored_world",
  "glam",
