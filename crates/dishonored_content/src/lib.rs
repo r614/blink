@@ -110,7 +110,8 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     // v26: items.auto_equip_charm (m_bAutoEquipBoneCharm).
     // v27: ai.panic.caught_reaction / beg_time.
     // v33: GameplayConfig.fatality (the sword's finisher kills).
-    let path = cache_dir().join("gameplay_config.v35.json");
+    // v36: GameplayConfig.sequences / npc_anim (the sequences the simulation plays, its notifies).
+    let path = cache_dir().join("gameplay_config.v36.json");
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
             return Ok(c);

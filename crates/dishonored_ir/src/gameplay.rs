@@ -774,6 +774,100 @@ pub struct GameplayConfig {
     /// The paired moves' masters' root motion, by sequence name.
     #[serde(default)]
     pub root_motion: BTreeMap<String, RootMotion>,
+    /// The sequences the simulation plays (`dishonored_sim::anim`), by [`sequence_key`]: their
+    /// lengths, rate scales and notifies, so the simulation steps them and fires their notifies
+    /// with or without the install. Its sorted key order is the index `SimEvent::AnimNotify`
+    /// names.
+    #[serde(default)]
+    pub sequences: BTreeMap<String, SequenceInfo>,
+    /// The NPC animation the simulation's rules time NPC actions with (the elite guard's
+    /// `DisNPCAnimDefinitions` chains and sets).
+    #[serde(default)]
+    pub npc_anim: NpcAnimConfig,
     /// field -> evidence (tweak object path / INI key / class default / UE3 stock).
     pub provenance: BTreeMap<String, String>,
+}
+
+/// The key of a sequence in [`GameplayConfig::sequences`]: its `AnimSet`'s object name and the
+/// sequence name, as UE3 paths the `AnimSequence` (`Ply_Sword_Attack_as.Sword_Ready_AttackRight_A_Small`).
+pub fn sequence_key(set: &str, sequence: &str) -> String {
+    format!("{set}.{sequence}")
+}
+
+/// One `AnimNotifyEvent` of a sequence (`UAnimSequence.Notifies`, cooked in time order): the
+/// notify object's class, `Time` and `Duration` (sequence seconds; a notify with a duration is
+/// one of Arkane's windows, `0x00A8F340` / `0x00A9BC90`), and the notify object's properties over
+/// its class defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct NotifyInfo {
+    pub class: String,
+    pub time: f32,
+    #[serde(default)]
+    pub duration: f32,
+    /// Floats, ints, bytes and bools (0 / 1), by property name (`m_fDamageZoneMaxTime`, ...).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub payload: BTreeMap<String, f32>,
+    /// Names, enums and object paths, by property name (`m_SwingDirection`, `AkEvent`, ...).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub names: BTreeMap<String, String>,
+}
+
+/// One `AnimSequence` (`SequenceLength`, `RateScale`, `Notifies`). A sequence advances by
+/// `RateScale x Rate x dt` of sequence time per tick (`AnimNodeSequence::TickAnim` 0x0059D6A0);
+/// notify times are sequence times.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SequenceInfo {
+    pub duration: f32,
+    pub rate_scale: f32,
+    pub notifies: Vec<NotifyInfo>,
+    /// The key of the sequence's root motion in [`GameplayConfig::root_motion`] when that table
+    /// has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_motion: Option<String>,
+}
+
+impl SequenceInfo {
+    /// The first notify of `class`.
+    pub fn notify(&self, class: &str) -> Option<&NotifyInfo> {
+        self.notifies.iter().find(|n| n.class == class)
+    }
+
+    /// Play time (seconds at rate 1) of the first notify of `class`: `Time / RateScale`.
+    pub fn notify_time(&self, class: &str) -> Option<f32> {
+        self.notify(class).map(|n| n.time / self.rate_scale_or_one())
+    }
+
+    /// Play length at rate 1: `SequenceLength / RateScale`.
+    pub fn play_length(&self) -> f32 {
+        self.duration / self.rate_scale_or_one()
+    }
+
+    /// `RateScale`, 1 where the sequence has none (0 never advances).
+    pub fn rate_scale_or_one(&self) -> f32 {
+        if self.rate_scale > 0.0 { self.rate_scale } else { 1.0 }
+    }
+
+    /// Play time at which the state the sequence plays ends: its `DishonoredNotify_AnimStateExit`,
+    /// else its length.
+    pub fn exit_time(&self) -> f32 {
+        self.notify_time("DishonoredNotify_AnimStateExit").unwrap_or_else(|| self.play_length())
+    }
+}
+
+/// The NPC animation profile the simulation's rules use: a `DisAnimDefinitions` class's chains
+/// (`m_Animations`), the `AnimSet` object names its sequences are looked up in (last set first,
+/// `FindAnimSequence`), and the pawn's primary-item and empty-hands prefixes (`m_ItemPrefix`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct NpcAnimConfig {
+    pub defs: crate::npc_anim::AnimDefs,
+    pub sets: Vec<String>,
+    pub item_prefix: String,
+    pub empty_prefix: String,
+}
+
+impl GameplayConfig {
+    /// A sequence of a set (see [`sequence_key`]).
+    pub fn sequence(&self, set: &str, sequence: &str) -> Option<&SequenceInfo> {
+        self.sequences.get(&sequence_key(set, sequence))
+    }
 }

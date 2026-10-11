@@ -32,6 +32,7 @@ pub mod pickups;
 pub mod melee_trail;
 pub mod shadow_kill;
 pub mod fatality;
+pub mod sim_anim;
 pub mod ini;
 pub mod kismet;
 pub mod font;
