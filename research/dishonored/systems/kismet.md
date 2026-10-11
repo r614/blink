@@ -26,7 +26,7 @@ Method notes that matter for the next agent:
 
 ## 1. The model, as rules
 
-### K-1. Where Kismet runs and what the trace sees (CONFIRMED / one part UNVERIFIED)
+### K-1. Where Kismet runs and what the trace sees (CONFIRMED)
 
 - Once per world tick the engine calls `Sequence::UpdateOp(dt)` (vtable slot 92, `0x00701550`)
   on the game sequence. For each sequence it: registers pending events (`UnregisteredEvents`,
@@ -43,11 +43,29 @@ Method notes that matter for the next agent:
 - Frame convention (ORACLE.md "Trace alignment"): the Kismet of world tick k is recorded with tick
   k; it runs inside the world tick after the boundary-k input, so a remote event given at
   boundary k is processed in tick k + 1 on the original and in the port's step that produces
-  frame k + 1 (`kismet_host::step` calls `k.remote_event` then `k.tick` in the same step): same.
-- UNVERIFIED: where in the world tick `UpdateOp` sits relative to the actors' ticks (pawn physics,
-  touch/overlap callbacks, AI). The port runs gameplay events (`feed`) and then `k.tick` after
-  `MissionState::step`. If the original ticks Kismet before the actors, every gameplay-triggered
-  event lands one tick later than in the port. Check: F-13 / section 6.
+  frame k + 1 (`kismet_host::update` gives the start event, then `k.tick`, at the start of that
+  step): same.
+- Resolved 2026-10-11 (CONFIRMED, static, systems/tick_order.md section 1): `UpdateOp` runs
+  **before the actors**. The world tick `0x0065E0D0`, after the time update `0x00650D20`, runs
+  `TG_PreAsyncWork` `0x006552C0`, which first calls slot 92 (`+0x170`) `UpdateOp(dt)` on every
+  game sequence (`World+0x50 -> +0x9C`) and only then the actor loop `0x00651A80` (pawn physics,
+  state machines, components, the controllers and brains, the touch callbacks of their moves);
+  the later tick groups, the cameras (`0x0065DA60`) and the managers follow. An event that
+  gameplay raises in tick N (`CheckActivate` / `ActivateEvent` queue it at the bottom of its
+  sequence's stack, K-4) is executed by tick N + 1's `UpdateOp`; its own `Activated` record is
+  raised in tick N. The port ran its gameplay events (`feed`) and `k.tick` after
+  `MissionState::step`, so those ops ran one tick early. It now runs `kismet_host::update` (start
+  event, `k.tick`, the effects of the tick on the world) first in `MissionMatch::step`, before
+  the simulation and the AI, and `kismet_host::raise` (`feed`: the step's gameplay events, the
+  approach hooks, then the committed map change and the touches at the travel destination) at
+  the end of the step: an event raised in step N runs in step N + 1. Between the two the
+  activated events are interpreter state (stacks, impulses, the host's queues), saved with the
+  match. What the oracle sees (section 7, F-13): the ops behind a gameplay event, and the
+  event's own `Deactivated`, move one tick later; events raised by the host's queues of the
+  update (door, lock, task, usable stage events) and the touches at a travel destination record
+  their `Activated` one tick earlier, the ops behind them unchanged; Kismet requests reach the AI
+  and the simulation in the tick they are made (a distraction or go-to walk starts a tick
+  earlier); a frame right after a Kismet teleport shows the step's physics after it.
 
 ### K-2. Time base (CONFIRMED, new)
 
@@ -239,7 +257,7 @@ As KISMET.md sections 2 and "Random numbers"; no change.
 | Rule | Port (file : function) | Status |
 |---|---|---|
 | K-1 nesting, enabled chain | `runtime.rs : update_seq` | match |
-| K-1 UpdateOp per tick, remote event on the next tick | `kismet_host.rs : step` | match (UNVERIFIED order vs actors, F-13) |
+| K-1 UpdateOp per tick, before the actors; remote event on the next tick | `kismet_host.rs : update` (start of `MissionMatch::step`), `raise` (end) | match (F-13 resolved 2026-10-11) |
 | K-2 dt scaling, flag | `runtime.rs : tick_dilated`, `execute_active_ops`; `kismet_host.rs : step` | match (F-3 ported 2026-10-08) |
 | K-2 event clocks | `runtime.rs : check_activate`, `activate_event` (`event_clock`: `time` / `bend_time`) | match (F-4 ported) |
 | K-3 impulses, queued counts, disabled, delays | `runtime.rs : impulse`, `run_op`, `execute_active_ops` | match |
@@ -455,7 +473,7 @@ outputs) with `CorpseDetected`, `PawnSighted` and `Assassinated` output 0 are po
 | F-10 | port missing | low | `RefillWhaleOilBattery` |
 | F-11 | port missing | low | `SetPhysics` |
 | F-12 | verified equal | - | list below |
-| F-13 | unverified | high if different | Kismet vs actor order inside the world tick |
+| F-13 | port bug (fixed) | high | Kismet vs actor order inside the world tick: the original runs `UpdateOp` before the actors |
 | F-14 | doc correction | - | "39 activations" in the brief and ORACLE.md are the port's host notes |
 
 **F-1. Queue position of delayed-due and repeated ops.**
@@ -523,7 +541,11 @@ input; 999-pop cap and replay of queued event activations; `CheckActivate` condi
 `SeqAct_Delay` timing (armed on the tick before it counts); nested sequence update order; the
 `DisSeqAct_Lock` op.
 
-**F-13. UNVERIFIED: Kismet inside the world tick.** See K-1 and section 6.
+**F-13. Kismet inside the world tick (resolved 2026-10-11).** `TG_PreAsyncWork` `0x006552C0`
+calls `UpdateOp` (slot 92) on every game sequence before the actor loop `0x00651A80`
+(systems/tick_order.md section 1, CONFIRMED static): an event raised by gameplay in tick N runs in
+tick N + 1. The port ran those events in the same step. Fix (done): `kismet_host::update` at the
+start of `MissionMatch::step`, `kismet_host::raise` (the gameplay feed) at its end; see K-1.
 
 **F-14.** The brief and ORACLE.md ("Kismet traces: ChangeLvl_fromHub_toBoyle fired 39 activations
 in 5 s") describe the port's note count. No original Kismet trace exists in the cache yet (checked
@@ -567,11 +589,12 @@ Scenarios (`fixtures/oracle/scenarios/kismet/`, queued in `fixtures/oracle/captu
 F-6 is ported (section 7): the port records the same per-op events, so a capture compares directly.
 
 Unverified checks and what decides them:
-- **F-13 (Kismet vs actors).** From the two traces: in the original, find an op that depends on a
-  gameplay fact of the same tick (a `DisSeqEvent_Spawned` after the spawner's `StartSpawn`, or the first
-  `SeqEvent_Touch` of the player standing in a trigger at start) and read the tick of its `Activated`
-  next to the tick of the cause. A cause at tick k and an activation at tick k means Kismet runs after
-  the actors; at k + 1 means before. The port's convention is "same tick".
+- **F-13 (Kismet vs actors): settled statically** (systems/tick_order.md section 1: `UpdateOp`
+  before the actor loop). A capture still confirms it cheaply: in the original, an op that depends
+  on a gameplay fact (the ops behind a `DisSeqEvent_Spawned` after the spawner's `StartSpawn`, or
+  behind the first `SeqEvent_Touch` of the player standing in a trigger at start) has its
+  `Activated` one tick after the event's own `Activated` record (cause at tick k, ops at k + 1).
+  The port now records the same (K-1).
 - **F-3.** Needs a Bend Time capture with a running unflagged Kismet delay; scenario to write once
   a Boyle mission step with a `SeqAct_Delay` is reachable after the intro (the intro locks control).
   Cheap partial check queued as `session` reads (the dilation fields) in the queue file: confirms
@@ -599,7 +622,7 @@ Each cited function was re-read (`oracle index fn`, `exe_probe dis`) before port
 | F-9 | **ported** | `dishonored_sim::world_actors`; `kismet_host.rs : world_events` | The step routine is 0x00a3a5f0 (from the tick 0x00a3b0d0; 0x00a34460 is a second break path, called by other code, not ported): `0x00bc7b30(breakable, class, breakable, 0, 0, [Num(m_Steps) - step - 1])`. Damage comes from grenade explosions only (world.md 10.1 F-12). Scenario `kismet/boyle_int_bottles_grenade` (8 BreakableBroken output 0 in the blast tick). |
 | F-10 | **ported** | `kismet_host.rs` `"DisSeqAct_RefillWhaleOilBattery"`, `"DisSeqAct_PlugWhaleOilBattery"`, `world_events` | Refill 0x00c82190 (truncated `m_PercentageCharge * 0.01 * m_NumberOfCharges`, `SetCharges(n, 0)`), Plug 0x00c7d7c0 (Battery = `Targets`, Receptacle link; counts must match; both inputs: nothing), `DisSeqEvent_WhaleOilBattery` (0x00c81d70, outputs 0 ChargeUsed / 1 AllChargesDepleted; 2 / 3 from the battery's damage path, not ported) and `DisSeqEvent_WhaleOilReceptacle` (0x00c7b490 OnPlug, 0x00c7b6b0 OnUnplug) fire inside the op as the original's do. world.md 10.1 F-14. |
 | F-11 | partial | `kismet_host.rs` `"SeqAct_SetPhysics"` | the class is handled: the `EPhysics` per target is recorded (`HostState.physics`); nothing moves (no rigid bodies, no per-actor physics mode in the sim). |
-| F-13 | open | - | needs the captures of section 6. |
+| F-13 | **ported** (2026-10-11) | `kismet_host.rs : update`, `raise`; `mission.rs : MissionMatch::step` | Order from systems/tick_order.md section 1 (`0x006552C0` slot 92 before `0x00651A80`, CONFIRMED static): `update` (start event, `tick_dilated`, post, presentation, matinees, streaming, spawns) first in the step, before the AI and the simulation; `raise` (`feed`, approach hooks, the committed map change, whose travel stays between steps for the host's collision swap, then the touches where the travel put the players, so that they run with the new levels' `SeqEvent_LevelLoaded` as before; UE3 `FarMoveActor` updating the touches of a teleported actor is LIKELY, not traced) at the end. The update's AI noises reach the same step's AI; the camera's rain cover test of step N is read by update N + 1, as the original's latent op reads the previous tick's camera. The pawns a matinee places are put back on the pose after the simulation (`cutscene::hold`: `PHYS_Interpolating`, `startNewPhysics` case 7), which the frames showed before because `cutscene::apply` ran last. Test `a_gameplay_event_runs_in_the_next_steps_update_and_a_save_between_keeps_it` (the pending event survives a save between the steps). Open: events the old map's gameplay activates in the step of a committed map change wait with that map's Kismet state and run on a return (the old order ran them before the change); whether the original's level state keeps queued events is U-343. |
 | F-14 | **done** | ORACLE.md | the 39 were the host's notes; corrected. |
 
 The trace of the port's `Sequence` op (`fromHub_toBoyle`) shows an `Activated` with no `Deactivated` (the port's `Sequence::Activated` clears `bActive`); the first capture of `kismet/boyle_start` decides whether the original does the same.

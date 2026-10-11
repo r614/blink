@@ -498,7 +498,9 @@ What the simulation's step order must be to match (no implementation here):
 
 1. **Kismet first.** Run `UpdateOp` before the actors: an event raised by gameplay in step N is
    executed in step N+1 (this settles kismet.md K-1's UNVERIFIED in the direction it feared: the
-   port, which ticks Kismet after `MissionState::step`, runs those events one tick early).
+   port, which ticked Kismet after `MissionState::step`, ran those events one tick early; done
+   2026-10-11: `kismet_host::update` opens `MissionMatch::step`, `kismet_host::raise` feeds the
+   step's events at its end).
 2. **Per pawn: physics, then states, then animation.** For each pawn: (NPC) apply last tick's
    rotation intents; integrate physics with the velocity / acceleration as they stand (the NPC's
    velocity comes from last tick's locomotion step); rotate; run the pawn's state machines (player:
