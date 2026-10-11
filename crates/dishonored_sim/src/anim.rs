@@ -734,12 +734,23 @@ pub fn step(state: &mut WorldState, cfg: &SimConfig, world: &dyn WorldQuery, out
 /// section 4), for the state that requested the sequence.
 fn handle(state: &mut WorldState, i: usize, f: &Fired, n: &NotifyInfo, cfg: &SimConfig, world: &dyn WorldQuery, out: &mut StepOut) {
     let kind = f.token & token::KIND;
+    // A dead or held pawn's hand does nothing (`left_hand::update` returns for it), though its
+    // sequences play out.
+    let p = &state.players[i];
+    if matches!(kind, token::LEFT | token::WEAPON) && (!p.alive || p.incapacitated()) {
+        return;
+    }
     match (n.class.as_str(), f.phase) {
         ("DishonoredNotify_AttackZone", phase) => attack_zone(state, i, f, n, phase, cfg, out),
         ("DisNotify_BendTime", Phase::Start) if f.token == token::LEFT | left_kind::CAST_BEND_TIME => cast(state, i, LeftHand::BendTime, cfg, out),
         ("DisNotify_DevouringSwarm", Phase::Start) if f.token == token::LEFT | left_kind::CAST_SWARM => cast(state, i, LeftHand::DevouringSwarm, cfg, out),
         // The possession cast's notify (`Powers_Cast_Possession_Out`): the power takes its target.
-        ("DisNotify_Possession", Phase::Start) if f.token == token::LEFT | left_kind::CAST_POSSESSION => out.actions.push((i, LeftAction::PossessRelease)),
+        ("DisNotify_Possession", Phase::Start) if f.token == token::LEFT | left_kind::CAST_POSSESSION => {
+            let p = &state.players[i];
+            if p.alive && p.left.item == LeftHand::Possession && p.left.phase == LeftPhase::Recovering {
+                out.actions.push((i, LeftAction::PossessRelease));
+            }
+        }
         ("DishonoredNotify_FireProjectile", Phase::Start) if f.token == token::WEAPON => crossbow_shot(state, i, cfg, world, out),
         ("DishonoredNotify_FireProjectile", Phase::Start) if f.token == token::LEFT | left_kind::GRENADE => {
             let p = &mut state.players[i];
