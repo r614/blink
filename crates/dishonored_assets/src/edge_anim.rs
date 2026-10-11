@@ -504,16 +504,9 @@ impl EdgeClip {
     }
 }
 
-/// A clip decoded to per-frame local joint transforms (`None` = joint not driven).
-#[derive(Debug, Clone)]
-pub struct BakedClip {
-    pub num_frames: usize,
-    pub sample_rate: f32,
-    pub duration: f32,
-    /// [frame][joint]
-    pub rotations: Vec<Vec<Option<Quat>>>,
-    pub translations: Vec<Vec<Option<Vec3>>>,
-}
+/// The baked clip and its sampling live with the AnimTree evaluator (`dishonored_anim::clip`),
+/// which needs them without the package decoders.
+pub use dishonored_anim::BakedClip;
 
 fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
@@ -580,44 +573,5 @@ impl EdgeClip {
             }
         }
         Ok(BakedClip { num_frames: nf, sample_rate: h.sample_frequency, duration: h.duration, rotations: rot, translations: tr })
-    }
-}
-
-impl BakedClip {
-    /// Sample at `time` seconds (looping), blending neighbouring frames.
-    pub fn sample(&self, time: f32, joint: usize) -> (Option<Quat>, Option<Vec3>) {
-        let len = (self.num_frames.max(1) - 1).max(1) as f32;
-        self.sample_frame((time * self.sample_rate).rem_euclid(len), joint)
-    }
-
-    /// Sample at `time` seconds without looping: past the end holds the last frame (a door's
-    /// open pose, a matinee's final pose). Looping sampling wrapped the clip's end back to its
-    /// first frame, so a door that finished opening snapped shut.
-    pub fn sample_held(&self, time: f32, joint: usize) -> (Option<Quat>, Option<Vec3>) {
-        let len = (self.num_frames.max(1) - 1) as f32;
-        self.sample_frame((time * self.sample_rate).clamp(0.0, len), joint)
-    }
-
-    fn sample_frame(&self, fpos: f32, joint: usize) -> (Option<Quat>, Option<Vec3>) {
-        if self.num_frames == 0 || self.rotations.first().is_none_or(|r| joint >= r.len()) {
-            return (None, None);
-        }
-        let f0 = fpos.floor() as usize;
-        let f1 = (f0 + 1).min(self.num_frames - 1);
-        let t = fpos - f0 as f32;
-        let r = match (self.rotations[f0][joint], self.rotations[f1][joint]) {
-            (Some(a), Some(mut b)) => {
-                if a.dot(b) < 0.0 {
-                    b = -b;
-                }
-                Some(a.lerp(b, t).normalize())
-            }
-            (a, b) => a.or(b),
-        };
-        let p = match (self.translations[f0][joint], self.translations[f1][joint]) {
-            (Some(a), Some(b)) => Some(a.lerp(b, t)),
-            (a, b) => a.or(b),
-        };
-        (r, p)
     }
 }
