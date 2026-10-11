@@ -619,6 +619,17 @@ error in Dishonored units). Pass `--bones bone,bone` to compare specific bones (
 present in both), `--offset N` to skip the search and use a fixed tick offset, `--pawn ID` to
 filter the port dump to one pawn id, and `--json OUT` to write the results as JSON.
 
+**One clip against the capture, no runtime run.** `oracle anim clip --capture anim-<hash>.json
+--skeleton <pkg> <SkeletalMesh path> --set <pkg> <AnimSet path> --sequence NAME [--node N]
+[--bones a,b] [--exclude-below BONE] [--frames A..B] [--json OUT]` poses the skeleton with that one
+sequence from the AnimSet data at the time the capture's node was at in each frame (rotations on
+every mapped track, translations on the root and its children, as the port plays clips) and
+compares the component-space bones with the capture's `cs`. It isolates the Edge decoder and the
+retargeting from the tree, the state machine and the clocks: a residual here is in the clip
+playback itself. The search over clip-time offsets of -10..+10 ticks reports how far the baked
+clip runs ahead of or behind the capture (U-865). `--exclude-below head_jnt` leaves out the bones
+the face slot, the look-at additive and the blink drive on top of the body clip.
+
 **NPC locomotion needs the level's navigation mesh.** On the Playground (built at +20000 in
 Boyle, no navmesh there) placed NPCs never move: alerted guards attack in place
 (`combat/guard_attack`, `combat/block`, `ai/combat_cadence`: x / y constant), and a patrolling

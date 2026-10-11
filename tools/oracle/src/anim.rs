@@ -873,20 +873,13 @@ fn compare_clip_frames(
     })
 }
 
+/// The playhead of the capture's node `node_idx` while it plays (the frames key nodes by their
+/// index in the capture's node list).
 fn get_node_time_by_index(frame: &FullFrame, node_idx: usize) -> Option<f32> {
-    frame.nodes.iter()
-        .enumerate()
-        .filter_map(|(i, (_, node))| {
-            if i == node_idx {
-                match node {
-                    NodeState::Sequence { weight, time, .. } if *weight > 0.0 => Some(*time),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        })
-        .next()
+    match frame.nodes.get(&node_idx.to_string())? {
+        NodeState::Sequence { weight, time, .. } if *weight > 0.0 => Some(*time),
+        _ => None,
+    }
 }
 
 fn get_playing_sequence_time(frame: &FullFrame, seq_name: &str) -> Option<f32> {
@@ -912,7 +905,8 @@ fn pose_clip(
     // Apply clip samples to matching bones
     for (track_idx, track_name) in tracks.iter().enumerate() {
         if let Some(bone_idx) = bones.iter().position(|b| b.name.eq_ignore_ascii_case(track_name)) {
-            let (rot_opt, trans_opt) = clip.sample(time, track_idx);
+            // A held sequence reports its length as the time; the clip's last key is its end.
+            let (rot_opt, trans_opt) = clip.sample(time.clamp(0.0, (clip.duration - 1e-4).max(0.0)), track_idx);
 
             if let Some(rot) = rot_opt {
                 posed_bones[bone_idx].rotation = rot;
