@@ -519,6 +519,44 @@ pub fn load_anim_set(content: &Content, pkg_name: &str, set_path: &str, wanted: 
     Ok(AnimLibrary { tracks, clips })
 }
 
+/// The bones of a skeletal mesh: names, parents and the local bind pose as stored.
+pub fn load_skeleton(content: &Content, pkg_name: &str, path: &str) -> Result<Vec<BoneAsset>> {
+    let pkg = content.package(pkg_name)?;
+    let i = (0..pkg.exports.len()).find(|&i| pkg.export_class(i) == "SkeletalMesh" && pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(path)).with_context(|| format!("{path} not in {pkg_name}"))?;
+    let raw = read_skeletal_mesh(&pkg, i)?;
+    Ok(raw.bones.iter().map(|b| BoneAsset { name: b.name.clone(), parent: b.parent, rotation: b.orientation, translation: b.position }).collect())
+}
+
+/// AnimSets bound to a skeleton for the AnimTree evaluator (`dishonored_anim::AnimSets`, later
+/// sets winning a name): each set's named sequences (all when `wanted` is empty), its tracks in
+/// the Edge order of `reference` (the skeleton the sets were compressed against, e.g. the
+/// locomotion config's `m_SkeletalRefMeshName`) and its translation flags (`bAnimRotationOnly`,
+/// `UseTranslationBoneNames`, `ForceMeshTranslationBoneNames`; none is cooked on the Boyle NPC
+/// sets).
+pub fn bind_anim_sets(content: &Content, pkg_name: &str, set_paths: &[&str], wanted: &[&str], reference: &[BoneAsset], skeleton: &[BoneAsset]) -> Result<dishonored_anim::AnimSets> {
+    use ue3_package::properties::{Value, find};
+    let pkg = content.package(pkg_name)?;
+    let mut sets = dishonored_anim::AnimSets::new();
+    for path in set_paths {
+        let mut lib = load_anim_set(content, pkg_name, path, wanted)?;
+        lib.edge_order(reference);
+        let set = (0..pkg.exports.len()).find(|&i| pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(path)).with_context(|| format!("{path} not in {pkg_name}"))?;
+        let props = pkg.read_object(set)?.properties;
+        let names = |n: &str| -> Vec<String> {
+            let Some((count, raw)) = find(&props, n).and_then(|p| p.array_raw()) else { return Vec::new() };
+            let mut r = ue3_package::reader::Reader::new(raw);
+            (0..count.min(4096)).filter_map(|_| ue3_package::FName::read(&mut r).ok().map(|f| pkg.name(f))).collect()
+        };
+        let flags = dishonored_anim::SetFlags {
+            rotation_only: matches!(find(&props, "bAnimRotationOnly").map(|p| &p.value), Some(Value::Bool(true))),
+            use_translation: names("UseTranslationBoneNames"),
+            force_mesh_translation: names("ForceMeshTranslationBoneNames"),
+        };
+        sets.push(&lib.tracks, lib.clips, &flags, skeleton);
+    }
+    Ok(sets)
+}
+
 impl AnimLibrary {
     /// Put `tracks` in Edge joint order: Edge clip joint `j` is the set's `j`-th track in
     /// the bone order of the skeleton the set was compressed against, not the order of

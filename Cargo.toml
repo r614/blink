@@ -31,6 +31,7 @@ dishonored_kismet = { path = "crates/dishonored_kismet", default-features = fals
 dishonored_settings = { path = "crates/dishonored_settings" }
 dishonored_save = { path = "crates/dishonored_save" }
 dishonored_fx = { path = "crates/dishonored_fx" }
+dishonored_anim = { path = "crates/dishonored_anim" }
 dishonored_oracle = { path = "crates/dishonored_oracle" }
 
 [profile.dev]

@@ -1,0 +1,14 @@
+[package]
+name = "dishonored_anim"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "UE3 AnimTree evaluation over the cooked node graph: baked clip sampling, blend nodes, slots, the locomotion and look-at nodes, root motion"
+
+[dependencies]
+dishonored_ir.workspace = true
+glam.workspace = true
+
+[dev-dependencies]
+dishonored_assets.workspace = true
+serde_json.workspace = true

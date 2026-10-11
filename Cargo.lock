@@ -2491,10 +2491,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dishonored_anim"
+version = "0.1.0"
+dependencies = [
+ "dishonored_assets",
+ "dishonored_ir",
+ "glam",
+ "serde_json",
+]
+
+[[package]]
 name = "dishonored_assets"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dishonored_anim",
  "dishonored_audio",
  "dishonored_ir",
  "dishonored_world",

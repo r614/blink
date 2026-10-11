@@ -23,6 +23,18 @@ fn name_of(props: &[Property], n: &str) -> String {
     }
 }
 
+/// A static enum array (`RootBoneOption[3]`): each cooked element by its array index, the
+/// class default (the enum's first value) where none is cooked.
+fn enum_array<T: Copy + Default>(props: &[Property], n: &str, parse: impl Fn(&str) -> T) -> [T; 3] {
+    let mut out = [T::default(); 3];
+    for p in props.iter().filter(|p| p.name.eq_ignore_ascii_case(n)) {
+        if let (Some(slot), Value::Enum(e) | Value::Name(e)) = (out.get_mut(p.array_index.max(0) as usize), &p.value) {
+            *slot = parse(e);
+        }
+    }
+    out
+}
+
 /// An `array<name>` property.
 fn names(pkg: &Package, props: &[Property], n: &str) -> Vec<String> {
     let Some((count, raw)) = find(props, n).and_then(|p| p.array_raw()) else { return Vec::new() };
@@ -175,19 +187,35 @@ fn decode_node_props(pkg: &Package, class: &str, props: &[Property], loco_defaul
         // loops and slot channels, the player's state sequences, the mantle sequence).
         c if c == "AnimNodeSequence" || c.contains("AnimNodeSeq") => NodeProps::Sequence {
             seq: name_of(props, "AnimSeqName"),
-            // `Rate` is left at the class default (1) by every node of the cooked trees.
+            // `Rate` is the class default (1) except on the reversed locomotion slots (-1).
             rate: find(props, "Rate").and_then(|p| p.as_float()).unwrap_or(1.0),
             looping: bool_of(props, "bLooping"),
             playing: bool_of(props, "bPlaying"),
             no_notifies: bool_of(props, "bNoNotifies"),
             sync_group: name_of(props, "SynchGroupName"),
+            // `Engine.Default__AnimNodeSequence` sets `bSynchronize`: only an explicit false is
+            // cooked (the idle slot of `LocoBlender`).
+            synchronize: !matches!(find(props, "bSynchronize").map(|p| &p.value), Some(Value::Bool(false))),
+            reverse_sync: bool_of(props, "bReverseSync"),
+            root_bone: enum_array(props, "RootBoneOption", |e| match e {
+                "RBA_Translate" => RootBoneOption::Translate,
+                "RBA_Discard" => RootBoneOption::Discard,
+                _ => RootBoneOption::Default,
+            }),
+            root_rotation: enum_array(props, "RootRotationOption", |e| match e {
+                "RRO_Discard" => RootRotationOption::Discard,
+                "RRO_Extract" => RootRotationOption::Extract,
+                _ => RootRotationOption::Default,
+            }),
+            keep_undefined: bool_of(props, "m_bDontUseRefPoseOnNonDefinedBones"),
         },
         "AnimNodeBlendPerBone" | "DisAnimNodeBlendPerBone" => NodeProps::BlendPerBone {
             branches: names(pkg, props, "BranchStartBoneName"),
             local_space: bool_of(props, "bForceLocalSpaceBlend"),
             exclude_branch: bool_of(props, "m_bExcludeBranchBones"),
         },
-        "DisAnimNodeSlot" | "AnimNodeSlot" => NodeProps::Slot { early_anim_end: bool_of(props, "bEarlyAnimEndNotify") },
+        // `bEarlyAnimEndNotify` is true in `Engine.Default__AnimNodeSlot`; only a false is cooked.
+        "DisAnimNodeSlot" | "AnimNodeSlot" => NodeProps::Slot { early_anim_end: !matches!(find(props, "bEarlyAnimEndNotify").map(|p| &p.value), Some(Value::Bool(false))) },
         "AnimNodeAdditiveBlending" => NodeProps::AdditiveBlending,
         "AnimNodeBlendByPhysics" => NodeProps::BlendByPhysics,
         "AnimNodeBlendList" => NodeProps::BlendList,
