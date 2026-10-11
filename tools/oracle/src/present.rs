@@ -376,7 +376,8 @@ mod tests {
             return;
         };
 
-        let golden_path = Path::new("fixtures/fx_golden.json");
+        // The repository's fixtures (cargo runs the test from the crate's directory).
+        let golden_path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/oracle/fx_golden.json"));
         let mut golden: BTreeMap<String, String> = if golden_path.exists() {
             match std::fs::read_to_string(golden_path) {
                 Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
@@ -448,7 +449,7 @@ mod tests {
 
         if is_new {
             let mut sorted_result = result;
-            std::fs::create_dir_all("fixtures").ok();
+            std::fs::create_dir_all(golden_path.parent().unwrap()).ok();
             std::fs::write(golden_path, serde_json::to_string_pretty(&sorted_result).unwrap()).unwrap();
             println!("generated {}: {} emitter systems", golden_path.display(), sorted_result.len());
         } else {
