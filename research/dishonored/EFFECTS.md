@@ -66,7 +66,15 @@ Modules decoded (`dishonored_assets::particles`, IR `dishonored_ir::particles`):
 | TypeDataTrail2 / TypeDataRibbon / TypeDataAnimTrail | strip in spawn order |
 | TypeDataBeam2, BeamTarget, BeamNoise | Distance, TextureTile; Target; NoiseRange, NoiseTessellation |
 
-Other module classes are listed per emitter as unsupported.
+The emitter keeps its LOD's `Modules` as an ordered list in the cooked order
+(`ParticleEmitterAsset::modules`): every enabled module of a class the port simulates is one
+`dishonored_ir::particles::ParticleModule` variant of its class with what the decoder reads of
+it (a distribution the cooked module carries no table for is `None`). The required, spawn and
+type-data modules' own fields (material, screen alignment, local space, duration / loops /
+delay, SubUV layout, sort mode, rate and bursts, mesh, trail / beam / decal, events) stay fields
+of the emitter; BeamTarget / BeamNoise complete the beam type data and MeshMaterial the
+emitter's material. A class the port does not simulate is listed in place as
+`Unsupported { class }` (the import report, `ParticleEmitterAsset::unsupported`).
 
 ## Runtime (`crates/dishonored_runtime/src/effects.rs`)
 
@@ -83,6 +91,14 @@ Other module classes are listed per emitter as unsupported.
   relative age; SubUV frame from SubImageIndex; orbit offsets added at render time (rotation
   and rate in turns); local or world space; warm-up (`WarmupTime`) in 1/15 s steps. Placed
   emitters simulate within 9,000 uu of the camera and only while their level is shown.
+- The simulation (`dishonored_fx`: `spawn_particle`, `step`, `dispatch_events`) and the sprite
+  builder read the module list through the emitter's accessors (`lifetime()`, `velocity()`,
+  `collision()`...): the last module of the class, as the flat layout kept it, a distribution
+  without a table included (the install has emitters with two modules of a class, e.g. two
+  `ParticleModuleLocation` on `Blink_Ground_01`'s Body; the second Location of
+  `Flare_Bolts_02`'s Embers carries no table, so that emitter has no start location), and every
+  orbit in order (`orbits()`, summed). A new class is one variant, one decoder arm and one
+  simulation arm.
 - Drawing: one dynamic mesh per emitter, camera-facing quads (square or rectangle;
   velocity-aligned for PSA_Velocity; locked to an emitter axis or rotating about one with
   `ParticleModuleOrientationAxisLock`), vertex colour x texture, unlit, blend from the material
