@@ -304,6 +304,9 @@ Layering: full-body chains blend in over their step's `m_fBlendInTime` and out o
 `m_fBlendOutTime`; the upper-body slot is masked to `spine_0_jnt` and its descendants
 (`UpperBodyFilter.BranchStartBoneName`). Rotations retarget by bone name; translations are taken
 from the clip for the root and its children only (the pelvis drop of deaths, kneels and falls).
+That is the runtime's rule, not the original's: the Boyle NPC sets leave `bAnimRotationOnly`
+false, so every clip translation is used, which the face bones of the `stealth/detect_1300`
+capture confirm (`dishonored_anim`, LOG 2026-10-11).
 
 ## 7. Animation notifies and gameplay timing (for the simulation)
 

@@ -608,6 +608,17 @@ checked against `GetBoneLocation` / `GetBoneQuaternion` (spine_1_jnt: same posit
 rotation up to the quaternion sign). Size: a guard (118 bones, 40 nodes) for 900 ticks with
 world space was 9.4 MB, about half without.
 
+**Node numbers and stale bones (2026-10-11).** A node's number is its cooked `TickArrayIndex`
+(0 is the tree object; `dishonored_anim::AnimTreeInstance::node_at_tick_index`). UE3 recomposes
+`SpaceBases` only for the bones the mesh's current LOD requires (`ComposeSkeleton` over
+`RequiredBones`); the others keep the value of the last tick that required them. In
+`stealth/detect_1300` (the guard at a distance) 187 of the 201 ticks rewrite only 37 bones
+(spine, limbs, `head_jnt` / `head_end_jnt` / `camera_jnt`, `middle_0_*` but no other finger, no
+face), so a comparison skips a bone on a tick where its value is not fresh: fresh when it is in
+that reduced set or when the tick's delta rewrites a bone outside it. Comparing every tick's
+carried-forward value puts the fingers at about 46 deg mean, 180 max, against a pose that
+matches them to 0.03 deg on the fresh ticks (crates/dishonored_anim/tests/npc_human_replay.rs).
+
 **Comparing the port.** The port writes its own per-frame bone transforms with the `DISH_ANIM_DUMP`
 environment variable: run a harness scenario with `DISH_ANIM_DUMP=<pawn_id>:<file.jsonl>` to write
 one JSON object per line with the same fields as `dump_bones` (tick, id, bones [name, q, t], full,
