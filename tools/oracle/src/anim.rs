@@ -1,7 +1,7 @@
 //! Skeletal animation comparison: oracle capture vs port dump.
 
 use anyhow::{anyhow, bail, Context, Result};
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Quat};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::{BTreeMap, HashMap};
@@ -715,19 +715,25 @@ struct ClipComparisonStats {
     frames_skipped: usize,
 }
 
+/// `exclude_bone` and every bone below it. A bone's parents are walked to the root, which is
+/// its own parent in the cooked skeletons (UE3's `ParentIndex` 0 for bone 0; `bind_globals`
+/// treats a parent at or above the bone's own index as none).
 fn build_exclude_set(bones: &[dishonored_ir::BoneAsset], exclude_bone: &str) -> std::collections::HashSet<String> {
     let mut excluded = std::collections::HashSet::new();
     if let Some(idx) = bones.iter().position(|b| b.name.eq_ignore_ascii_case(exclude_bone)) {
         excluded.insert(bones[idx].name.clone());
-        // Add all descendants
         for (i, b) in bones.iter().enumerate() {
-            let mut parent_idx = b.parent as usize;
-            while parent_idx < bones.len() {
-                if parent_idx == idx {
+            let mut cur = i;
+            loop {
+                let p = bones[cur].parent;
+                if p < 0 || p as usize >= cur {
+                    break;
+                }
+                if p as usize == idx {
                     excluded.insert(b.name.clone());
                     break;
                 }
-                parent_idx = bones[parent_idx].parent as usize;
+                cur = p as usize;
             }
         }
     }
@@ -941,7 +947,7 @@ fn print_clip_report(
         stats_0.overall.mean_angle, stats_0.overall.max_angle, stats_0.overall.samples);
     println!();
 
-    println!("Best offset: {} ticks ({:.1} frames, 60 Hz)", best_offset, best_offset as f32 / 60.0);
+    println!("Best clip-time offset: {} ticks ({:+.3} s; the clip's time ahead of the capture's node time): mean angle {:.2} deg over the search", best_offset, best_offset as f32 / 60.0, best_mean);
     println!("  Overall: mean angle {:.2} deg, max angle {:.2} deg ({} samples)",
         stats_best.overall.mean_angle, stats_best.overall.max_angle, stats_best.overall.samples);
     println!();
@@ -1009,6 +1015,7 @@ pub fn cmd_anim(args: &crate::Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Vec3;
 
     #[test]
     fn test_delta_reconstruction() {
@@ -1147,5 +1154,11 @@ mod tests {
         assert!(excluded.contains("head"));
         assert!(!excluded.contains("chest"));
         assert!(!excluded.contains("neck"));
+        // The cooked skeletons' root is its own parent: the walk must still end.
+        let mut cooked = bones.clone();
+        cooked[0].parent = 0;
+        let excluded = build_exclude_set(&cooked, "chest");
+        assert_eq!(excluded.len(), 3, "{excluded:?}");
+        assert!(!excluded.contains("root"));
     }
 }
