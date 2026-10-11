@@ -479,7 +479,6 @@
   "windblast": {
     "mana_cost": 50.0,
     "values": {
-      "cast.notify_time": 0.27,
       "m_BaseClassVersions(0).m_VersionNum": 11.0,
       "m_BaseClassVersions(1).m_VersionNum": 3.0,
       "m_HitWallAdditionalDamage": 100.0,
@@ -1154,9 +1153,6 @@
       "disp.m_DispersionMin.m_fBaseValue3_Hard": 0.0,
       "disp.m_DispersionMin.m_fBaseValue4_VeryHard": 0.0,
       "disp.m_VersionNum": 101.0,
-      "fire.exit_time": 0.3983666,
-      "fire.fast_exit_time": 0.62483305,
-      "fire.fast_notify_time": 0.0,
       "fire.m_AimAssistChoiceInfo.m_AimAssistDistReduceSettings(0).m_fAimAssistWindowScale": 0.5,
       "fire.m_AimAssistChoiceInfo.m_AimAssistDistReduceSettings(0).m_fDistanceToReduce": 2000.0,
       "fire.m_AimAssistChoiceInfo.m_fAimAssistAngleWeight": 10000.0,
@@ -1563,7 +1559,6 @@
       "fire.m_fMaxContextHeightDifference": -1.0,
       "fire.m_fMaxContextRange": 10000.0,
       "fire.m_fRollVelocity": 100.0,
-      "fire.notify_time": 0.03361667,
       "item.m_BaseClassVersions(0).m_VersionNum": 7.0,
       "item.m_BaseClassVersions(1).m_VersionNum": 11.0,
       "item.m_BaseClassVersions(2).m_VersionNum": 3.0,
@@ -165070,10 +165065,6 @@
     "blink.time_between_steps[1]": "Twk_Powers.Blink.Twk_Blink :: m_Levels[1].m_fDefaultTimeBetweenBlinkSteps = 0.01",
     "blink.vert_distance[0]": "Twk_Powers.Blink.Twk_Blink :: m_Levels.m_VertDistance = 500",
     "blink.vert_distance[1]": "Twk_Powers.Blink.Twk_Blink :: m_Levels[1].m_VertDistance = 500",
-    "crossbow.fire.exit_time": "Startup.upk Ply_Crossbow_as.Ply_Crossbow_as Crossbow_Fire DishonoredNotify_AnimStateExit Time / RateScale = 0.3983666",
-    "crossbow.fire.fast_exit_time": "Startup.upk Ply_Crossbow_as.Ply_Crossbow_as Crossbow_Fire_FastReload DishonoredNotify_AnimStateExit Time / RateScale = 0.62483305",
-    "crossbow.fire.fast_notify_time": "Startup.upk Crossbows_as.Crossbow_as Crossbow_Fire_FastReload DishonoredNotify_FireProjectile Time / RateScale = 0",
-    "crossbow.fire.notify_time": "Startup.upk Crossbows_as.Crossbow_as Crossbow_Fire DishonoredNotify_FireProjectile Time / RateScale = 0.03361667",
     "crossbow.values": "item=Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo; fire=Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo.DisTweaks_InventoryItem_PlayerSpecific_1.DisTweaks_FireCrossbow_0; projectile=Twk_Projectiles.Twk_Proj_Arrow; disp=Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo.DisTweaks_WeaponRanged_Attributes_4",
     "dark_vision.mana_cost": "Twk_Powers.DarkVision.Twk_DarkVision :: m_ManaCost = 20",
     "dark_vision.values": "Twk_Powers.DarkVision.Twk_DarkVision (flattened)",
@@ -165356,7 +165347,6 @@
     "vitals.mana_regen_amount": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_ManaRegenAmount.m_fBaseValue2_Normal = 1",
     "vitals.mana_regen_initial_delay": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_ManaRegenInitialDelay.m_fBaseValue2_Normal = 3",
     "vitals.mana_regen_step_time": "Twk_Pawn_Corvo.Twk_Pawn_Corvo_Release.pAttributeTweaksNormal :: m_ManaRegenStepTime.m_fBaseValue2_Normal = 0.1",
-    "windblast.cast.notify_time": "Startup.upk Ply_Powers_as.Ply_Powers_as Powers_Cast_Windblast DisNotify_WindBlast Time / RateScale = 0.27",
     "windblast.mana_cost": "Twk_Powers.Windblast.Twk_WindBlast :: m_ManaCost = 50",
     "windblast.values": "Twk_Powers.Windblast.Twk_WindBlast (flattened)"
   }

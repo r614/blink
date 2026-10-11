@@ -471,15 +471,10 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         l.prov.insert(format!("{name}.values"), format!("{path} (flattened)"));
         Ok(PowerConfig { mana_cost, values: flatten(&m) })
     };
-    let mut windblast = power(&mut l, "Twk_Powers.Windblast.Twk_WindBlast", "windblast")?;
     // The blast starts at the cast animation's `DisNotify_WindBlast` (0x00A96AE0 -> 0x00C44E10
-    // -> 0x00BF9570); the power's fire mode (0x00BF9720) waits for it while the cast action plays.
-    {
-        let (pkg, set, seq) = ("Startup", "Ply_Powers_as.Ply_Powers_as", "Powers_Cast_Windblast");
-        let t = crate::npc_anim::sequence_notify_time(content, pkg, set, seq, "DisNotify_WindBlast").with_context(|| format!("{pkg} {set} {seq}: no DisNotify_WindBlast"))?;
-        windblast.values.insert("cast.notify_time".into(), t);
-        l.prov.insert("windblast.cast.notify_time".into(), format!("{pkg}.upk {set} {seq} DisNotify_WindBlast Time / RateScale = {t}"));
-    }
+    // -> 0x00BF9570), the crossbow's shot at its mesh's `DishonoredNotify_FireProjectile`: both
+    // are read from the sequence table (`sequences`).
+    let windblast = power(&mut l, "Twk_Powers.Windblast.Twk_WindBlast", "windblast")?;
     let throw = load_throw(&mut l, content)?;
     let dark_vision = power(&mut l, "Twk_Powers.DarkVision.Twk_DarkVision", "dark_vision")?;
 
@@ -521,7 +516,7 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         ],
         "pistol",
     )?;
-    let mut crossbow = weapon(
+    let crossbow = weapon(
         &mut l,
         &[
             ("item", "Twk_Inv_PlayerSpecific.Twk_Inv_CrossbowCorvo"),
@@ -531,23 +526,6 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
         ],
         "crossbow",
     )?;
-    // The fire action's clips (`m_FireCrossbowAction` plays `Crossbow_Fire`, `m_FireReloadFast`
-    // `Crossbow_Fire_FastReload`): the action ends at the player set's `AnimStateExit`, and the
-    // shot leaves at the weapon set's `DishonoredNotify_FireProjectile` (0x00A96890 -> the item
-    // context's fire, 0x00C38230), not on the press.
-    {
-        let (ply, wep) = ("Ply_Crossbow_as.Ply_Crossbow_as", "Crossbows_as.Crossbow_as");
-        for (key, set, seq, notify) in [
-            ("fire.exit_time", ply, "Crossbow_Fire", "DishonoredNotify_AnimStateExit"),
-            ("fire.fast_exit_time", ply, "Crossbow_Fire_FastReload", "DishonoredNotify_AnimStateExit"),
-            ("fire.notify_time", wep, "Crossbow_Fire", "DishonoredNotify_FireProjectile"),
-            ("fire.fast_notify_time", wep, "Crossbow_Fire_FastReload", "DishonoredNotify_FireProjectile"),
-        ] {
-            let t = crate::npc_anim::sequence_notify_time(content, "Startup", set, seq, notify).with_context(|| format!("Startup {set} {seq}: no {notify}"))?;
-            crossbow.values.insert(key.into(), t);
-            l.prov.insert(format!("crossbow.{key}"), format!("Startup.upk {set} {seq} {notify} Time / RateScale = {t}"));
-        }
-    }
 
     // The player visibility's speed value divides by `Attribute_GroundSpeedSprint` (0x00ac33b0).
     let mut ai = crate::ai_config::load_ai_config(content, &[]);
