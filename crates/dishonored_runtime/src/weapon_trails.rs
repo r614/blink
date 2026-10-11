@@ -104,10 +104,10 @@ mod tests {
     #[test]
     fn fed_updates_lay_knots_along_the_swing() {
         use crate::present_rules::{EmitterSim, TrailSource, next_rand, step};
-        use dishonored_ir::particles::{Dist, ParticleEmitterAsset, TrailParams};
+        use dishonored_ir::particles::{Dist, ParticleEmitterAsset, ParticleModule, TrailParams};
         let em = ParticleEmitterAsset {
             rate: Some(Dist::constant([100.0; 3], 1)),
-            lifetime: Some(Dist::constant([0.15; 3], 1)),
+            modules: vec![ParticleModule::Lifetime(Some(Dist::constant([0.15; 3], 1)))],
             trail: Some(TrailParams { tiling: 1.0, ribbon: true, anim: true, tessellation_step: Some(50.0) }),
             ..Default::default()
         };

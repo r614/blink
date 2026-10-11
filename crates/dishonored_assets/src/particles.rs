@@ -4,7 +4,7 @@
 
 use crate::material_chain::Key;
 use dishonored_ir::MaterialId;
-use dishonored_ir::particles::{Dist, ParticleBlend, ParticleEmitterAsset, ParticleSystemAsset};
+use dishonored_ir::particles::{Dist, ParticleBlend, ParticleEmitterAsset, ParticleModule, ParticleSystemAsset};
 use std::sync::Arc;
 use ue3_package::properties::{Property, Value, find};
 use ue3_package::{ObjRef, Package};
@@ -250,7 +250,7 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
         ..Default::default()
     };
     if class != "ParticleSpriteEmitter" {
-        em.unsupported.push(class);
+        em.modules.push(ParticleModule::Unsupported { class });
     }
     let lods = find(&h.properties, "LODLevels").and_then(|p| p.array_objects().ok()).unwrap_or_default();
     let lod_k = ctx.resolve_ref(k.0, ObjRef::from_index(*lods.first()?))?;
@@ -267,6 +267,10 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
     }
     // The LOD's `Modules[0]` (after the required / spawn / type-data modules).
     let first_listed = modules.len();
+    // `Modules` in its cooked order: every enabled module of a class the port simulates becomes
+    // `em.modules` in that order (a distribution it carries no table for as None: as the last of
+    // its class it still decides, the way it cleared the flat layout's field), the others
+    // `Unsupported` in their place.
     modules.extend(find(&lod.properties, "Modules").and_then(|p| p.array_objects().ok()).unwrap_or_default());
     for (mi, m) in modules.into_iter().enumerate() {
         let Some(mk) = ctx.resolve_ref(lod_k.0, ObjRef::from_index(m)) else { continue };
@@ -335,46 +339,41 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                 em.rate_scale = dist(p, "RateScale", 1);
                 em.bursts.extend(bursts(&mpkg, p));
             }
-            "ParticleModuleLifetime" => em.lifetime = dist(p, "Lifetime", 1),
-            "ParticleModuleSize" => em.size = dist(p, "StartSize", 3),
+            "ParticleModuleLifetime" => em.modules.push(ParticleModule::Lifetime(dist(p, "Lifetime", 1))),
+            "ParticleModuleSize" => em.modules.push(ParticleModule::Size(dist(p, "StartSize", 3))),
             "ParticleModuleSizeMultiplyLife" => {
-                em.size_over_life = dist(p, "LifeMultiplier", 3);
-                em.size_over_life_axes = [bool_or(p, "MultiplyX", true), bool_or(p, "MultiplyY", true), bool_or(p, "MultiplyZ", true)];
+                let axes = [bool_or(p, "MultiplyX", true), bool_or(p, "MultiplyY", true), bool_or(p, "MultiplyZ", true)];
+                em.modules.push(ParticleModule::SizeOverLife { dist: dist(p, "LifeMultiplier", 3), axes });
             }
             "ParticleModuleVelocity" => {
-                em.velocity = dist(p, "StartVelocity", 3);
-                em.velocity_radial = dist(p, "StartVelocityRadial", 1);
-                em.velocity_world = bool_or(p, "bInWorldSpace", false);
+                em.modules.push(ParticleModule::Velocity { start: dist(p, "StartVelocity", 3), radial: dist(p, "StartVelocityRadial", 1), world: bool_or(p, "bInWorldSpace", false) });
             }
-            "ParticleModuleRotation" => em.rotation = dist(p, "StartRotation", 1),
-            "ParticleModuleRotationRate" => em.rotation_rate = dist(p, "StartRotationRate", 1),
+            "ParticleModuleRotation" => em.modules.push(ParticleModule::Rotation(dist(p, "StartRotation", 1))),
+            "ParticleModuleRotationRate" => em.modules.push(ParticleModule::RotationRate(dist(p, "StartRotationRate", 1))),
             "ParticleModuleColor" => {
-                em.color = dist(p, "StartColor", 3);
-                em.alpha = dist(p, "StartAlpha", 1);
+                em.modules.push(ParticleModule::Color { color: dist(p, "StartColor", 3), alpha: dist(p, "StartAlpha", 1) });
             }
             "ParticleModuleColorOverLife" => {
-                em.color_over_life = dist(p, "ColorOverLife", 3);
-                em.alpha_over_life = dist(p, "AlphaOverLife", 1);
+                em.modules.push(ParticleModule::ColorOverLife { color: dist(p, "ColorOverLife", 3), alpha: dist(p, "AlphaOverLife", 1) });
             }
             "ParticleModuleAcceleration" => {
-                em.acceleration = dist(p, "Acceleration", 3);
-                em.accel_world = bool_or(p, "bAlwaysInWorldSpace", false);
+                em.modules.push(ParticleModule::Acceleration { dist: dist(p, "Acceleration", 3), world: bool_or(p, "bAlwaysInWorldSpace", false) });
             }
-            "ParticleModuleAccelerationOverLifetime" => em.accel_over_life = dist(p, "AccelOverLife", 3).map(|d| (d, bool_or(p, "bAlwaysInWorldSpace", false))),
+            "ParticleModuleAccelerationOverLifetime" => em.modules.push(ParticleModule::AccelOverLife { dist: dist(p, "AccelOverLife", 3), world: bool_or(p, "bAlwaysInWorldSpace", false) }),
             "ParticleModuleColorScaleOverLife" => {
-                em.color_scale_over_life = Some((dist(p, "ColorScaleOverLife", 3), dist(p, "AlphaScaleOverLife", 1), bool_or(p, "bEmitterTime", false)));
+                em.modules.push(ParticleModule::ColorScaleOverLife { color: dist(p, "ColorScaleOverLife", 3), alpha: dist(p, "AlphaScaleOverLife", 1), emitter_time: bool_or(p, "bEmitterTime", false) });
             }
-            "ParticleModuleRotationRateMultiplyLife" => em.rotation_rate_life = dist(p, "LifeMultiplier", 1),
-            "ParticleModuleMeshRotationRateOverLife" => em.mesh_rotation_rate_life = dist(p, "RotRate", 3).map(|d| (d, bool_or(p, "bScaleRotRate", false))),
-            "ParticleModuleSizeScale" => em.size_scale = dist(p, "SizeScale", 3),
+            "ParticleModuleRotationRateMultiplyLife" => em.modules.push(ParticleModule::RotationRateLife(dist(p, "LifeMultiplier", 1))),
+            "ParticleModuleMeshRotationRateOverLife" => em.modules.push(ParticleModule::MeshRotationRateLife { dist: dist(p, "RotRate", 3), scale: bool_or(p, "bScaleRotRate", false) }),
+            "ParticleModuleSizeScale" => em.modules.push(ParticleModule::SizeScale(dist(p, "SizeScale", 3))),
             "ParticleModuleSizeScaleByTime" => {
                 // `Default__ParticleModuleSizeScaleByTime`: every axis enabled.
-                em.size_scale_by_time = dist(p, "SizeScaleByTime", 3).map(|d| (d, [bool_or(p, "bEnableX", true), bool_or(p, "bEnableY", true), bool_or(p, "bEnableZ", true)]));
+                em.modules.push(ParticleModule::SizeScaleByTime { dist: dist(p, "SizeScaleByTime", 3), axes: [bool_or(p, "bEnableX", true), bool_or(p, "bEnableY", true), bool_or(p, "bEnableZ", true)] });
             }
-            "ParticleModuleKillHeight" => em.kill_height = dist(p, "Height", 1).map(|d| (d, bool_or(p, "bAbsolute", false), bool_or(p, "bFloor", false))),
+            "ParticleModuleKillHeight" => em.modules.push(ParticleModule::KillHeight { height: dist(p, "Height", 1), absolute: bool_or(p, "bAbsolute", false), floor: bool_or(p, "bFloor", false) }),
             "ParticleModuleVelocityInheritParent" => {
                 // `Default__ParticleModuleVelocityInheritParent`: Scale (1, 1, 1).
-                em.velocity_inherit_parent = Some(dist(p, "Scale", 3).unwrap_or_else(|| Dist::constant([1.0; 3], 3)));
+                em.modules.push(ParticleModule::VelocityInheritParent(dist(p, "Scale", 3).unwrap_or_else(|| Dist::constant([1.0; 3], 3))));
             }
             "ParticleModuleLocationEmitter" => {
                 let name = match find(p, "EmitterName").map(|x| &x.value) {
@@ -383,38 +382,38 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                 };
                 // `Default__ParticleModuleLocationEmitter`: InheritSourceVelocityScale 1.
                 let scale = find(p, "InheritSourceVelocityScale").and_then(|x| x.as_float()).unwrap_or(1.0);
-                em.location_emitter = Some(dishonored_ir::particles::LocationEmitter {
+                em.modules.push(ParticleModule::LocationEmitter(dishonored_ir::particles::LocationEmitter {
                     emitter: name,
                     sequential: enum_of(p, "SelectionMethod").as_deref() == Some("ELESM_Sequential"),
                     inherit_velocity: bool_or(p, "InheritSourceVelocity", false).then_some(scale),
-                });
+                }));
             }
             "ParticleModuleVelocityOverLifetime" => {
-                em.vel_over_life = dist(p, "VelOverLife", 3).map(|d| (d, bool_or(p, "Absolute", false)));
+                em.modules.push(ParticleModule::VelOverLife { dist: dist(p, "VelOverLife", 3), absolute: bool_or(p, "Absolute", false) });
             }
-            "ParticleModuleOrbit" => em.orbit.push(dishonored_ir::particles::Orbit {
+            "ParticleModuleOrbit" => em.modules.push(ParticleModule::Orbit(dishonored_ir::particles::Orbit {
                 offset: dist(p, "OffsetAmount", 3),
                 rotation: dist(p, "RotationAmount", 3),
                 rotation_rate: dist(p, "RotationRateAmount", 3),
-            }),
+            })),
             "ParticleModuleAttractorPoint" => {
-                em.attractor_point = Some(dishonored_ir::particles::AttractorPoint {
+                em.modules.push(ParticleModule::AttractorPoint(dishonored_ir::particles::AttractorPoint {
                     position: dist(p, "Position", 3).unwrap_or_else(|| Dist::constant([0.0; 3], 3)),
                     range: dist(p, "Range", 1).unwrap_or_else(|| Dist::constant([0.0; 3], 1)),
                     strength: dist(p, "Strength", 1).unwrap_or_else(|| Dist::constant([0.0; 3], 1)),
                     strength_by_distance: bool_or(p, "StrengthByDistance", true),
                     affect_base_velocity: bool_or(p, "bAffectBaseVelocity", false),
                     world_space: bool_or(p, "bUseWorldSpacePosition", false),
-                });
+                }));
             }
             "ParticleModuleAttractorLine" => {
                 let v = |n: &str| find(p, n).and_then(|x| x.as_vector()).unwrap_or([0.0; 3]);
-                em.attractor_line = Some((
-                    v("EndPoint0"),
-                    v("EndPoint1"),
-                    dist(p, "Range", 1).unwrap_or_else(|| Dist::constant([0.0; 3], 1)),
-                    dist(p, "Strength", 1).unwrap_or_else(|| Dist::constant([0.0; 3], 1)),
-                ));
+                em.modules.push(ParticleModule::AttractorLine {
+                    end0: v("EndPoint0"),
+                    end1: v("EndPoint1"),
+                    range: dist(p, "Range", 1).unwrap_or_else(|| Dist::constant([0.0; 3], 1)),
+                    strength: dist(p, "Strength", 1).unwrap_or_else(|| Dist::constant([0.0; 3], 1)),
+                });
             }
             "ParticleModuleCollision" => {
                 let opt = match enum_of(p, "CollisionCompletionOption").as_deref() {
@@ -425,11 +424,11 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                     Some("EPCC_FreezeMovement") => 5,
                     _ => 0,
                 };
-                em.collision = Some((
-                    dist(p, "DampingFactor", 3).unwrap_or_else(|| Dist::constant([1.0; 3], 3)),
-                    dist(p, "MaxCollisions", 1).unwrap_or_else(|| Dist::constant([1.0; 3], 1)),
-                    opt,
-                ));
+                em.modules.push(ParticleModule::Collision {
+                    damping: dist(p, "DampingFactor", 3).unwrap_or_else(|| Dist::constant([1.0; 3], 3)),
+                    max_collisions: dist(p, "MaxCollisions", 1).unwrap_or_else(|| Dist::constant([1.0; 3], 1)),
+                    completion: opt,
+                });
             }
             "ParticleModuleTypeDataTrail2" | "ParticleModuleTypeDataRibbon" | "ParticleModuleTypeDataAnimTrail" => {
                 let anim = mclass == "ParticleModuleTypeDataAnimTrail";
@@ -458,7 +457,7 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                     em.beam.get_or_insert_with(Default::default).noise = Some((r, pts));
                 }
             }
-            "ParticleModuleLocation" => em.location = dist(p, "StartLocation", 3),
+            "ParticleModuleLocation" => em.modules.push(ParticleModule::Location(dist(p, "StartLocation", 3))),
             "ParticleModuleLocationPrimitiveSphere" | "ParticleModuleLocationPrimitiveCylinder" => {
                 // `Default__ParticleModuleLocationPrimitiveBase`: every axis sign on, VelocityScale
                 // 1; the cylinder's `RadialVelocity` on; StartRadius / StartHeight 50.
@@ -478,15 +477,11 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                     },
                     radial_velocity: bool_or(p, "RadialVelocity", true),
                 };
-                if cyl {
-                    em.cylinder = Some(prim);
-                } else {
-                    em.sphere = Some(prim);
-                }
+                em.modules.push(if cyl { ParticleModule::Cylinder(prim) } else { ParticleModule::Sphere(prim) });
             }
             // UE3's class is `ParticleModuleSubUV` (its `SubImageIndex` curve); no
             // `ParticleModuleSubImageIndex` exists in the install.
-            "ParticleModuleSubUV" | "ParticleModuleSubImageIndex" => em.sub_image = dist(p, "SubImageIndex", 1),
+            "ParticleModuleSubUV" | "ParticleModuleSubImageIndex" => em.modules.push(ParticleModule::SubImage(dist(p, "SubImageIndex", 1))),
             "ParticleModuleTypeDataMesh" => {
                 if let Some(o) = find(p, "Mesh").and_then(|x| x.as_object()).filter(|o| *o != 0) {
                     em.mesh = Some(mpkg.obj_path(ObjRef::from_index(o)));
@@ -495,7 +490,7 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                 em.mesh_override_material = bool_or(p, "bOverrideMaterial", false);
             }
             "ParticleModuleOrientationAxisLock" => {
-                em.axis_lock = match enum_of(p, "LockAxisFlags").as_deref() {
+                em.modules.push(ParticleModule::AxisLock(match enum_of(p, "LockAxisFlags").as_deref() {
                     Some("EPAL_X") => 1,
                     Some("EPAL_Y") => 2,
                     Some("EPAL_Z") => 3,
@@ -506,10 +501,10 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                     Some("EPAL_ROTATE_Y") => 8,
                     Some("EPAL_ROTATE_Z") => 9,
                     _ => 0,
-                };
+                }));
             }
-            "ParticleModuleMeshRotation" => em.mesh_rotation = dist(p, "StartRotation", 3),
-            "ParticleModuleMeshRotationRate" => em.mesh_rotation_rate = dist(p, "StartRotationRate", 3),
+            "ParticleModuleMeshRotation" => em.modules.push(ParticleModule::MeshRotation(dist(p, "StartRotation", 3))),
+            "ParticleModuleMeshRotationRate" => em.modules.push(ParticleModule::MeshRotationRate(dist(p, "StartRotationRate", 3))),
             "ParticleModuleMeshMaterial" => {
                 // First material of `MeshMaterials` replaces the mesh's own.
                 if let Some(o) = find(p, "MeshMaterials").and_then(|x| x.array_objects().ok()).and_then(|v| v.first().copied()).filter(|o| *o != 0) {
@@ -556,7 +551,7 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                 let ext = find(p, "m_Extent").and_then(|x| x.as_vector()).or_else(|| DEFAULTS.with(|d| find(&d.borrow(), "m_Extent").and_then(|x| x.as_vector()))).unwrap_or([0.0; 3]);
                 // A distribution (or table) the module does not serialize is its archetype's.
                 let merged: Vec<Property> = p.iter().cloned().chain(DEFAULTS.with(|d| d.borrow().clone())).collect();
-                em.rain_drops = Some(dishonored_ir::particles::RainDrops {
+                em.modules.push(ParticleModule::RainDrops(dishonored_ir::particles::RainDrops {
                     extent: ext,
                     max_particles: float_dist(ctx, &mpkg, p, "m_MaxParticles"),
                     spawn_kill_rate: float_dist(ctx, &mpkg, p, "m_SpawnKillRate"),
@@ -567,14 +562,14 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                     fading_rate: dist_ex(&merged, "m_FadingRate", 1, true),
                     locks: [dist_type(&merged, "m_StartVelocity"), dist_type(&merged, "m_StartColor"), dist_type(&merged, "m_StartSize")],
                     first_module: mi == first_listed,
-                });
+                }));
             }
             "DisParticleModuleRainImpacts" => {
                 let fixed = match find(p, "m_bFixedLocation").map(|x| &x.value) {
                     Some(Value::Bool(b)) => *b,
                     _ => DEFAULTS.with(|d| bool_or(&d.borrow(), "m_bFixedLocation", true)),
                 };
-                em.rain_impacts = Some(dishonored_ir::particles::RainImpacts { fixed_location: fixed });
+                em.modules.push(ParticleModule::RainImpacts(dishonored_ir::particles::RainImpacts { fixed_location: fixed }));
             }
             "ParticleModuleSizeMultiplyVelocity" => {
                 let axes = |n: &str| match find(p, n).map(|x| &x.value) {
@@ -582,13 +577,11 @@ fn decode_emitter(ctx: &mut dyn ParticleCtx, k: Key) -> Option<ParticleEmitterAs
                     _ => DEFAULTS.with(|d| bool_or(&d.borrow(), n, true)),
                 };
                 if let Some(d) = dist(p, "VelocityMultiplier", 3) {
-                    em.size_mult_velocity = Some((d, [axes("MultiplyX"), axes("MultiplyY"), axes("MultiplyZ")]));
+                    em.modules.push(ParticleModule::SizeMultVelocity { dist: d, axes: [axes("MultiplyX"), axes("MultiplyY"), axes("MultiplyZ")] });
                 }
             }
-            c => em.unsupported.push(c.to_string()),
+            c => em.modules.push(ParticleModule::Unsupported { class: c.to_string() }),
         }
     }
-    em.unsupported.sort();
-    em.unsupported.dedup();
     Some(em)
 }
