@@ -13,6 +13,8 @@
 //! oracle anim info FILE                      skeletal animation capture statistics
 //! oracle anim compare --capture F --port F [--bones B,B] [--offset N] [--pawn ID] [--json OUT]
 //!                                            compare port dump vs oracle capture
+//! oracle anim clip --capture F --skeleton PKG MESH --set PKG SET --sequence S [--node N] [--bones B,B]
+//!                  [--exclude-below B] [--frames A..B] [--json OUT]  pose and compare a single clip
 //! oracle scenario [NAME...] [--system S]... [--all] [--jobs N] [--json] [--dir DIR] [--out DIR]
 //! oracle sweep [--out DIR] [--no-coverage]   every cached map and scenario -> scorecard + work list
 //! oracle bench import|queries --map M        measure the port's costs

@@ -1,7 +1,7 @@
 //! Skeletal animation comparison: oracle capture vs port dump.
 
 use anyhow::{anyhow, bail, Context, Result};
-use glam::Quat;
+use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::{BTreeMap, HashMap};
@@ -607,6 +607,364 @@ fn print_comparison_report(results: &ComparisonResults, offset: i32, bones: &[St
     }
 }
 
+/// Command: oracle anim clip --capture FILE --skeleton PKG MESH_PATH --set PKG SET_PATH --sequence NAME [options]
+pub fn cmd_anim_clip(
+    capture_path: &str,
+    skeleton_pkg: &str,
+    skeleton_mesh: &str,
+    set_pkg: &str,
+    set_path: &str,
+    sequence: &str,
+    node_idx: Option<usize>,
+    bones_opt: Option<Vec<String>>,
+    exclude_below: Option<String>,
+    frames_range: Option<(usize, usize)>,
+    json_out: Option<&str>,
+) -> Result<()> {
+    use dishonored_assets::skeletal_mesh::read_skeletal_mesh;
+    use dishonored_assets::characters::load_anim_set;
+    use dishonored_assets::Content;
+    use ue3_package::ObjRef;
+
+    let content = Content::locate()?;
+    let capture_content = std::fs::read_to_string(capture_path).context("reading capture file")?;
+    let file: CaptureFile = serde_json::from_str(&capture_content).context("parsing capture JSON")?;
+    let body = file.meshes.first().ok_or_else(|| anyhow!("no meshes in capture"))?;
+
+    // Load skeleton and build BoneAssets
+    let skel_pkg = content.package(skeleton_pkg)?;
+    let mesh_idx = (0..skel_pkg.exports.len())
+        .find(|&i| skel_pkg.export_class(i) == "SkeletalMesh" && skel_pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(skeleton_mesh))
+        .with_context(|| format!("{skeleton_mesh} not in {skeleton_pkg}"))?;
+    let raw_mesh = read_skeletal_mesh(&skel_pkg, mesh_idx)?;
+
+    let bones: Vec<dishonored_ir::BoneAsset> = raw_mesh.bones.iter().map(|b| dishonored_ir::BoneAsset {
+        name: b.name.clone(),
+        parent: b.parent,
+        rotation: b.orientation,
+        translation: b.position,
+    }).collect();
+
+    // Load AnimSet and get the clip
+    let mut lib = load_anim_set(&content, set_pkg, set_path, &[sequence])?;
+    lib.edge_order(&bones);
+    let clip = lib.clips.get(sequence)
+        .with_context(|| format!("sequence {sequence} not found in AnimSet"))?;
+
+    // Reconstruct capture frames
+    let capture_frames = reconstruct_frames(body)?;
+
+    // Get bone indices to compare
+    let capture_bone_names: Vec<String> = body.bones.iter().map(|(_, name)| name.clone()).collect();
+    let compare_bones: Vec<String> = match bones_opt {
+        Some(b) => b.into_iter().filter(|n| capture_bone_names.contains(n)).collect(),
+        None => capture_bone_names.clone(),
+    };
+
+    if compare_bones.is_empty() {
+        bail!("no bones to compare");
+    }
+
+    // Filter out bones below exclude_below if specified
+    let exclude_set = if let Some(exclude_name) = &exclude_below {
+        build_exclude_set(&bones, exclude_name)
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let compare_bones: Vec<String> = compare_bones.into_iter()
+        .filter(|b| !exclude_set.contains(b))
+        .collect();
+
+    // Perform offset search
+    let (best_offset, best_mean) = find_best_clip_offset(&capture_frames, &bones, &clip, &lib.tracks, &compare_bones, sequence, node_idx)?;
+
+    // Compare at offset 0 and best offset
+    let offset_0_stats = compare_clip_frames(&capture_frames, &bones, &clip, &lib.tracks, &compare_bones, sequence, node_idx, frames_range, 0)?;
+    let offset_best_stats = if best_offset != 0 {
+        compare_clip_frames(&capture_frames, &bones, &clip, &lib.tracks, &compare_bones, sequence, node_idx, frames_range, best_offset)?
+    } else {
+        offset_0_stats.clone()
+    };
+
+    // Print report
+    print_clip_report(&offset_0_stats, &offset_best_stats, best_offset, best_mean, &compare_bones);
+
+    // Write JSON if requested
+    if let Some(out) = json_out {
+        let json = serde_json::json!({
+            "offset_0": &offset_0_stats,
+            "best_offset": best_offset,
+            "best_mean_angle": best_mean,
+            "offset_best": &offset_best_stats,
+            "bones_compared": &compare_bones,
+        });
+        std::fs::write(out, serde_json::to_string_pretty(&json)?)?;
+        println!("Results written to {}", out);
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClipComparisonStats {
+    overall: BoneStats,
+    worst_bones: Vec<(String, BoneStats)>,
+    worst_frames: Vec<(usize, f32, String, f32)>, // (frame_idx, mean_angle, worst_bone, worst_angle)
+    frames_compared: usize,
+    frames_skipped: usize,
+}
+
+fn build_exclude_set(bones: &[dishonored_ir::BoneAsset], exclude_bone: &str) -> std::collections::HashSet<String> {
+    let mut excluded = std::collections::HashSet::new();
+    if let Some(idx) = bones.iter().position(|b| b.name.eq_ignore_ascii_case(exclude_bone)) {
+        excluded.insert(bones[idx].name.clone());
+        // Add all descendants
+        for (i, b) in bones.iter().enumerate() {
+            let mut parent_idx = b.parent as usize;
+            while parent_idx < bones.len() {
+                if parent_idx == idx {
+                    excluded.insert(b.name.clone());
+                    break;
+                }
+                parent_idx = bones[parent_idx].parent as usize;
+            }
+        }
+    }
+    excluded
+}
+
+fn find_best_clip_offset(
+    capture_frames: &[FullFrame],
+    bones: &[dishonored_ir::BoneAsset],
+    clip: &dishonored_assets::edge_anim::BakedClip,
+    tracks: &[String],
+    compare_bones: &[String],
+    sequence: &str,
+    node_idx: Option<usize>,
+) -> Result<(i32, f32)> {
+    let mut best_offset = 0;
+    let mut best_error = f32::MAX;
+
+    for offset in -10..=10 {
+        let stats = compare_clip_frames(capture_frames, bones, clip, tracks, compare_bones, sequence, node_idx, None, offset)?;
+        if stats.overall.mean_angle < best_error {
+            best_error = stats.overall.mean_angle;
+            best_offset = offset;
+        }
+    }
+
+    Ok((best_offset, best_error))
+}
+
+fn compare_clip_frames(
+    capture_frames: &[FullFrame],
+    bones: &[dishonored_ir::BoneAsset],
+    clip: &dishonored_assets::edge_anim::BakedClip,
+    tracks: &[String],
+    compare_bones: &[String],
+    sequence: &str,
+    node_idx: Option<usize>,
+    frames_range: Option<(usize, usize)>,
+    time_offset_ticks: i32,
+) -> Result<ClipComparisonStats> {
+    let mut bone_stats: HashMap<String, (f32, f32, usize)> = HashMap::new();
+    for bone in compare_bones {
+        bone_stats.insert(bone.clone(), (0.0, 0.0, 0));
+    }
+
+    let mut worst_frames = Vec::new();
+    let mut frames_compared = 0;
+    let mut frames_skipped = 0;
+
+    for (frame_idx, frame) in capture_frames.iter().enumerate() {
+        if let Some((start, end)) = frames_range {
+            if frame_idx < start || frame_idx >= end {
+                continue;
+            }
+        }
+
+        // Get the time from the playing node
+        let clip_time = if let Some(node_n) = node_idx {
+            get_node_time_by_index(frame, node_n)
+        } else {
+            get_playing_sequence_time(frame, sequence)
+        };
+
+        let Some(t) = clip_time else {
+            frames_skipped += 1;
+            continue;
+        };
+
+        // Apply time offset
+        let t_adjusted = t + (time_offset_ticks as f32) / 60.0;
+
+        // Pose the skeleton
+        let posed_globals = pose_clip(bones, clip, tracks, t_adjusted);
+
+        // Compare
+        let (mut frame_sum, mut frame_n, mut frame_worst) = (0.0f32, 0usize, (String::new(), 0.0f32));
+        for bone_name in compare_bones {
+            if let Some(bone_idx) = bones.iter().position(|b| b.name.eq_ignore_ascii_case(bone_name)) {
+                if let Some(capture_bone) = frame.bones.get(bone_name) {
+                    let capture_q = Quat::from_array(capture_bone.q);
+                    let posed_mat = posed_globals[bone_idx];
+                    let (_, posed_q, _) = posed_mat.to_scale_rotation_translation();
+
+                    let angle = bone_angle_degrees(capture_q.to_array(), posed_q.to_array());
+
+                    if let Some(entry) = bone_stats.get_mut(bone_name) {
+                        entry.0 += angle;
+                        entry.1 = entry.1.max(angle);
+                        entry.2 += 1;
+                    }
+                    frame_sum += angle;
+                    frame_n += 1;
+                    if angle > frame_worst.1 {
+                        frame_worst = (bone_name.clone(), angle);
+                    }
+                }
+            }
+        }
+        if frame_n > 0 {
+            worst_frames.push((frame_idx, frame_sum / frame_n as f32, frame_worst.0, frame_worst.1));
+        }
+        frames_compared += 1;
+    }
+
+    worst_frames.sort_by(|a, b| b.1.total_cmp(&a.1));
+    worst_frames.truncate(10);
+
+    // Compute overall stats
+    let mut bones_map = HashMap::new();
+    let mut total_samples = 0;
+    for (bone, (angle_sum, max_angle, count)) in bone_stats {
+        if count > 0 {
+            bones_map.insert(bone, BoneStats {
+                mean_angle: angle_sum / count as f32,
+                max_angle,
+                mean_translation: 0.0,
+                samples: count,
+            });
+            total_samples += count;
+        }
+    }
+
+    let overall = if total_samples > 0 {
+        BoneStats {
+            mean_angle: bones_map.values().map(|s| s.mean_angle * s.samples as f32).sum::<f32>() / total_samples as f32,
+            max_angle: bones_map.values().map(|s| s.max_angle).max_by(|a, b| a.total_cmp(b)).unwrap_or(0.0),
+            mean_translation: 0.0,
+            samples: total_samples,
+        }
+    } else {
+        BoneStats { mean_angle: 0.0, max_angle: 0.0, mean_translation: 0.0, samples: 0 }
+    };
+
+    let mut worst_bones: Vec<_> = bones_map.into_iter().map(|(k, v)| (k, v)).collect();
+    worst_bones.sort_by(|a, b| b.1.mean_angle.total_cmp(&a.1.mean_angle).then(b.1.max_angle.total_cmp(&a.1.max_angle)));
+
+    Ok(ClipComparisonStats {
+        overall,
+        worst_bones: worst_bones.into_iter().take(10).collect(),
+        worst_frames,
+        frames_compared,
+        frames_skipped,
+    })
+}
+
+fn get_node_time_by_index(frame: &FullFrame, node_idx: usize) -> Option<f32> {
+    frame.nodes.iter()
+        .enumerate()
+        .filter_map(|(i, (_, node))| {
+            if i == node_idx {
+                match node {
+                    NodeState::Sequence { weight, time, .. } if *weight > 0.0 => Some(*time),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
+        .next()
+}
+
+fn get_playing_sequence_time(frame: &FullFrame, seq_name: &str) -> Option<f32> {
+    frame.nodes.values()
+        .filter_map(|n| match n {
+            NodeState::Sequence { weight, seq, time, .. } if seq == seq_name && *weight > 0.0 => Some((*weight, *time)),
+            _ => None,
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, t)| t)
+}
+
+fn pose_clip(
+    bones: &[dishonored_ir::BoneAsset],
+    clip: &dishonored_assets::edge_anim::BakedClip,
+    tracks: &[String],
+    time: f32,
+) -> Vec<Mat4> {
+    use dishonored_assets::characters::bind_globals;
+    // Start from bind pose
+    let mut posed_bones = bones.to_vec();
+
+    // Apply clip samples to matching bones
+    for (track_idx, track_name) in tracks.iter().enumerate() {
+        if let Some(bone_idx) = bones.iter().position(|b| b.name.eq_ignore_ascii_case(track_name)) {
+            let (rot_opt, trans_opt) = clip.sample(time, track_idx);
+
+            if let Some(rot) = rot_opt {
+                posed_bones[bone_idx].rotation = rot;
+            }
+
+            // Apply translation only to root (bone 0) and direct children of root
+            if let Some(trans) = trans_opt {
+                if bone_idx == 0 || (bones[bone_idx].parent == 0) {
+                    posed_bones[bone_idx].translation = trans;
+                }
+            }
+        }
+    }
+
+    // Compute global transforms
+    bind_globals(&posed_bones)
+}
+
+fn print_clip_report(
+    stats_0: &ClipComparisonStats,
+    stats_best: &ClipComparisonStats,
+    best_offset: i32,
+    best_mean: f32,
+    bones: &[String],
+) {
+    println!("Frames compared: {}, skipped: {}", stats_0.frames_compared, stats_0.frames_skipped);
+    println!("Bones: {}", bones.len());
+    println!();
+
+    println!("Offset 0 ticks:");
+    println!("  Overall: mean angle {:.2} deg, max angle {:.2} deg ({} samples)",
+        stats_0.overall.mean_angle, stats_0.overall.max_angle, stats_0.overall.samples);
+    println!();
+
+    println!("Best offset: {} ticks ({:.1} frames, 60 Hz)", best_offset, best_offset as f32 / 60.0);
+    println!("  Overall: mean angle {:.2} deg, max angle {:.2} deg ({} samples)",
+        stats_best.overall.mean_angle, stats_best.overall.max_angle, stats_best.overall.samples);
+    println!();
+
+    println!("Worst 10 bones at offset 0:");
+    for (bone, stats) in &stats_0.worst_bones {
+        println!("  {}: mean {:.2} deg, max {:.2} deg ({} samples)",
+            bone, stats.mean_angle, stats.max_angle, stats.samples);
+    }
+    println!();
+
+    println!("Worst 10 frames at offset 0:");
+    for (idx, mean, worst_bone, worst_angle) in &stats_0.worst_frames {
+        println!("  Frame {}: mean {:.2} deg; {} {:.2} deg", idx, mean, worst_bone, worst_angle);
+    }
+}
+
 pub fn cmd_anim(args: &crate::Args) -> Result<()> {
     let cmd = args.0.get(1).map(String::as_str).unwrap_or("");
     match cmd {
@@ -625,7 +983,31 @@ pub fn cmd_anim(args: &crate::Args) -> Result<()> {
             let json = args.opt("--json");
             cmd_anim_compare(&capture, &port, bones, offset, pawn, json.as_deref())?;
         }
-        _ => bail!("oracle anim info|compare"),
+        "clip" => {
+            let capture = args.opt("--capture").ok_or_else(|| anyhow!("--capture required"))?;
+            let skeleton_pkg = args.opt("--skeleton").ok_or_else(|| anyhow!("--skeleton PKG MESH_PATH required"))?;
+            let skeleton_mesh = args.0.iter().position(|a| a == "--skeleton")
+                .and_then(|i| args.0.get(i + 2).cloned())
+                .ok_or_else(|| anyhow!("--skeleton PKG MESH_PATH required"))?;
+            let set_pkg = args.opt("--set").ok_or_else(|| anyhow!("--set PKG PATH required"))?;
+            let set_path = args.0.iter().position(|a| a == "--set")
+                .and_then(|i| args.0.get(i + 2).cloned())
+                .ok_or_else(|| anyhow!("--set PKG PATH required"))?;
+            let sequence = args.opt("--sequence").ok_or_else(|| anyhow!("--sequence required"))?;
+            let node = args.opt("--node").and_then(|s| s.parse().ok());
+            let bones = args.opt("--bones").map(|s| s.split(',').map(|b| b.trim().to_string()).collect());
+            let exclude_below = args.opt("--exclude-below");
+            let frames = args.opt("--frames").and_then(|s| {
+                let parts: Vec<&str> = s.split("..").collect();
+                match parts.as_slice() {
+                    [a, b] => Some((a.parse().ok()?, b.parse().ok()?)),
+                    _ => None,
+                }
+            });
+            let json = args.opt("--json");
+            cmd_anim_clip(&capture, &skeleton_pkg, &skeleton_mesh, &set_pkg, &set_path, &sequence, node, bones, exclude_below, frames, json.as_deref())?;
+        }
+        _ => bail!("oracle anim info|compare|clip"),
     }
     Ok(())
 }
@@ -735,5 +1117,41 @@ mod tests {
         let offset = find_best_offset(&capture_frames, &port_frames, &bones).unwrap();
 
         assert_eq!(offset, -3);
+    }
+
+    #[test]
+    fn test_bind_globals() {
+        use dishonored_assets::characters::bind_globals;
+        // 3-bone chain
+        let bones = vec![
+            dishonored_ir::BoneAsset { name: "root".into(), parent: -1, rotation: Quat::IDENTITY, translation: Vec3::ZERO },
+            dishonored_ir::BoneAsset { name: "child1".into(), parent: 0, rotation: Quat::IDENTITY, translation: Vec3::new(1.0, 0.0, 0.0) },
+            dishonored_ir::BoneAsset { name: "child2".into(), parent: 1, rotation: Quat::IDENTITY, translation: Vec3::new(1.0, 0.0, 0.0) },
+        ];
+        let globals = bind_globals(&bones);
+        assert_eq!(globals.len(), 3);
+        // Root is identity
+        let (_, _, t) = globals[0].to_scale_rotation_translation();
+        assert!(t.length() < 0.01);
+        // Child1 is at (1, 0, 0)
+        let (_, _, t) = globals[1].to_scale_rotation_translation();
+        assert!((t.x - 1.0).abs() < 0.01);
+        // Child2 is at (2, 0, 0)
+        let (_, _, t) = globals[2].to_scale_rotation_translation();
+        assert!((t.x - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_exclude_set() {
+        let bones = vec![
+            dishonored_ir::BoneAsset { name: "root".into(), parent: -1, rotation: Quat::IDENTITY, translation: Vec3::ZERO },
+            dishonored_ir::BoneAsset { name: "chest".into(), parent: 0, rotation: Quat::IDENTITY, translation: Vec3::ZERO },
+            dishonored_ir::BoneAsset { name: "head".into(), parent: 1, rotation: Quat::IDENTITY, translation: Vec3::ZERO },
+            dishonored_ir::BoneAsset { name: "neck".into(), parent: 1, rotation: Quat::IDENTITY, translation: Vec3::ZERO },
+        ];
+        let excluded = build_exclude_set(&bones, "head");
+        assert!(excluded.contains("head"));
+        assert!(!excluded.contains("chest"));
+        assert!(!excluded.contains("neck"));
     }
 }
