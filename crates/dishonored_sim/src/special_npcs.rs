@@ -1,6 +1,7 @@
 //! What the special NPC classes do to other pawns (research/dishonored/systems/ai.md F6). The
-//! brains (`dishonored_ai::special`) decide; the item context in use rides in
-//! `PlayerInput::npc_move` and a Secondary press marks the context's effect tick:
+//! brains (`dishonored_ai::special`) decide; the item context in use is the brain's request
+//! ([`crate::pawn_states::Request::context`]) and a Secondary press marks the context's effect
+//! tick:
 //!
 //! - **Combat tune** (`DisItemContext_NPCTune_Combat`, its player component `DisCpntType_TuneCombat`):
 //!   a pawn in the music box's range `[m_fMinContextRange, m_fMaxContextRange)` within
@@ -17,8 +18,9 @@
 //!   `m_fProjectileSpeed`; it explodes at its first impact (0x00c550d0).
 
 use crate::events::{DamageCause, SimEvent};
-use crate::input::{LeftHand, PlayerInput, buttons, npc_moves};
+use crate::input::{LeftHand, PlayerInput, buttons};
 use crate::movement::{eye_position, forward_vector, view_vector};
+use crate::pawn_states::context as npc_moves;
 use crate::state::{PawnKind, PlayerId, PlayerState, ProjectileKind, WorldState};
 use crate::vitals::apply_damage;
 use dishonored_ir::ai::MusicalOverseerConfig;
@@ -37,9 +39,9 @@ fn acting(p: &PlayerState) -> bool {
 
 /// 0x00bd7390: a music-box Overseer playing a tune has `p` within the protection tune's
 /// inhibit-powers radius.
-pub fn powers_inhibited(state: &WorldState, ins: &[PlayerInput], p: &PlayerState, g: &GameplayConfig) -> bool {
+pub fn powers_inhibited(state: &WorldState, p: &PlayerState, g: &GameplayConfig) -> bool {
     let r = g.ai.special.overseer.inhibit_powers_radius;
-    r > 0.0 && state.players.iter().zip(ins).any(|(o, i)| o.id != p.id && acting(o) && i.npc_move == npc_moves::OVERSEER_TUNE && o.position.distance(p.position) <= r)
+    r > 0.0 && state.players.iter().any(|o| o.id != p.id && acting(o) && crate::pawn_states::request(state, o.id).context == npc_moves::OVERSEER_TUNE && o.position.distance(p.position) <= r)
 }
 
 /// The combat tune's target test (0x00c6bfc0 / 0x00c66dd0): range from the Overseer, facing cone
@@ -73,7 +75,7 @@ pub fn step(state: &mut WorldState, ins: &[PlayerInput], world: &dyn WorldQuery,
             continue;
         }
         let pulse = input.buttons & buttons::SECONDARY != 0;
-        match input.npc_move {
+        match crate::pawn_states::request(state, o.id).context {
             npc_moves::OVERSEER_TUNE => {
                 let t = &sp.overseer;
                 for vi in 0..state.players.len() {
@@ -182,27 +184,34 @@ mod tests {
     /// The combat tune's effect tick: round(0.3 x 90 x (1 - 0.93)) = 2 Musical damage within the
     /// cone and range (0x00c66ef0, 0x00b5ccd0), a push away from the Overseer, nothing beyond
     /// 2000 uu; powers inhibited within 1500 uu while it plays (0x00bd7390).
+    /// The Overseer (pawn 1000) runs `context`.
+    fn running(mut ws: WorldState, context: u8) -> WorldState {
+        ws.requests = vec![(1000, crate::pawn_states::Request { context, ..Default::default() })];
+        ws
+    }
+
     #[test]
     fn combat_tune_damages_pushes_and_inhibits() {
         let g = cfg();
         let w = floor();
-        let tune = PlayerInput { npc_move: npc_moves::OVERSEER_TUNE, buttons: buttons::SECONDARY, ..Default::default() };
+        let tune = PlayerInput { buttons: buttons::SECONDARY, ..Default::default() };
         let ins = [PlayerInput::default(), tune];
-        let mut ws = world(PawnKind::Guard, 1000.0);
+        let mut ws = running(world(PawnKind::Guard, 1000.0), npc_moves::OVERSEER_TUNE);
         let mut ev = Vec::new();
         step(&mut ws, &ins, &w, &g, 1.0 / 60.0, &mut Vec::new(), &mut ev);
         assert_eq!(damage(&ev, DamageCause::Musical), vec![2.0]);
         assert!(ws.players[0].velocity.x > 0.0, "pushed away");
-        assert!(powers_inhibited(&ws, &ins, &ws.players[0], &g));
+        assert!(powers_inhibited(&ws, &ws.players[0], &g));
         // Beyond the inhibit radius, and beyond the tune's range.
-        let far = world(PawnKind::Guard, 1600.0);
-        assert!(!powers_inhibited(&far, &ins, &far.players[0], &g));
-        let mut out = world(PawnKind::Guard, 2100.0);
+        let far = running(world(PawnKind::Guard, 1600.0), npc_moves::OVERSEER_TUNE);
+        assert!(!powers_inhibited(&far, &far.players[0], &g));
+        let mut out = running(world(PawnKind::Guard, 2100.0), npc_moves::OVERSEER_TUNE);
         let mut ev = Vec::new();
         step(&mut out, &ins, &w, &g, 1.0 / 60.0, &mut Vec::new(), &mut ev);
         assert!(damage(&ev, DamageCause::Musical).is_empty());
         // Not playing: no inhibition.
-        assert!(!powers_inhibited(&ws, &[PlayerInput::default(), PlayerInput::default()], &ws.players[0], &g));
+        ws.requests.clear();
+        assert!(!powers_inhibited(&ws, &ws.players[0], &g));
     }
 
     /// A weeper's plague tick: `m_iPlagueDmgPerTick` within the radius in front, not to another
@@ -211,8 +220,8 @@ mod tests {
     fn plague_cloud_spares_carriers_and_the_back() {
         let g = cfg();
         let w = floor();
-        let cough = PlayerInput { npc_move: npc_moves::WEEPER_COUGH, buttons: buttons::SECONDARY, ..Default::default() };
-        let mut ws = world(PawnKind::Guard, 300.0);
+        let cough = PlayerInput { buttons: buttons::SECONDARY, ..Default::default() };
+        let mut ws = running(world(PawnKind::Guard, 300.0), npc_moves::WEEPER_COUGH);
         let mut other = PlayerState::new(1001, Vec3::new(200.0, 50.0, 90.0), 0.0);
         other.kind = PawnKind::Guard;
         other.plague = true;
@@ -220,7 +229,7 @@ mod tests {
         let mut ev = Vec::new();
         step(&mut ws, &[PlayerInput::default(), cough, PlayerInput::default()], &w, &g, 1.0 / 60.0, &mut Vec::new(), &mut ev);
         assert_eq!(damage(&ev, DamageCause::Plague), vec![g.ai.special.weeper.plague_damage]);
-        let mut behind = world(PawnKind::Guard, -300.0);
+        let mut behind = running(world(PawnKind::Guard, -300.0), npc_moves::WEEPER_COUGH);
         let mut ev = Vec::new();
         step(&mut behind, &[PlayerInput::default(), cough], &w, &g, 1.0 / 60.0, &mut Vec::new(), &mut ev);
         assert!(damage(&ev, DamageCause::Plague).is_empty());

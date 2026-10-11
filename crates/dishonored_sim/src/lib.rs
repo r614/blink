@@ -22,6 +22,7 @@ pub mod inventory;
 pub mod left_hand;
 pub mod movement;
 pub mod noise;
+pub mod pawn_states;
 pub mod player_stats;
 pub mod powers;
 pub mod rats;
@@ -150,7 +151,7 @@ pub fn step_world(
         let Some(h) = p.possess.host.and_then(|h| state.players.iter().position(|q| q.id == h)) else { continue };
         let pi = ins[i];
         let keep = input::buttons::JUMP | input::buttons::CROUCH | input::buttons::SPRINT | input::buttons::WALK;
-        ins[h] = PlayerInput { tick: pi.tick, forward: pi.forward, right: pi.right, yaw: pi.yaw, pitch: pi.pitch, buttons: pi.buttons & keep, left_hand: state.players[h].left.item, action: 0, npc_move: 0, npc_speed: 0.0 };
+        ins[h] = PlayerInput { tick: pi.tick, forward: pi.forward, right: pi.right, yaw: pi.yaw, pitch: pi.pitch, buttons: pi.buttons & keep, left_hand: state.players[h].left.item, action: 0, npc_move: 0 };
     }
     // The quick-access wheel (`input::buttons::WHEEL`) slows the world while it is open.
     for i in 0..state.players.len() {
@@ -183,6 +184,9 @@ pub fn step_world(
             continue;
         }
         let dt = DT * scale;
+        // What the NPC's brain asks of its pawn this tick; the speed it asks of the locomotion.
+        let req = pawn_states::request(state, state.players[i].id);
+        state.players[i].loco_speed = req.loco_speed;
         let p0 = state.players[i];
         let mvc = powers::effective_movement(&p0, g);
         let ctx = MoveCtx { world, cfg: &mvc, dt };
@@ -284,7 +288,7 @@ pub fn step_world(
         let bend_active = state.time_bends.iter().any(|b| b.caster == p.id);
         // A music-box Overseer's tune inhibits powers nearby (0x00bd7390, `ArePowersInhibited`
         // of the power-use context): the cast is not started.
-        let left_input = if p.kind == state::PawnKind::Human && (special_npcs::is_power(input.left_hand) || special_npcs::is_power(p.left.item)) && special_npcs::powers_inhibited(state, &ins, &p, g) {
+        let left_input = if p.kind == state::PawnKind::Human && (special_npcs::is_power(input.left_hand) || special_npcs::is_power(p.left.item)) && special_npcs::powers_inhibited(state, &p, g) {
             PlayerInput { buttons: input.buttons & !input::buttons::SECONDARY, ..input }
         } else {
             input
@@ -306,7 +310,7 @@ pub fn step_world(
             input
         };
         let pa = state.anim.get(&p.id);
-        combat::update_sword(p, &sword_input, &cfg.tuning, pa, &cfg.anim, dt, &mut out.events);
+        combat::update_sword(p, &sword_input, &cfg.tuning, pa, &cfg.anim, req.context, dt, &mut out.events);
         let mut local = Vec::new();
         let mut acts = Vec::new();
         left_hand::update(p, &left_input, &ctx, g, &cfg.tuning, pa, &mut local, &mut acts, bend_active, &mut out.events);
@@ -327,6 +331,12 @@ pub fn step_world(
         takedown::step_afflictions(state, i, dt, g, &mut out.events);
         // The sequences the pawn's states asked for this tick (they play in this tick's advance).
         anim::sync_requests(state, i, cfg);
+    }
+    // The item context each NPC runs, published for the presentation (`PlayerInput::npc_move`).
+    for i in 0..state.players.len() {
+        if state.players[i].kind != state::PawnKind::Human && state.players[i].time_scale > 0.0 {
+            state.players[i].last_input.npc_move = pawn_states::request(state, state.players[i].id).context;
+        }
     }
     // The animation advance (tick_order.md: each pawn's skeletal mesh ticks after its pawn's
     // physics and states, the notifies firing inside the advance). No handler reads another

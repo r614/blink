@@ -28,7 +28,8 @@
 //! (research/dishonored/AI.md "Rat swarms", U-260).
 
 use dishonored_ir::ai::RatSwarmConfig;
-use dishonored_sim::input::{LeftHand, PlayerInput, buttons, npc_moves};
+use dishonored_sim::input::{LeftHand, PlayerInput, buttons};
+use dishonored_sim::pawn_states::context as npc_moves;
 use dishonored_sim::state::{PlayerId, PlayerState, WorldState};
 use dishonored_world::{WorldQuery, channel};
 use glam::Vec3;
@@ -83,6 +84,10 @@ pub struct RatSwarm {
     pub goal: Option<Vec3>,
     pub flee_retry: f32,
     pub rng: u64,
+    /// The context the swarm pawn runs this tick (`dishonored_sim::pawn_states::context`:
+    /// attacking, eating; 0 none), its request to the pawn.
+    #[serde(skip)]
+    pub context: u8,
 }
 
 fn rnd(s: &mut u64) -> f32 {
@@ -111,6 +116,7 @@ impl RatSwarm {
             goal: None,
             flee_retry: 0.0,
             rng: seed | 1,
+            context: 0,
         }
     }
 
@@ -129,6 +135,7 @@ impl RatSwarm {
     pub fn think(&mut self, me: &PlayerState, ws: &WorldState, world: &dyn WorldQuery, dt: f32) -> (PlayerInput, Vec<RatEvent>) {
         let mut ev = Vec::new();
         self.since_spawn += dt;
+        self.context = npc_moves::NONE;
         let mut i = PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
         if self.rats == 0 || !me.alive {
             self.state = SwarmState::Hidden;
@@ -181,7 +188,7 @@ impl RatSwarm {
             self.state = SwarmState::Attack;
             let d = t.position.distance(me.position);
             i.yaw = yaw(me.position, t.position);
-            i.npc_move = npc_moves::RAT_ATTACK;
+            self.context = npc_moves::RAT_ATTACK;
             // Close in to the bite reach, then hold the attack: the simulation's attack groups
             // (`dishonored_sim::rats`, 0x00C891E0) apply the initial delay, the group damage and
             // the slowdown.
@@ -207,7 +214,7 @@ impl RatSwarm {
                 i.forward = 127;
                 return (i, ev);
             }
-            i.npc_move = npc_moves::RAT_EAT;
+            self.context = npc_moves::RAT_EAT;
             let before = self.eat_time;
             self.eat_time += dt;
             let start = c.eat_startup_delay_after_kill;
@@ -309,7 +316,7 @@ mod tests {
         let (i, _) = s.think(&me, &ws, &w, dt);
         assert_eq!(s.target, Some(1));
         // Out of reach (200 uu from a standing player): run at it, no attack yet.
-        assert!(i.forward > 0 && i.buttons & buttons::PRIMARY == 0 && i.npc_move == npc_moves::RAT_ATTACK);
+        assert!(i.forward > 0 && i.buttons & buttons::PRIMARY == 0 && s.context == npc_moves::RAT_ATTACK);
         ws.players[1].position = Vec3::new(150.0, 0.0, 0.0);
         let (i, _) = s.think(&me, &ws, &w, dt);
         assert!(i.buttons & buttons::PRIMARY != 0);

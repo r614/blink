@@ -28,8 +28,10 @@ pub fn swing_layer(p: &PlayerState) -> usize {
 }
 
 /// Advance the attacker-side state machine and collect swing requests. `anim` is the pawn's
-/// animation state as the last advance left it: the swing's notifies drive its phases there.
-pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, anim: Option<&PawnAnim>, table: &SeqTable, dt: f32, events: &mut Vec<SimEvent>) {
+/// animation state as the last advance left it: the swing's notifies drive its phases there;
+/// `context` is the item context the NPC's brain runs ([`crate::pawn_states::Request`]).
+#[allow(clippy::too_many_arguments)]
+pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, anim: Option<&PawnAnim>, table: &SeqTable, context: crate::pawn_states::ContextKind, dt: f32, events: &mut Vec<SimEvent>) {
     let (swing_startup, swing_active, swing_recovery) = swing_phases(p, t);
     let played = anim.and_then(|a| a.with(swing_layer(p), token::SWING | p.sword.swings as u32)).cloned();
     let paired = anim.and_then(|a| {
@@ -57,7 +59,7 @@ pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, 
                 s.hit_count = 0;
                 s.offscreen_to = None;
                 // The item context the brain swings with (players: none).
-                s.npc_move = input.npc_move;
+                s.npc_move = context;
                 s.swing_clip = if p.crouched { 4 } else { s.swings % 4 };
                 s.swings = s.swings.wrapping_add(1);
                 events.push(SimEvent::SwordSwing { id: p.id });

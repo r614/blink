@@ -47,7 +47,8 @@ use std::collections::BTreeMap;
 use dishonored_sim::events::{ChokeOutcome, NoiseContext, SimEvent};
 #[cfg(test)]
 use dishonored_sim::events::SoundCategory;
-use dishonored_sim::input::{LeftHand, PlayerInput, buttons, npc_moves};
+use dishonored_sim::input::{LeftHand, PlayerInput, buttons};
+use dishonored_sim::pawn_states::{Request, context as npc_moves};
 use dishonored_sim::state::{PawnKind, PlayerId, PlayerState, SwordPhase, WorldState};
 use dishonored_world::nav::{Follower, NavWorld};
 use dishonored_world::{WorldQuery, channel};
@@ -561,6 +562,11 @@ pub struct Brain {
     /// serial changes ([`AnimRequest`]).
     #[serde(default)]
     pub anim_request: AnimRequest,
+    /// What the brain asks of its pawn this tick (`dishonored_sim::pawn_states::Request`): the
+    /// item context it runs, its GenericAction chain, the speed it asks of the locomotion.
+    /// Rebuilt every tick; the host hands it to the step ([`Crowd::requests`]).
+    #[serde(skip)]
+    pub request: Request,
     /// HeadTrackPause: pausing (`m_bIsPausing`), the heading when the pause began
     /// (`m_OriginalPauseYaw`) and the side it turns to (the FaceTo request).
     #[serde(default)]
@@ -1314,6 +1320,7 @@ impl Crowd {
         ai_events.append(&mut distracted);
         let cooldown = self.alarm_cooldown;
         for b in self.brains.iter_mut() {
+            b.request = Request::default();
             let Some(me) = world_state.player(b.id) else {
                 continue;
             };
@@ -1326,11 +1333,9 @@ impl Crowd {
             // [tether] The pawn's tether volume and its `TetherRequest` (0x00b68ad0).
             b.track_tether(me, tethers, ai);
             let mut ctx = Ctx { layout, routes, users, neglect, inhibit, alarms: &mut *alarms, events: &mut ai_events, cooldown, distractors: &mut *distractors, tethers, flee_claims: &mut *flee_claims };
-            let mut inp = b.act(me, world_state, &mut ctx, world, ai, dt);
+            let inp = b.act(me, world_state, &mut ctx, world, ai, dt);
             b.step_head(me, world_state, ai, dt);
-            if inp.npc_move == 0 {
-                inp.npc_move = b.attack_kind();
-            }
+            b.finish_request(&inp);
             out.push((b.id, inp));
             b.transition_barks(was, me, world_state, &peers, ai);
             b.ambient_barks(ai, dt);
@@ -1378,6 +1383,9 @@ impl Crowd {
         let alive: Vec<&PlayerState> = ws.players.iter().filter(|p| p.kind == PawnKind::Rat && p.alive).collect();
         self.rat_brains.retain(|b| alive.iter().any(|p| p.id == b.id));
         self.rat_swarm.retain(|id, _| ws.player(*id).is_some());
+        for b in self.rat_brains.iter_mut() {
+            b.context = npc_moves::NONE;
+        }
         let mut out = Vec::new();
         for p in alive {
             let possessed = ws.players.iter().any(|q| q.possess.host == Some(p.id) && matches!(q.possess.stage, dishonored_sim::state::PossessStage::PrePossess | dishonored_sim::state::PossessStage::Active));
@@ -1411,6 +1419,14 @@ impl Crowd {
             out.push((p.id, input));
         }
         out
+    }
+
+    /// The brains' requests to their pawns from the last [`Crowd::think`] (the step reads them from
+    /// `WorldState::requests`): the item contexts, GenericAction chains and locomotion speeds.
+    pub fn requests(&self) -> Vec<(PlayerId, Request)> {
+        let npcs = self.brains.iter().map(|b| (b.id, b.request));
+        let rats = self.rat_brains.iter().filter(|b| b.context != npc_moves::NONE).map(|b| (b.id, Request { context: b.context, ..Default::default() }));
+        npcs.chain(rats).collect()
     }
 
     /// Write `PlayerState::ai_unaware` (sleep darts' instant sleep and Shadow Kill level 1 read
@@ -1941,6 +1957,7 @@ impl Brain {
             tether_last: None,
             dialog_look: None,
             anim_request: AnimRequest::default(),
+            request: Request::default(),
             track_pause: false,
             track_pause_yaw: 0.0,
             track_face: None,
@@ -2752,7 +2769,7 @@ impl Brain {
         let steer = self.follow.steer(nav, me.position, goal);
         let mut i = PlayerInput { yaw: yaw_to(me.position, steer), forward: 127, left_hand: LeftHand::Empty, ..Default::default() };
         i.buttons |= if run { buttons::SPRINT } else { buttons::WALK };
-        i.npc_speed = self.loco_speed(ai, run);
+        self.request.loco_speed = self.loco_speed(ai, run);
         i
     }
 
@@ -3645,7 +3662,7 @@ impl Brain {
                 let away = if away == glam::Vec2::ZERO { glam::Vec2::X } else { away };
                 let mut i = PlayerInput { yaw: away.y.atan2(away.x).to_degrees(), forward: 127, left_hand: LeftHand::Empty, ..Default::default() };
                 i.buttons |= buttons::SPRINT;
-                i.npc_speed = self.loco_speed(ai, true);
+                self.request.loco_speed = self.loco_speed(ai, true);
                 return i;
             }
         }
@@ -4121,7 +4138,7 @@ impl Brain {
         if self.attack != 0 {
             self.attack_timer -= dt;
             let kind = self.attack;
-            i.npc_move = kind;
+            self.request.context = kind;
             match kind {
                 npc_moves::SIDE_STEP | npc_moves::BACK_STEP => {
                     if self.attack_timer <= 0.0 {
@@ -4190,7 +4207,7 @@ impl Brain {
             self.give_up -= dt;
             self.fire_timer -= dt;
             i.left_hand = LeftHand::Pistol;
-            i.npc_move = npc_moves::FIRE_PISTOL;
+            self.request.context = npc_moves::FIRE_PISTOL;
             let aim = t.position + Vec3::Z * 40.0 - (me.position + Vec3::Z * EYE);
             i.pitch = (aim.z / aim.truncate().length().max(1.0)).atan().to_degrees();
             self.aim += dt;
@@ -4242,7 +4259,7 @@ impl Brain {
                 self.barks.push((bark.into(), Some(t.id)));
                 self.attack = kind;
                 self.attack_timer = ATTACK_WINDOW;
-                i.npc_move = kind;
+                self.request.context = kind;
                 if d <= SWORD_REACH {
                     i.buttons |= buttons::PRIMARY;
                     if kind == npc_moves::ATTACK_STEP_BACK {
@@ -4276,7 +4293,7 @@ impl Brain {
         self.attack = kind;
         // Covered at sprint speed (the dodge animations' root motion).
         self.attack_timer = distance / DODGE_SPEED;
-        i.npc_move = kind;
+        self.request.context = kind;
         if kind == npc_moves::SIDE_STEP {
             i.right = 127 * self.dodge_dir;
         } else {
@@ -4296,7 +4313,8 @@ impl Brain {
             self.aim = 0.0;
             return PlayerInput { yaw: me.yaw, left_hand: LeftHand::Empty, ..Default::default() };
         };
-        let mut i = PlayerInput { yaw: yaw_to(me.position, t.position), left_hand: LeftHand::Pistol, npc_move: npc_moves::FIRE_PISTOL, ..Default::default() };
+        let mut i = PlayerInput { yaw: yaw_to(me.position, t.position), left_hand: LeftHand::Pistol, ..Default::default() };
+        self.request.context = npc_moves::FIRE_PISTOL;
         let aim = t.position + Vec3::Z * 40.0 - (me.position + Vec3::Z * EYE);
         i.pitch = (aim.z / aim.truncate().length().max(1.0)).atan().to_degrees();
         o.wait -= dt;
@@ -4463,6 +4481,21 @@ impl Brain {
     /// Combat move in progress (`npc_moves`), for animation.
     pub fn attack_kind(&self) -> combat::AttackKind {
         if self.firing { npc_moves::FIRE_PISTOL } else { self.attack }
+    }
+
+    /// Complete this tick's request to the pawn once the brain acted: the move in progress when
+    /// nothing named a context, the behaviour's GenericAction chain, and the locomotion speed only
+    /// for an input that moves (a walk the brain dropped this tick asks nothing of it).
+    fn finish_request(&mut self, input: &PlayerInput) {
+        if self.request.context == npc_moves::NONE {
+            self.request.context = self.attack_kind();
+        }
+        if self.anim_request.serial != 0 {
+            self.request.play_anim = Some((self.anim_request.anim, self.anim_request.serial));
+        }
+        if input.forward == 0 && input.right == 0 {
+            self.request.loco_speed = 0.0;
+        }
     }
 
     /// Is this NPC "unaware" for a sleep dart (`DishonoredDamageType.m_bInstantSleepForUnawareNPCs`)?
@@ -5854,7 +5887,7 @@ mod tests {
         assert!(!b.unaware_of(1));
     }
 
-    /// A guard in combat picks the attack by distance and exposes it as `npc_move`: the long
+    /// A guard in combat picks the attack by distance and requests its item context: the long
     /// attack travels toward the target, the short one swings at once; a back step follows an
     /// incoming attack (`m_IncomingAttacksBeforeBackStep` 1).
     #[test]
@@ -5877,12 +5910,12 @@ mod tests {
         let mut inh = Vec::new();
         let (g, ws, mut b) = setup(450.0);
         let i = b.combat(&g, &ws, &w, None, &ai, &mut inh, 1.0 / 60.0);
-        assert_eq!(i.npc_move, npc_moves::ATTACK_LONG);
+        assert_eq!(b.request.context, npc_moves::ATTACK_LONG);
         assert!(i.forward > 0 && i.buttons & buttons::PRIMARY == 0);
         assert_eq!(b.attack, npc_moves::ATTACK_LONG);
         let (g, ws, mut b) = setup(150.0);
         let i = b.combat(&g, &ws, &w, None, &ai, &mut inh, 1.0 / 60.0);
-        assert_eq!(i.npc_move, npc_moves::ATTACK_SHORT);
+        assert_eq!(b.request.context, npc_moves::ATTACK_SHORT);
         assert!(i.buttons & buttons::PRIMARY != 0);
         // Incoming attack: the player winds up facing the guard at close range.
         let (g, mut ws, mut b) = setup(150.0);
@@ -5891,7 +5924,7 @@ mod tests {
         b.in_fight = true;
         ws.players[1].sword.phase = SwordPhase::Startup;
         let i = b.combat(&g, &ws, &w, None, &ai, &mut Vec::new(), 1.0 / 60.0);
-        assert_eq!(i.npc_move, npc_moves::BACK_STEP);
+        assert_eq!(b.request.context, npc_moves::BACK_STEP);
         assert!(i.forward < 0);
     }
 

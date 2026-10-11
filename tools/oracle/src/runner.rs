@@ -672,7 +672,7 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         tick += 1;
         // The shooter's view and dispersion before the step (a shot leaves at these).
         let before = mm(&game).world.player(ME).map(|p| (p.yaw, p.pitch, p.left.dispersion));
-        let input = PlayerInput { tick, forward: ti.forward, right: ti.right, yaw: ti.yaw, pitch: ti.pitch, buttons: button_bits(&ti.held), left_hand: hand, action, npc_move: 0, npc_speed: 0.0 };
+        let input = PlayerInput { tick, forward: ti.forward, right: ti.right, yaw: ti.yaw, pitch: ti.pitch, buttons: button_bits(&ti.held), left_hand: hand, action, npc_move: 0 };
         let out = game.step(&[(ME, input)], &maps.set, cfg);
         // Simulation events.
         for e in &out.events {

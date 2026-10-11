@@ -2,11 +2,11 @@
 //! `DisAISubStateFirePistol`). See `research/dishonored/AI.md` ("Combat moves").
 
 use dishonored_ir::ai::{MeleeContextConfig, PistolConfig};
-use dishonored_sim::input::npc_moves;
+use dishonored_sim::pawn_states::context as npc_moves;
 use dishonored_sim::state::PlayerId;
 
-/// What an NPC brain is doing in a fight, for animation (`PlayerInput::npc_move`).
-pub type AttackKind = u8;
+/// The item context an NPC brain runs in a fight (`dishonored_sim::pawn_states::ContextKind`).
+pub type AttackKind = dishonored_sim::pawn_states::ContextKind;
 
 /// First context of the attack pattern that may be used now: enabled in the pattern (listed),
 /// off its own cooldown (`m_ContextCooldown`), not inhibited on this target by another NPC's

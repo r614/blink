@@ -264,7 +264,7 @@ impl Brain {
         self.barks.push(("DDH_COMBAT_ATTACK".into(), Some(tg.t.id)));
         self.attack = a.kind;
         self.attack_timer = ATTACK_WINDOW;
-        i.npc_move = a.kind;
+        self.request.context = a.kind;
         if tg.d <= SWORD_REACH {
             i.buttons |= buttons::PRIMARY;
             self.attack = 0;
@@ -272,7 +272,7 @@ impl Brain {
             i.forward = 127;
             i.buttons |= buttons::SPRINT;
             // The attack's travel at the pawn's run loop (its root motion is not read).
-            i.npc_speed = self.loco_speed(ai, true);
+            self.request.loco_speed = self.loco_speed(ai, true);
             if a.kind == npc_moves::WH_JUMP_ATTACK {
                 i.buttons |= buttons::JUMP;
             }
@@ -394,7 +394,7 @@ impl Brain {
             // Inside the bite's range: back to the pattern position at its ideal range.
             let mut b = i;
             b.forward = -127;
-            b.npc_speed = self.loco_speed(ai, false);
+            self.request.loco_speed = self.loco_speed(ai, false);
             return b;
         }
         if !tg.sighted || tg.d > ideal {
@@ -420,7 +420,7 @@ impl Brain {
             self.special.timer = w.time_before_running;
         }
         let face = yaw_to(me.position, tg.goal);
-        let mut i = PlayerInput { yaw: face, left_hand: LeftHand::Empty, ..Default::default() };
+        let i = PlayerInput { yaw: face, left_hand: LeftHand::Empty, ..Default::default() };
         // The cough: a plague cloud of `m_fPlagueDmgLength`, a damage tick every
         // `m_fPlagueDmgePeriod` from its start (0x00c70e10 / 0x00c86ea0), the cooldown again after.
         let mut pulse = false;
@@ -441,34 +441,27 @@ impl Brain {
                 self.special.plague_tick = w.plague_period;
             }
         }
-        let cough = |mut i: PlayerInput| {
-            if pulse {
-                i.npc_move = npc_moves::WEEPER_COUGH;
-                i.buttons |= buttons::SECONDARY;
-            }
-            i
-        };
         // The leash (0x00af6bd0): the target beyond `m_fHomeRadius` for the lost timer gives up.
         if tg.t.position.distance(self.home) > w.home_radius {
             self.special.lost += dt;
             if self.special.lost >= self.special.lost_limit {
                 self.target = None;
                 self.complete(slot::COMBAT);
-                return cough(i);
+                return self.weep_cough(pulse, i);
             }
         } else {
             self.special.lost = 0.0;
         }
         match self.special.sub {
             weep::GRAB => {
-                i.npc_move = npc_moves::WEEPER_GRAB;
+                self.request.context = npc_moves::WEEPER_GRAB;
                 self.special.timer -= dt;
                 if self.special.timer <= 0.0 {
                     // After the grab (0x00afbe20): weep standing.
                     self.special.sub = weep::STAND;
                     self.special.timer = combat::roll(w.stand_still, rng_next(&mut self.rng));
                 }
-                cough(i)
+                self.weep_cough(pulse, i)
             }
             weep::STAND => {
                 self.special.timer -= dt;
@@ -482,7 +475,7 @@ impl Brain {
                         self.special.timer = combat::roll(w.stand_still, rng_next(&mut self.rng));
                     }
                 }
-                cough(i)
+                self.weep_cough(pulse, i)
             }
             _ => {
                 // The runner limiter (0x00afbe30): at most `m_iSimultaneousRunnerAllowed` weepers
@@ -505,19 +498,30 @@ impl Brain {
                         self.barks.push(("DDH_COMBAT_ATTACK".into(), Some(tg.t.id)));
                         self.special.sub = weep::GRAB;
                         self.special.timer = w.grab_duration;
-                        i.npc_move = npc_moves::WEEPER_GRAB;
-                        return cough(i);
+                        self.request.context = npc_moves::WEEPER_GRAB;
+                        return self.weep_cough(pulse, i);
                     }
                 }
                 if tg.d <= w.follow_threshold && tg.sighted {
                     self.special.sub = weep::STAND;
                     self.special.timer = combat::roll(w.stand_still, rng_next(&mut self.rng));
-                    return cough(i);
+                    return self.weep_cough(pulse, i);
                 }
                 let run = self.special.running;
-                cough(self.move_to(me, nav, tg.goal, run, ai))
+                let m = self.move_to(me, nav, tg.goal, run, ai);
+                self.weep_cough(pulse, m)
             }
         }
+    }
+
+    /// A tick of the weeper's plague cloud: the cough context with its effect tick (the Secondary
+    /// press).
+    fn weep_cough(&mut self, pulse: bool, mut i: PlayerInput) -> PlayerInput {
+        if pulse {
+            self.request.context = npc_moves::WEEPER_COUGH;
+            i.buttons |= buttons::SECONDARY;
+        }
+        i
     }
 
     /// `DisBehaviorMusicalCombat`.
@@ -561,7 +565,7 @@ impl Brain {
                 self.special.ranged_cd = combat::roll(o.tune.cooldown, rng_next(&mut self.rng));
             } else {
                 // The tune's effect clock (0x00c6a240, `m_fMusicEffectPeriod`).
-                i.npc_move = npc_moves::OVERSEER_TUNE;
+                self.request.context = npc_moves::OVERSEER_TUNE;
                 self.special.effect_timer -= dt;
                 if self.special.effect_timer <= 0.0 {
                     self.special.effect_timer += o.tune_period.max(dt);
@@ -577,7 +581,7 @@ impl Brain {
             self.special.out_of_sight = -1.0;
             self.special.out_of_range = -1.0;
             self.barks.push(("DDH_COMBAT_ATTACK".into(), Some(tg.t.id)));
-            i.npc_move = npc_moves::OVERSEER_TUNE;
+            self.request.context = npc_moves::OVERSEER_TUNE;
             return i;
         }
         // MaintainDistance (0x00b2e600): close in at Jog to the ideal distance, stop inside it;
@@ -614,7 +618,7 @@ impl Brain {
         if can_shoot && self.special.ranged_cd <= 0.0 {
             self.special.fsp_goal = None;
             let mut out = i;
-            out.npc_move = npc_moves::TALLBOY_FIRE_BOW;
+            self.request.context = npc_moves::TALLBOY_FIRE_BOW;
             // The aim state: aligned within `m_fAimAlignYawDegrees` for `m_fAimAlignTimeBeforeShooting`.
             if off_facing(me, tg.t.position) <= tb.aim_align_deg.min(b.angle) {
                 self.special.aim_timer += dt;
@@ -703,7 +707,7 @@ impl Brain {
             self.special.lob_wind -= dt;
             let mut out = i;
             (out.yaw, out.pitch) = self.special.lob_aim;
-            out.npc_move = npc_moves::OVERSEER_LOB;
+            self.request.context = npc_moves::OVERSEER_LOB;
             if self.special.lob_wind <= 0.0 {
                 out.buttons |= buttons::SECONDARY;
                 let left = self.grenades.get_or_insert(gr.grenades);
@@ -734,7 +738,7 @@ impl Brain {
                 self.special.lob_aim = aim;
                 let mut out = i;
                 (out.yaw, out.pitch) = aim;
-                out.npc_move = npc_moves::OVERSEER_LOB;
+                self.request.context = npc_moves::OVERSEER_LOB;
                 return Some(out);
             }
         }
@@ -807,7 +811,7 @@ impl Brain {
         }
         self.attack_timer -= dt;
         let kind = self.attack;
-        i.npc_move = kind;
+        self.request.context = kind;
         let close = d <= SWORD_REACH;
         if close && me.sword.phase == SwordPhase::Idle {
             i.buttons |= buttons::PRIMARY;
@@ -822,7 +826,7 @@ impl Brain {
         } else if !close && combat::lunges(kind) {
             i.forward = 127;
             i.buttons |= buttons::SPRINT;
-            i.npc_speed = self.loco_speed(ai, true);
+            self.request.loco_speed = self.loco_speed(ai, true);
             if matches!(kind, npc_moves::JUMP_ATTACK | npc_moves::WH_JUMP_ATTACK) && self.attack_timer > ATTACK_WINDOW - dt * 1.5 {
                 i.buttons |= buttons::JUMP;
             }
@@ -870,8 +874,9 @@ mod tests {
         let mut pulses = 0;
         for _ in 0..60 {
             let tg = Target { t: &t, sighted: true, visible: true, goal: t.position, d: 1200.0, dz: 0.0 };
+            b.request = Default::default();
             let i = b.special_combat(&me, &tg, &ws, &w, None, &ai, &mut Vec::new(), dt).unwrap();
-            assert_eq!(i.npc_move, npc_moves::OVERSEER_TUNE);
+            assert_eq!(b.request.context, npc_moves::OVERSEER_TUNE);
             assert_eq!(i.forward, 0, "the tune is played standing");
             pulses += (i.buttons & buttons::SECONDARY != 0) as u32;
         }
@@ -880,8 +885,9 @@ mod tests {
         let mut stopped = None;
         for k in 0..400 {
             let tg = Target { t: &t, sighted: false, visible: false, goal: t.position, d: 1200.0, dz: 0.0 };
-            let i = b.special_combat(&me, &tg, &ws, &w, None, &ai, &mut Vec::new(), dt).unwrap();
-            if i.npc_move != npc_moves::OVERSEER_TUNE {
+            b.request = Default::default();
+            b.special_combat(&me, &tg, &ws, &w, None, &ai, &mut Vec::new(), dt).unwrap();
+            if b.request.context != npc_moves::OVERSEER_TUNE {
                 stopped = Some(k);
                 break;
             }
@@ -909,8 +915,9 @@ mod tests {
         let mut ticks: Vec<i32> = Vec::new();
         for k in 0..300 {
             let tg = Target { t: &t, sighted: true, visible: true, goal: t.position, d: 60.0, dz: 0.0 };
+            b.request = Default::default();
             let i = b.special_combat(&me, &tg, &ws, &w, None, &ai, &mut Vec::new(), dt).unwrap();
-            if i.npc_move == npc_moves::WEEPER_COUGH && i.buttons & buttons::SECONDARY != 0 {
+            if b.request.context == npc_moves::WEEPER_COUGH && i.buttons & buttons::SECONDARY != 0 {
                 ticks.push(k);
             }
         }
@@ -939,8 +946,9 @@ mod tests {
         // An empty navmesh: no path, so unreachable.
         let mut releases = Vec::new();
         for k in 0..(60 * 6) {
+            b.request = Default::default();
             let i = b.special_combat(&me, &tg, &ws, &w, Some(&nav), &ai, &mut Vec::new(), dt);
-            if i.is_some_and(|i| i.npc_move == npc_moves::OVERSEER_LOB && i.buttons & buttons::SECONDARY != 0) {
+            if b.request.context == npc_moves::OVERSEER_LOB && i.is_some_and(|i| i.buttons & buttons::SECONDARY != 0) {
                 releases.push(k);
             }
         }
@@ -957,8 +965,9 @@ mod tests {
         ws.players.push(ally);
         b2.allies = vec![ally.id];
         for _ in 0..60 {
-            let i = b2.special_combat(&me, &tg, &ws, &w, Some(&nav), &ai, &mut Vec::new(), dt);
-            assert!(!i.is_some_and(|i| i.npc_move == npc_moves::OVERSEER_LOB));
+            b2.request = Default::default();
+            b2.special_combat(&me, &tg, &ws, &w, Some(&nav), &ai, &mut Vec::new(), dt);
+            assert_ne!(b2.request.context, npc_moves::OVERSEER_LOB);
         }
     }
 

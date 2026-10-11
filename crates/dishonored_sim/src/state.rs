@@ -401,6 +401,11 @@ pub struct PlayerState {
     /// sent or saved.
     #[serde(skip)]
     pub nav_end: Option<Vec3>,
+    /// The speed the NPC's brain asks of its locomotion this tick (uu/s, the request's
+    /// [`crate::pawn_states::Request::loco_speed`], set by the step before the pawn moves): it
+    /// replaces the stance speeds of the walking physics. 0 for players and without a request.
+    #[serde(skip)]
+    pub loco_speed: f32,
     /// Helmet of an NPC (`m_PotentialNPCArmor`, `DisTweaks_Armor` protecting the head), until hits
     /// knock it off. The armour damage filter (0x00B78610) zeroes hits of `m_DamageTypesToAbsorb`
     /// types on the protected region and side, but the shipped helmets (elite, city, thug) absorb
@@ -797,6 +802,7 @@ impl PlayerState {
             ai_awareness: awareness::AWARE_OF_PLAYER,
             nav_walk: false,
             nav_end: None,
+            loco_speed: 0.0,
             helmet: false,
             plague: false,
             rat_attack: RatAttackState::default(),
@@ -957,6 +963,11 @@ pub struct WorldState {
     /// ([`crate::walls`]). Set by the host before the step; not part of the state.
     #[serde(skip)]
     pub wall_blockers: Vec<crate::walls::WallBlocker>,
+    /// The NPC brains' requests to their pawns this step (item contexts, GenericAction chains,
+    /// locomotion speeds: [`crate::pawn_states::Request`]). Set by the host before the step; not
+    /// part of the state.
+    #[serde(skip)]
+    pub requests: Vec<(PlayerId, crate::pawn_states::Request)>,
     pub players: Vec<PlayerState>,
     pub projectiles: Vec<ProjectileState>,
     pub next_projectile_id: u32,

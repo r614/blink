@@ -687,8 +687,10 @@ fn guard_slash_damage_jump_attack_and_offscreen() {
     r.settle();
     let swing = |r: &mut Run, me_yaw: f32, mv: u8| {
         r.events.clear();
-        let g = PlayerInput { yaw: 180.0, buttons: buttons::PRIMARY, npc_move: mv, ..Default::default() };
+        let g = PlayerInput { yaw: 180.0, buttons: buttons::PRIMARY, ..Default::default() };
+        r.state.requests = vec![(100, dishonored_sim::pawn_states::Request { context: mv, ..Default::default() })];
         r.step(&[(1, input(me_yaw, 0, 0)), (100, g)]);
+        r.state.requests.clear();
         r.steps(60, &[(1, input(me_yaw, 0, 0)), (100, input(180., 0, 0))]);
         r.events.iter().filter_map(|e| match e {
             SimEvent::Damage { victim: 1, amount, .. } => Some(*amount),

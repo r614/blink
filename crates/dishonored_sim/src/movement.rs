@@ -357,11 +357,11 @@ pub fn speed_modifier(p: &mut PlayerState, input: &PlayerInput, cfg: &MovementCo
     } else {
         1.0
     };
-    // An NPC brain's requested locomotion speed replaces the stance speeds (the authored loop
-    // speed already includes the weapon stance).
-    let npc = input.npc_speed > 0.0;
+    // The speed an NPC's brain asks of its locomotion replaces the stance speeds (the authored
+    // loop speed already includes the weapon stance).
+    let npc = p.loco_speed > 0.0;
     let mut m = if npc {
-        input.npc_speed / ground
+        p.loco_speed / ground
     } else if p.sprinting {
         let dir = if p.strafing {
             cfg.strafe_mult_sprint

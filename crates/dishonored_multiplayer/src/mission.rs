@@ -1525,6 +1525,9 @@ impl MissionMatch {
             }
         }
         all.extend(thought);
+        // The brains' requests to their pawns (item contexts, GenericAction chains, locomotion
+        // speeds: `dishonored_sim::pawn_states`).
+        self.world.requests = self.crowd.requests();
         self.crowd.write_awareness(&mut self.world);
         // The Use of this tick acts on what the last tick's camera update chose (the stored
         // crosshair), so its host target is read from the list that update saw; this step's
