@@ -5,6 +5,22 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613â€¦c6fb` un
 
 ---
 
+## 2026-10-11: The original's tick order for pawns, controllers and animation (static)
+
+- **Question:** In what order does one world tick run the controllers and AI brains, the pawn's physics and state machines, its animation advance, notifies, pose and root motion (ARCHITECTURE.md's caution before step 5)?
+- **Method:** static only: the decompile through `scripts/audit` (`show.py`, `grep_fn.py`, `vtable.py`, `static_class.py`), a Capstone disassembly of the exe's bytes where the decompiler dropped `this` or a float argument, byte searches for vtable entries. Nothing launched.
+- **Findings** (`research/dishonored/systems/tick_order.md`):
+  - World tick `0x0065E0D0`: time `0x00650D20` (variable `dt`, clamped [0.0005, 0.4] x `TimeDilation`), then `TG_PreAsyncWork` `0x006552C0` (Kismet `UpdateOp` first, then the actor loop `0x00651A80`), `TG_DuringAsyncWork` `0x00655430` (rigid-body step started), `TG_PostAsyncWork` `0x006554E0`, cameras and `TG_PostUpdateWork` / `TG_EffectsUpdateWork` in `0x0065DA60`. Each group ends with a skeletal barrier `0x007214F0` that finishes every pose started in it, then an Arkane tick-manager list (`World+0x2C8`). CONFIRMED.
+  - The actor loop follows the levels' `TickableActors` order with no class sorting; an actor's components tick right after its `Tick` (`0x00647F20`) unless their group is later. `APawn::Tick` `0x006A1060` pre-ticks the pawn's `Base`, not its controller. NPC pawns force `TG_PreAsyncWork` in `PreBeginPlay` `0x00B4AC80`. CONFIRMED.
+  - NPC `Tick` `0x00B6DA40`: rotation intents, then `DishonoredPawn::Tick` (script state, timers, physics, `physicsRotation`, inventory), then the state machine at `+0xCEC` (`0x00A6DE60`). Player `Tick` `0x00ABB1E0`: physics, then the three state machines (`+0xA2C/+0xA30/+0xA34`, slot 509 `0x00AA1CA0` from slot 452 `0x00AB0850`). The brain ticks inside `DishonoredNPCController::Tick` `0x00B633E0` (`0x00B24A10`). CONFIRMED. `TickSpecial` is not overridden.
+  - Skeletal mesh `0x007567B0` -> `0x00754B90`: `TickAnimNodes` `0x007124C0` -> tree `0x0059C0D0` -> each node's `TickAnim` (locomotion `0x0091B280`); notifies fire inside the advance (`AdvanceBy` `0x00598440` -> `IssueNotifies` before the time update; window `[t0, t1)`; Arkane's duration notifies `0x00A9BD80`/`0x00A8F340`, the attack zone's tick handler `0x00A8E760` among them); `UpdateSkelPose` `0x00754160` starts the pose (Edge job); `SpaceBases` are composed only at the barrier (`0x007471D0` -> `0x00731270`), so code inside the group reads the previous tick's pose. CONFIRMED.
+  - Root motion at the barrier (`0x00746280`): `RMM_Translate` moves the actor at once (same tick, after physics; `RMRM_RotateActor` turns it); other modes accumulate in `Mesh+0x340` for the next tick's `physFalling` or for the NPC locomotion (Ark list 0, `0x0094BEC0`, which sets `Velocity`). CONFIRMED (mode names LIKELY).
+  - The melee sweep (`0x00C13640`) runs after the PostAsync group: for the player from the camera update (`0x00AD80A0` -> `0x00ABA860` -> `0x00C061F0`), for other owners from the item's `DishonoredInventoryItemPostUpdateTickComponent` (`0x00C0D030`). CONFIRMED.
+- **Corrections:** ARCHITECTURE.md's order "controllers, pawn physics, components" and notify window `(t0, t1]` (now `[t0, t1)`); kismet.md K-1's UNVERIFIED placement of `UpdateOp` is answered (before the actors).
+- **Open:** the default `TickGroup` of the skeletal mesh components, controllers and player pawn (cooked data); the spawn order of controllers vs pawns (UnrealScript); `RootBoneOption` handling; the consumer of root-motion mode 5.
+
+---
+
 ## 2026-10-10 â€” AnimTree node-graph IR decoder
 
 - **Question:** Can the cooked `AnimTree` assets be decoded as node graphs, so that one evaluator can play every tree instead of the hand-coded layers of `NPC_Human_at` and the player's pickers (research/ARCHITECTURE.md)?

@@ -32,11 +32,14 @@ decoder, has not churned since. Subsystems re-expressed feature by feature churn
 2. **A subsystem is one function over its own state slice and its own IR:**
    `step(state, assets, world, inbox, DT) -> outbox`. Deterministic, Bevy-free, serializable
    state. The simulation is an ordered list of these at fixed `DT`, in the original's tick order
-   (controllers, pawn physics, components: animation and root-motion extraction, notifies; to be
-   confirmed from `ADishonoredNPCPawn::Tick` / `TickSpecial`). Presentation subsystems (particle
-   simulation, audio, skinning) have the same shape and step in the same `DT` quanta; their state
-   is simply not replicated. The renderer only reads state. The oracle is a subsystem whose step
-   compares the inbox and state against a capture.
+   (decoded in [`research/dishonored/systems/tick_order.md`](dishonored/systems/tick_order.md):
+   Kismet first; per pawn its physics, then its state machines, then its animation advance with
+   the notifies fired inside it; the pose and the `RMM_Translate` root motion published at the
+   end of the pawn group; then the NPC locomotion step, whose velocity the next tick integrates.
+   Controllers and their brains are separate actors in spawn order, not first). Presentation
+   subsystems (particle simulation, audio, skinning) have the same shape and step in the same
+   `DT` quanta; their state is simply not replicated. The renderer only reads state. The oracle
+   is a subsystem whose step compares the inbox and state against a capture.
 3. **The composition language is the original's data, not Rust.** Tweaks, AnimSets and
    AnimTrees, ParticleSystems, Kismet, spawners and routes, `MissionDef`. A subsystem is an
    interpreter of a cooked format. Rust states and behaviours interpret tweaks; they are never
@@ -68,7 +71,8 @@ is timers in the sim modules and pickers in the runtime.
   `ArkComponentLocomotion` and the item contexts do; `npc_move: u8` retires.
 - **`dishonored_anim`**: Edge sampling, a generic evaluator over the cooked AnimTree graph (the
   node classes as an open set; the locomotion node is already decoded), slot channels, notify
-  dispatch as "everything in `(t0, t1]`" through a class -> handler table, root-motion extraction.
+  dispatch as "everything in `[t0, t1)`" (the original's window, `tick_order.md` section 4)
+  through a class -> handler table, root-motion extraction.
 - **`dishonored_fx`**: the Cascade emitter simulation (`EmitterSim`), with the emitter's modules
   as an open list with per-class spawn / update instead of a flat struct of options, and the
   instance lifecycle (activate, deactivate, completion, auto-destroy, instance parameters) as
@@ -97,5 +101,7 @@ it.
 6. Pawn states and item contexts as one subsystem; the AI requests through them.
 7. The runtime's pickers deleted as the generic path covers each case.
 
-Two cautions: take the tick order from the exe, not from design; and do not build a framework
-first. The three rules are the contract; a scheduler crate is not.
+Two cautions: take the tick order from the exe, not from design (done for pawns, controllers and
+animation in [`tick_order.md`](dishonored/systems/tick_order.md); its open items are the components' tick groups
+and the controllers' spawn order); and do not build a framework first. The three rules are the
+contract; a scheduler crate is not.
