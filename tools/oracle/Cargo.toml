@@ -26,6 +26,7 @@ rayon = "1"
 dishonored_oracle.workspace = true
 dishonored_world.workspace = true
 dishonored_ir.workspace = true
+ue3_package.workspace = true
 dishonored_sim = { workspace = true, optional = true }
 dishonored_content = { workspace = true, optional = true }
 dishonored_multiplayer = { workspace = true, optional = true }
