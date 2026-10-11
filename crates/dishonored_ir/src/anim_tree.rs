@@ -13,7 +13,8 @@ pub struct AnimTreeAsset {
     pub name: String,
     /// Index into `nodes` of the root blend node, or `None` if it could not be read.
     pub root: Option<usize>,
-    /// All reachable nodes (root first, then depth-first by child index).
+    /// All reachable nodes, each after its children (post-order of the depth-first walk from
+    /// the root by child index; `root` indexes the root).
     pub nodes: Vec<AnimNode>,
     /// Skeletal control chains (bone name -> list of (class, name) controls).
     pub skel_controls: Vec<SkelControlEntry>,
@@ -78,6 +79,20 @@ pub enum NodeProps {
         no_notifies: bool,
         /// `SynchGroupName` (`LocoGroup` for the locomotion loops).
         sync_group: String,
+        /// `bSynchronize` (class default true): the node follows its group's master. The
+        /// locomotion idle slot cooks it false and plays at its own time.
+        synchronize: bool,
+        /// `bReverseSync`: the node's group position runs backwards (the `_Revert` loops).
+        reverse_sync: bool,
+        /// `RootBoneOption[3]`: the root bone's translation per axis (X, Y, Z).
+        root_bone: [RootBoneOption; 3],
+        /// `RootRotationOption[3]`: the root bone's rotation per axis (yaw, pitch, roll: UE3's
+        /// order, LIKELY; `NPC_Human_at` sets the three alike).
+        root_rotation: [RootRotationOption; 3],
+        /// `m_bDontUseRefPoseOnNonDefinedBones`: bones the sequence has no track for keep the
+        /// pose under the node instead of the reference pose (the blink and matinee stack
+        /// channels).
+        keep_undefined: bool,
     },
     /// `AnimNodeBlendPerBone` / `DisAnimNodeBlendPerBone`: the target child from the branch
     /// bones down.
@@ -92,7 +107,7 @@ pub enum NodeProps {
     /// `DisAnimNodeSlot` / `AnimNodeSlot`: the source child under channels that play requested
     /// sequences.
     Slot {
-        /// `bEarlyAnimEndNotify`.
+        /// `bEarlyAnimEndNotify` (class default true, `Engine.Default__AnimNodeSlot`).
         early_anim_end: bool,
     },
     /// `AnimNodeAdditiveBlending`: additive blending (base + additive).
@@ -133,4 +148,30 @@ impl Default for NodeProps {
     fn default() -> Self {
         NodeProps::Other
     }
+}
+
+/// UE3 `ERootBoneAxis`: what a sequence node does with the root bone's translation on one axis.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RootBoneOption {
+    /// `RBA_Default`: the pose keeps the animated translation.
+    #[default]
+    Default,
+    /// `RBA_Translate`: the pose keeps the reference translation; the motion is extracted as
+    /// root motion.
+    Translate,
+    /// `RBA_Discard`: the pose keeps the reference translation; the motion is dropped.
+    Discard,
+}
+
+/// UE3 `ERootRotationOption`: what a sequence node does with the root bone's rotation on one
+/// axis.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RootRotationOption {
+    /// `RRO_Default`: the pose keeps the animated rotation.
+    #[default]
+    Default,
+    /// `RRO_Discard`: the pose keeps the reference rotation; the turn is dropped.
+    Discard,
+    /// `RRO_Extract`: the pose keeps the reference rotation; the turn is extracted.
+    Extract,
 }

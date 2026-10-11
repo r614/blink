@@ -3,7 +3,7 @@
 
 use dishonored_assets::Content;
 use dishonored_assets::anim_tree::load_anim_tree;
-use dishonored_ir::anim_tree::{AnimNode, AnimTreeAsset, NodeProps};
+use dishonored_ir::anim_tree::{AnimNode, AnimTreeAsset, NodeProps, RootBoneOption, RootRotationOption};
 
 fn content() -> Option<Content> {
     Content::locate().ok()
@@ -68,9 +68,27 @@ fn the_npc_tree_decodes_to_its_documented_structure() {
         }
         other => panic!("SpeedModeSlot0: {other:?}"),
     }
+    // The idle slot plays on its own (`bSynchronize` false); slots 1-4 run backwards in the group
+    // (`Rate` -1, `bReverseSync`); every loop discards the root's motion, the channels of the
+    // full-body slot extract it.
+    match &first.props {
+        NodeProps::Sequence { synchronize, root_bone, root_rotation, .. } => {
+            assert!(!synchronize);
+            assert_eq!((*root_bone, *root_rotation), ([RootBoneOption::Discard; 3], [RootRotationOption::Discard; 3]));
+        }
+        other => panic!("SpeedModeSlot0: {other:?}"),
+    }
+    for k in 1..=4 {
+        let n = &tree.nodes[loco.children[k].node.unwrap()];
+        assert!(matches!(n.props, NodeProps::Sequence { rate: -1.0, reverse_sync: true, synchronize: true, .. }), "SpeedModeSlot{k}: {:?}", n.props);
+    }
+    let full = node(&tree, "FullBodySlot");
+    assert!(matches!(full.props, NodeProps::Slot { early_anim_end: true }), "the class default");
+    let channel = &tree.nodes[full.children[1].node.unwrap()];
+    assert!(matches!(&channel.props, NodeProps::Sequence { root_bone, root_rotation, .. } if root_bone.contains(&RootBoneOption::Translate) && *root_rotation == [RootRotationOption::Extract; 3]), "{:?}", channel.props);
     let blink = node(&tree, "BlinkBlender");
     let blink_seq = &tree.nodes[blink.children[1].node.expect("blink channel")];
-    assert!(matches!(&blink_seq.props, NodeProps::Sequence { seq, .. } if seq == "Blink"), "{:?}", blink_seq.props);
+    assert!(matches!(&blink_seq.props, NodeProps::Sequence { seq, keep_undefined: true, .. } if seq == "Blink"), "{:?}", blink_seq.props);
     // The look-at grids: nine head, nine torso.
     match &node(&tree, "LookatBlender").props {
         NodeProps::AimOffset { grids } => {
