@@ -584,8 +584,11 @@ pub struct MissionMatch {
     /// [watchtowers] What the towers reported this step, for the Kismet (`DisSeqEvent_WatchTower`).
     #[serde(skip)]
     pub tower_events: Vec<dishonored_ai::watchtower::TowerEvent>,
-    /// [world] Events of shots the Kismet fired between steps (`SimEvent::Fired`), delivered with
-    /// the next step's.
+    /// [world] Events of shots the Kismet's update fired (`SimEvent::Fired`), delivered with the
+    /// step's own after the simulation (`step_launchers`). In a mission running the original
+    /// Kismet it is empty between steps, like the other event lists here (the Kismet's update
+    /// comes first in the step and its feed takes the reports at the end), so a save has nothing
+    /// to keep of it.
     #[serde(skip)]
     pub launcher_events: Vec<SimEvent>,
     /// Mover collision placed where the movers are: (actor, delta) and, in the same order, the
@@ -1442,6 +1445,21 @@ impl MissionMatch {
 
     pub fn step(&mut self, inputs: &[(PlayerId, PlayerInput)], world: &dyn WorldQuery, cfg: &SimConfig) -> StepOutput {
         let dt = dishonored_sim::movement::DT;
+        // The mission runs once someone is in the game.
+        if !self.humans.is_empty() {
+            self.started = true;
+        }
+        // [kismet] The Kismet first: the original's world tick runs every game sequence's
+        // `UpdateOp` before its actors (0x006552C0 slot 92, then the actor loop 0x00651A80;
+        // systems/tick_order.md section 1), so the events the last step's gameplay raised run
+        // now, and what they change is in the world before the simulation and the AI read it.
+        if self.started {
+            kismet_host::update(self, dt, cfg);
+            // The update's AI noises (`DisSeqAct_AINoise`) are heard by this step's AI.
+            if let Some(k) = &mut self.kismet {
+                self.last_events.append(&mut k.st.noises);
+            }
+        }
         // [streaming] The visible Kismet-streamed sublevels collide; the hidden ones do not.
         world.set_visible_levels(&self.visible_levels());
         self.view.hidden_levels = self.hidden_levels();
@@ -1517,6 +1535,9 @@ impl MissionMatch {
         self.world.host_targets = host.iter().map(|h| h.0.clone()).collect();
         self.host_list = host.into_iter().map(|h| h.1).collect();
         let mut out = step_world(&mut self.world, &all, world, cfg);
+        // [interp] The pawns the matinees placed in this step's Kismet update are
+        // `PHYS_Interpolating`: their physics does not move them.
+        kismet_host::cutscene::hold(self, cfg);
         // The HUD's focus: the target this step's camera update chose, from this list.
         self.view.focus = self.focus_views(world, cfg);
         self.world.host_targets.clear();
@@ -1818,9 +1839,6 @@ impl MissionMatch {
             self.spawn_human(id, at, arch, cfg);
         }
         // Mission interpreter (only once someone is in the game).
-        if !self.humans.is_empty() {
-            self.started = true;
-        }
         if self.started {
             let players: Vec<(u32, Vec3, bool)> = self.humans.iter().filter_map(|h| self.world.player(*h)).map(|p| (p.id, p.position, p.alive)).collect();
             let npc_positions: BTreeMap<String, Vec3> = self.npc_by_id.iter().filter_map(|(id, n)| self.world.player(*id).filter(|p| p.alive).map(|p| (n.clone(), p.position))).collect();
@@ -1851,7 +1869,9 @@ impl MissionMatch {
             self.sync_darkness(cfg);
             let climbables: Vec<String> = world.climbables().iter().map(|c| c.name.clone()).collect();
             kismet_host::presentation::rain_cover(self, world, cfg); // [kismet] the camera's rain cover test
-            kismet_host::step(self, &out.events, dt, cfg, &climbables); // [kismet]
+            // [kismet] The step's gameplay activates its Kismet events (the next step's update runs
+            // them) and the map change the update committed travels.
+            kismet_host::raise(self, &out.events, cfg, &climbables);
             self.blocking_dialogs(); // [dialog] speakers stand while their conversation runs
             self.sync_darkness(cfg);
             save::tick(self, dt, &cfg.gameplay.items.combat_save); // [save] autosaves
@@ -1938,7 +1958,8 @@ impl MissionMatch {
             }
         }
         self.last_events = out.events.clone();
-        // [kismet] AI noises made by the Kismet (`DisSeqAct_AINoise`) are heard next step.
+        // [kismet] AI noises the Kismet made since the update (the world actors' events it fed)
+        // are heard next step.
         if let Some(k) = &mut self.kismet {
             self.last_events.append(&mut k.st.noises);
         }

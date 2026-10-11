@@ -21,11 +21,11 @@ pub struct PlayerEventState {
     crouch: BTreeMap<PlayerId, u8>,
     /// `m_bIsInCombat` (+0x8A0 bit 3) per player, as `PlayerCombat` (0x00AB9FA0) keeps it.
     pub(super) combat: BTreeMap<PlayerId, bool>,
-    /// Lock / unlock outputs of usables and doors the Kismet changed, fired next step:
+    /// Lock / unlock outputs of usables and doors the Kismet changed, fired by the next feed:
     /// (actor, `DisSeqEvent_Lock` output, last user).
     pub(super) locks: Vec<(u32, usize, Option<PlayerId>)>,
-    /// Kismet usables a player used (not pickups, not talks): `Interact` fires for each next step
-    /// (0x00A3DF60 after the interactable's own use): (user, usable actor).
+    /// Kismet usables a player used (not pickups, not talks): `Interact` fires for each in the
+    /// next feed (0x00A3DF60 after the interactable's own use): (user, usable actor).
     pub(super) interacts: Vec<(PlayerId, u32)>,
     /// The pawn that last used a usable (`DishonoredUsableObject` +0x2C8: the instigator of its
     /// lock events).
@@ -431,7 +431,7 @@ fn task_events(k: &mut Kismet, h: &mut H) {
     }
 }
 
-/// `DisSeqEvent_Lock` of the usables and doors the Kismet locked or unlocked last step
+/// `DisSeqEvent_Lock` of the usables and doors the Kismet locked or unlocked since the last feed
 /// (`Lock` 0x00A4E870 fires output 0 whenever it runs; `Unlock` 0x00A4E910 fires output 1 only if
 /// the usable was locked): originator the usable, instigator its last user.
 fn lock_events(k: &mut Kismet, h: &mut H) {

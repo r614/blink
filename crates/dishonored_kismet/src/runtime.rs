@@ -648,6 +648,9 @@ impl Kismet {
     /// `m_fCurrentWorldTimeDilation / m_fCurrentPlayerTimeDilation`). `ExecuteActiveOps`
     /// (0x00700740) gives ops flagged `m_bAlwaysOutOfBendTime` the raw `dt` and the others
     /// `dt * ratio` (computed in x87 precision, stored as a float), i.e. the world rate.
+    /// A game calls it at the start of its step, before its actors: the original's world tick
+    /// runs `UpdateOp` from `TG_PreAsyncWork` (0x006552C0) before the actor loop (0x00651A80), so
+    /// the events gameplay activates in one step run in the next.
     pub fn tick_dilated(&mut self, host: &mut dyn Host, dt: f32, ratio: f32) {
         let scaled = (ratio as f64 * dt as f64) as f32;
         self.time += dt as f64;

@@ -16,7 +16,7 @@ use dishonored_kismet::interp::{Bound, GroupKind, Matinee, Scene, SceneWorld, Xf
 use dishonored_kismet::runtime::Ctx;
 use dishonored_kismet::{Kismet, Obj, OpId};
 use dishonored_mission::runtime::{CutsceneBound, CutsceneView};
-use dishonored_sim::state::PlayerId;
+use dishonored_sim::state::{PlayerId, PlayerState};
 use glam::Vec3;
 
 /// A matinee being played.
@@ -199,7 +199,8 @@ pub(super) fn finished(h: &mut H, op: OpId) {
     }
 }
 
-/// Apply the playing matinees to the world (after the Kismet tick).
+/// Apply the playing matinees to the world (after the Kismet tick, before the simulation; the
+/// pawns they place stay there through it, [`hold`]).
 pub(super) fn apply(k: &mut Kismet, h: &mut H) {
     let mut list = std::mem::take(&mut h.st.cutscenes);
     let now = k.time;
@@ -265,17 +266,8 @@ pub(super) fn apply(k: &mut Kismet, h: &mut H) {
                     h.st.actor_rot.insert(a, x.quat());
                 }
                 Bound::Pawn(p) => {
-                    // AI pawns stand on their attach point (Samuel's `Npc_attach` is at deck
-                    // height); the player's cylinder centre is the point (`Player_Attach` sits
-                    // a half height above the deck). LIKELY, U-201.
-                    let lift = if c.players.contains(&p) { 0.0 } else { h.cfg.gameplay.movement.collision_half_height };
                     if let Some(pl) = h.m.world.player_mut(p) {
-                        pl.position = x.pos + Vec3::Z * lift;
-                        pl.velocity = Vec3::ZERO;
-                        // The players keep their own view direction.
-                        if !c.players.contains(&p) {
-                            pl.yaw = x.yaw_deg();
-                        }
+                        pose_pawn(pl, x, c.players.contains(&p), h.cfg.gameplay.movement.collision_half_height);
                     }
                     if let Some(br) = h.m.crowd.brains.iter_mut().find(|br| br.id == p) {
                         br.home = x.pos;
@@ -315,6 +307,35 @@ pub(super) fn apply(k: &mut Kismet, h: &mut H) {
         }
     }
     h.st.cutscenes = list;
+}
+
+/// A pawn on a matinee pose. AI pawns stand on their attach point (Samuel's `Npc_attach` is at
+/// deck height); the player's cylinder centre is the point (`Player_Attach` sits a half height
+/// above the deck). LIKELY, U-201. The players keep their own view direction.
+fn pose_pawn(pl: &mut PlayerState, x: &Xform, player: bool, half_height: f32) {
+    let lift = if player { 0.0 } else { half_height };
+    pl.position = x.pos + Vec3::Z * lift;
+    pl.velocity = Vec3::ZERO;
+    if !player {
+        pl.yaw = x.yaw_deg();
+    }
+}
+
+/// The pawns the playing matinees place (move tracks, attachments) back on the pose of this
+/// step's update, after the simulation: a matinee-driven pawn is in `PHYS_Interpolating` (the
+/// player group's `StatePlayerMasterSoiree`; `startNewPhysics` 0x006A24A0 case 7, slot 153,
+/// systems/tick_order.md 2.1), moved by the matinee in the Kismet's `UpdateOp` and not by its own
+/// physics in the actor loop that follows, so the original's tick ends with it on the pose. The
+/// port's simulation steps every pawn (LIKELY for the AI groups' pawns: that the matinee sets
+/// their physics was not traced).
+pub fn hold(m: &mut crate::mission::MissionMatch, cfg: &dishonored_sim::SimConfig) {
+    let Some(run) = m.kismet.as_ref() else { return };
+    let placed: Vec<(PlayerId, Xform, bool)> = run.st.cutscenes.iter().flat_map(|c| c.poses.iter().filter_map(|(b, x)| if let Bound::Pawn(p) = b { Some((*p, *x, c.players.contains(p))) } else { None })).collect();
+    for (p, x, player) in placed {
+        if let Some(pl) = m.world.player_mut(p) {
+            pose_pawn(pl, &x, player, cfg.gameplay.movement.collision_half_height);
+        }
+    }
 }
 
 /// Players under matinee control this step.

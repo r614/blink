@@ -268,8 +268,10 @@ pub fn uncovered(rain: &Rain, eye: Vec3, in_water: bool, rand: &mut u32, world: 
     Some(world.raycast(p, up, 5000.0, dishonored_world::channel::PAWN).is_none())
 }
 
-/// The camera's cover test of this step, from the first human player's view (called before the
-/// Kismet's step, with the collision world).
+/// The camera's cover test of this step, from the first human player's view (called after the
+/// simulation, with the collision world). The next step's Kismet update reads it, as the
+/// original's latent update reads the `m_bWasUncovered` of the previous tick: the cameras update
+/// after the actors (0x0065DA60), after that tick's `UpdateOp`.
 pub fn rain_cover(m: &mut super::MissionMatch, world: &dyn dishonored_world::WorldQuery, cfg: &dishonored_sim::SimConfig) {
     let Some(run) = m.kismet.as_mut() else { return };
     let Some(rain) = run.st.show.rain.clone() else { return };
