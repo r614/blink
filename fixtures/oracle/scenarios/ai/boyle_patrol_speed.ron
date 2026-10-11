@@ -5,6 +5,13 @@
 // guard's position trace is pure patrol locomotion: the speed of `DisBehaviorPatrol`
 // (locomotion modifier `EmptyPatrol`, 0.92 x the authored walk loop; the port's patrol speed is
 // unmeasured).
+//
+// Animation (the sidecar anim-c81271de70babed4): the guard's tree ticks for 20 ticks only, playing the Empty
+// modifier's turn into the walk (`Empty_TurnToWalkLeft45`, rate 0.92), then neither a node nor a bone changes
+// until tick 1009 while the guard walks on (LIKELY a mesh that is not rendered is not ticked); from 1007 the
+// original's guard fights something that is not the player (Sword_Equip, side steps, Sword_WalkN / RunN).
+// No patrol walk loop is in the capture: the checks are the walk's start; the frozen span and the lag are
+// reported, not judged.
 (
     name: "ai/boyle_patrol_speed",
     system: Ai,
@@ -24,6 +31,13 @@
         (name: "patrol state", expect: [(metric: TimeAt("npc.guard.state", 6), value: 1, tol: 0, cmp: AtMost, source: "patrol_on_startup spawner: DisBehaviorPatrol is the active behaviour (PatrolRequest, slot Idle)", status: Static)]),
         (name: "walk speed", expect: [(metric: Max("npc.guard.speed2d"), value: 145.24, tol: 5, source: "EliteGuardLocomotionConfig: SwordPatrolWalk forward loop Sword_Patrol_WalkN authored 145.24 uu/s (modifier SwordPatrol x1.0); empty-handed EmptyWalkPatrol Empty_Walk_Patrol 126.4. Speed = authored loop speed is LIKELY, not measured", status: Unmeasured)]),
         (name: "distance in 20 s", expect: [(metric: Delta("npc.guard.x", 0, 1200), value: 0, tol: 0, source: "route geometry", status: Unmeasured)]),
+        (name: "walk start", expect: [
+            (metric: AnimSeq("guard", "LocoBlender", 10), name: Some("Empty_TurnToWalkLeft45"), source: "anim c81271de70babed4: the locomotion node's specific-anim child (node 21) at weight 1 from tick 2, the Empty modifier's turn into the walk (rate 0.92), not a SwordPatrol loop", status: Measured),
+            (metric: AnimSeqTime("guard", "LocoBlender", 10), value: 0.307, tol: 0.002, source: "anim c81271de70babed4: node 21 at 0.153 s on tick 0, 0.307 s on tick 10, 0.445 s on tick 19", status: Measured),
+            (metric: AnimBoneMean("guard", "body", 0, 19), value: 0.03, tol: 0, cmp: AtMost, source: "anim c81271de70babed4: the turn into the walk, ticks 0-19 (the last the tree ticks before it freezes), against the capture itself (0) with stealth/detect_1300's bound (the evaluator's floor)", status: Measured),
+        ]),
+        (name: "walk loop out of view", expect: [(metric: AnimSeq("guard", "LocoBlender", 600), name: Some("Empty_TurnToWalkLeft45"), source: "anim c81271de70babed4: from tick 20 to 1008 neither a node nor a bone changes while the guard walks 1000 uu (the tree holds the turn at 0.445 s); it ticks again at 1009, two ticks after the guard's combat behaviour starts at 1007. LIKELY UE3 not ticking or posing a mesh that is not rendered (the guard is 4900 uu away and below the player); the port's trees always tick", status: Unverified)]),
+        (name: "animation lag", expect: [(metric: AnimLag("guard"), value: 0, tol: 2, source: "anim c81271de70babed4: the capture's fresh ticks are the turn into the walk (0-19) and the fight from tick 1009 (the original's guard enters DisBehaviorCombatEliteGuard at 1007, attention level 4 on a target that is not the player); a lag between those and the port's patrol walk is not a timing until the port plays the same sequences", status: Unverified)]),
     ],
     record: [Pawn, Npc("guard"), Bones("guard", ["+world"]), AnimState("guard")],
     capture: Some("scenario boyle_patrol_speed: guard Location per tick (probe_launch scenario); the guard is found by spawner name, speed = |d Location| / dt over the walking ticks"),

@@ -4,6 +4,13 @@
 // player faces +y, yaw 90; the guard faces back, yaw -90). Checkpoints unchanged.
 // An alerted guard fights the player, who does not defend (HOOK_TRIAGE.md 2026-10-06:
 // `DisDamageType_NPCSlash` 15, 8 on some first hits: which hits were 8 is not recorded).
+//
+// Animation (the sidecar anim-90fb2620ff051735): the original's guard walks in (Sword_Patrol_WalkN, then the
+// Sword loops) and attacks from tick 97: Sword_Attack_StepBackA (FullBodySlot node 22, its AttackZone crossed
+// in tick 118), Sword_Attack_ShortBigB from 137, Sword_Attack_MediumSmallB from 148; later LongSmallA,
+// ShortSmallC, ShortBigC, MediumSmallA. Each is the combat behaviour's move (AttackStepBack, AttackShort,
+// AttackMedium...) and a group of that move's chain picked at random: the names hold for a port that picks the
+// same moves at the same ticks and the same groups.
 (
     name: "combat/guard_attack",
     system: Combat,
@@ -20,6 +27,15 @@
         (name: "attacks", expect: [(metric: Count("Sim:SwordSwing@guard"), value: 1, tol: 0, cmp: AtLeast, source: "an alerted elite guard closes in and swings (DisBehaviorCombatEliteGuard)", status: Static)]),
         (name: "slash damage", expect: [(metric: EventValue("Sim:Damage@player[cause=Sword]", "amount"), value: 15, tol: 0.5, source: "HOOK_TRIAGE.md 2026-10-06: DisDamageType_NPCSlash 15 (8 on some first hits)", status: Unverified)]),
         (name: "first swing", expect: [(metric: FirstAt("Sim:SwordSwing@guard"), value: 0, tol: 0, source: "time from the alert to the first swing", status: Unmeasured)]),
+        (name: "attack chain", expect: [
+            (metric: AnimSeq("guard", "FullBodySlot", 120), name: Some("Sword_Attack_StepBackA"), source: "anim 90fb2620ff051735: node 22 (FullBodySlot's first channel) plays Sword_Attack_StepBackA from tick 98 (time 0.017: requested on tick 97)", status: Measured),
+            (metric: AnimSeq("guard", "FullBodySlot", 145), name: Some("Sword_Attack_ShortBigB"), source: "anim 90fb2620ff051735: node 23 plays Sword_Attack_ShortBigB from tick 137 (rate 0.956)", status: Measured),
+            (metric: AnimSeq("guard", "FullBodySlot", 200), name: Some("Sword_Attack_MediumSmallB"), source: "anim 90fb2620ff051735: node 22 plays Sword_Attack_MediumSmallB from tick 148 (rate 0.927)", status: Measured),
+        ]),
+        (name: "first attack zone", expect: [
+            (metric: FirstAt("Sim:AnimNotify@guard[notify=DishonoredNotify_AttackZone]"), value: 1.9667, tol: 0.017, source: "anim 90fb2620ff051735: Sword_Attack_StepBackA's DishonoredNotify_AttackZone (Time 0.3472) is crossed by node 22's time in tick 118 (0.333 -> 0.350 s)", status: Measured),
+            (metric: AnimSeqTime("guard", "FullBodySlot", 118), value: 0.350, tol: 0.017, source: "anim 90fb2620ff051735: node 22 (Sword_Attack_StepBackA) at 0.350 s on tick 118", status: Measured),
+        ]),
     ],
     record: [Pawn, Vitals, Npc("guard"), SimEvents, Effects, Sounds, Anim, Bones("guard", ["+world"]), AnimState("guard")],
     capture: Some("measure sword npc=<doorman> --defend 10 (record each damage-path call: amount, type, time)"),

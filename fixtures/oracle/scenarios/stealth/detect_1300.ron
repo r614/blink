@@ -18,6 +18,11 @@
 // seen at tick 23 (not 20) and the second sighting is lost again at tick 198 (the head is rolled 55 deg
 // there and the port's player target sits just outside the inner cone). Those two are not checked.
 //
+// Animation (the sidecar anim-2ab2cb46af4ff958, ORACLE.md "Animation residuals"): the port's guard plays the
+// pinned Empty_Idle_04 on FullBodySlot (the runner requests it in the simulation's tree before tick 0's sample,
+// from 0.067 s); once its blend-in is over (tick 12) the body bones match the capture to the evaluator's floor
+// and the legs carry the foot placement the evaluator does not apply (2.3 deg, U-280).
+//
 // Dropped: the earlier numbers (0.83 outer-cone norm after 30 lost ticks, level 1 at 2.817 s, ORACLE.md
 // 2026-10-08) came from another run whose ambient idle was not recorded; the cached capture of that run
 // never reached level 1 either, and no recorded variant reproduces them.
@@ -40,6 +45,13 @@
         (name: "sighted again", expect: [(metric: Delta("npc.guard.attn", 184, 190), value: 0.0183, tol: 0.006, source: "capture 2ab2cb46af4ff958: value 0.0060 at tick 184, 0.0243 at tick 190 (0.18 / s)", status: Measured)]),
         (name: "no attention level", expect: [(metric: Max("npc.guard.attn_level"), value: 0.0, tol: 0.0, source: "capture 2ab2cb46af4ff958: level 0 throughout (the value never passes 0.06)", status: Measured)]),
         (name: "loss tick", expect: [(metric: At("npc.guard.attn", 22), value: 0.0, tol: 0.003, source: "capture 2ab2cb46af4ff958: the value is 0.027 at tick 20 and 0 from tick 21; the port loses the player at tick 23 (baked head track deviation, see the header)", status: Unverified)]),
+        (name: "ambient idle on the full body", expect: [(metric: AnimSeq("guard", "FullBodySlot", 100), name: Some("Empty_Idle_04"), source: "anim 2ab2cb46af4ff958: node 22 (FullBodySlot's first channel) plays Empty_Idle_04 at weight 1 from tick 8 to the end", status: Measured)]),
+        (name: "ambient idle time", expect: [(metric: AnimSeqTime("guard", "FullBodySlot", 100), value: 1.733, tol: 0.002, source: "anim 2ab2cb46af4ff958: node 22 at 0.067 s on tick 0, 1.733 s on tick 100 (rate 1)", status: Measured)]),
+        (name: "body pose", expect: [
+            (metric: AnimBoneMean("guard", "body", 12, 200), value: 0.03, tol: 0, cmp: AtMost, source: "anim 2ab2cb46af4ff958: the captured component-space bones outside the legs, hands and head, fresh ones only, against the capture itself (0); the bound is the evaluator's floor on this capture (port 0.018 deg on 2026-10-11, dishonored_anim's input replay 0.003, the capture's rounding). Ticks 12-200: the port's ambient request lands at tick 0, four ticks after the original's, so its blend-in from the idle loop (SwordPatrol's, the capture's Empty_Idle) runs to tick 11 where the capture's ran to tick 7", status: Measured),
+            (metric: AnimBoneMax("guard", "body", 12, 200), value: 0.25, tol: 0, cmp: AtMost, source: "anim 2ab2cb46af4ff958: as the mean (port 0.124 deg on 2026-10-11)", status: Measured),
+        ]),
+        (name: "animation lag", expect: [(metric: AnimLag("guard"), value: 0, tol: 0, source: "anim 2ab2cb46af4ff958: the body mean is least with the port's ticks on the capture's", status: Measured)]),
     ],
     record: [Pawn, Npc("guard"), Bones("guard", ["+world"]), AnimState("guard")],
     capture: Some("captured 2026-10-08 with Bones / AnimState and the ambient idle pinned (Empty_Idle_04); trace 2ab2cb46af4ff958"),
