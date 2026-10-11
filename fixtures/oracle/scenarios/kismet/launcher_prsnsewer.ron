@@ -21,7 +21,7 @@
             (metric: Count("Projectile:TrapArrow"), value: 1, tol: 0, source: "decoded 0x00A33F70: one projectile per Fire, then m_bArmed is cleared", status: Static),
         ]),
         (name: "launch", expect: [
-            (metric: EventValue("Projectile:TrapArrow", "speed"), value: 2000, tol: 0.5, source: "decoded 0x00C540A0: m_fProjectileSpeed 2000 (WhiskeyLauncher_twk) x m_fSpeedMultiplier 1 (TrapExplosiveArrow_twk)", status: Static),
+            (metric: EventValue("Projectile:TrapArrow", "speed"), value: 2000, tol: 1, source: "(sampled after the spawn tick's gravity step: -0.9; the activation pass spawns the arrow at the start of the tick, before the actor loop moves it, systems/tick_order.md section 1) decoded 0x00C540A0: m_fProjectileSpeed 2000 (WhiskeyLauncher_twk) x m_fSpeedMultiplier 1 (TrapExplosiveArrow_twk)", status: Static),
             (metric: EventValue("Projectile:TrapArrow", "dmg"), value: 10, tol: 0, source: "decoded 0x00C540A0: m_Damage = m_fProjectileDamage 10 x m_fDamageMultiplier 1 (0x00C4A310)", status: Static),
         ]),
         (name: "burst", expect: [
@@ -32,7 +32,7 @@
             (metric: Final("launcher.fired"), value: 1, tol: 0, source: "only the launcher the action targets fired", status: Static),
             (metric: Final("launcher.armed"), value: 2, tol: 0, source: "the Sewer's other two tripods stay armed", status: Static),
         ]),
-        (name: "no delay", expect: [(metric: Between("Interact:Tripwire", "Interact:LauncherFire"), value: 0.0, tol: 0.02, source: "decoded 0x00A33F70 spawns the projectile inline in the activation pass (no delay); the port's host runs one step after the world step", status: Unmeasured)]),
+        (name: "no delay", expect: [(metric: Between("Interact:Tripwire", "Interact:LauncherFire"), value: 0.0, tol: 0.02, source: "decoded 0x00A33F70 spawns the projectile inline in the activation pass (no delay in the pass); the wire's Tripwire event runs in the next tick's UpdateOp (systems/tick_order.md section 1), on both sides one tick after the trip", status: Unmeasured)]),
         (name: "flight", expect: [
             (metric: Between("Projectile:TrapArrow", "Sim:ProjectileImpact"), value: 0.3, tol: 0.1, source: "port: about 640 uu from the tripod to the pawn at 2000 uu/s under TrapExplosiveArrow_twk gravity x0.5", status: Unmeasured),
             (metric: EventValue("Sim:Damage[cause=TrapExplosion]", "amount"), value: 30, tol: 1, source: "TrapArrowExplosion_twk m_RadialDamage 30, the pawn within m_fPlayerFullDamageRadius 150 of the burst", status: Unmeasured),
