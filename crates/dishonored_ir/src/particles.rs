@@ -203,6 +203,101 @@ pub enum ParticleBlend {
     Modulate,
 }
 
+/// One module of an emitter's LOD 0 `Modules` array (a UE3 `ParticleModule` subclass), in the
+/// cooked order: a variant per class the port simulates, holding what the decoder reads of it.
+/// A distribution is `None` when the cooked module carries no table the decoder reads (the
+/// module is still listed, and as the last of its class it is the one the emitter's accessors
+/// read, see [`ParticleEmitterAsset`]). Classes the port does not simulate are kept in place as
+/// [`ParticleModule::Unsupported`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ParticleModule {
+    /// `ParticleModuleLifetime.Lifetime`.
+    Lifetime(Option<Dist>),
+    /// `ParticleModuleSize.StartSize`.
+    Size(Option<Dist>),
+    /// `ParticleModuleVelocity`: `StartVelocity`, `StartVelocityRadial`; `bInWorldSpace`: the
+    /// start velocity is not turned by the component (0x008B8C20).
+    Velocity { start: Option<Dist>, radial: Option<Dist>, world: bool },
+    /// `ParticleModuleRotation.StartRotation` (turns).
+    Rotation(Option<Dist>),
+    /// `ParticleModuleRotationRate.StartRotationRate` (turns).
+    RotationRate(Option<Dist>),
+    /// `ParticleModuleColor`: `StartColor`, `StartAlpha`.
+    Color { color: Option<Dist>, alpha: Option<Dist> },
+    /// `ParticleModuleColorOverLife`: `ColorOverLife`, `AlphaOverLife`.
+    ColorOverLife { color: Option<Dist>, alpha: Option<Dist> },
+    /// `ParticleModuleSizeMultiplyLife`: `LifeMultiplier`, MultiplyX/Y/Z.
+    SizeOverLife { dist: Option<Dist>, axes: [bool; 3] },
+    /// `ParticleModuleAcceleration`: `Acceleration`, `bAlwaysInWorldSpace` (0x008B5A20 /
+    /// 0x008B5D50).
+    Acceleration { dist: Option<Dist>, world: bool },
+    /// Velocity damping over the relative age. The install has no `ParticleModuleDrag` and the
+    /// decoder produces none.
+    Drag(Dist),
+    /// `ParticleModuleLocation.StartLocation`.
+    Location(Option<Dist>),
+    /// `ParticleModuleLocationPrimitiveSphere`.
+    Sphere(LocationPrimitive),
+    /// `ParticleModuleLocationPrimitiveCylinder` (the primitive carries its height).
+    Cylinder(LocationPrimitive),
+    /// `ParticleModuleSubUV.SubImageIndex` over the relative age.
+    SubImage(Option<Dist>),
+    /// `ParticleModuleMeshRotation.StartRotation` (turns about X, Y, Z).
+    MeshRotation(Option<Dist>),
+    /// `ParticleModuleMeshRotationRate.StartRotationRate` (turns about X, Y, Z).
+    MeshRotationRate(Option<Dist>),
+    /// `ParticleModuleOrientationAxisLock` (`EParticleAxisLock`: 0 none, 1-3 X/Y/Z, 4-6
+    /// -X/-Y/-Z, 7-9 rotate about X/Y/Z).
+    AxisLock(u8),
+    /// `ParticleModuleVelocityOverLifetime`: VelOverLife over relative age, Absolute (replace the
+    /// velocity) or scale it.
+    VelOverLife { dist: Option<Dist>, absolute: bool },
+    /// `ParticleModuleOrbit` (chained by sum): offset, rotation and rotation rate (turns about
+    /// X/Y/Z), sampled at spawn (emitter time).
+    Orbit(Orbit),
+    /// `ParticleModuleAttractorPoint`.
+    AttractorPoint(AttractorPoint),
+    /// `ParticleModuleAttractorLine`: end points (emitter space), range, strength (over the
+    /// line-relative position).
+    AttractorLine { end0: [f32; 3], end1: [f32; 3], range: Dist, strength: Dist },
+    /// `ParticleModuleCollision`: damping factor (vector), max collisions, completion option
+    /// (0 kill, 1 freeze, 2 halt collisions, 3 freeze translation, 4 freeze rotation, 5 freeze
+    /// movement).
+    Collision { damping: Dist, max_collisions: Dist, completion: u8 },
+    /// `DisParticleModuleRainDrops`.
+    RainDrops(RainDrops),
+    /// `DisParticleModuleRainImpacts`.
+    RainImpacts(RainImpacts),
+    /// `ParticleModuleSizeMultiplyVelocity`: `VelocityMultiplier` (over relative time) and
+    /// MultiplyX/Y/Z: Size *= multiplier x |Velocity| on the enabled axes, at spawn and every
+    /// update. Listed only with its table (one without leaves an earlier one in effect).
+    SizeMultVelocity { dist: Dist, axes: [bool; 3] },
+    /// `ParticleModuleAccelerationOverLifetime`: `AccelOverLife` at the relative time,
+    /// `bAlwaysInWorldSpace` (0x008B67A0).
+    AccelOverLife { dist: Option<Dist>, world: bool },
+    /// `ParticleModuleColorScaleOverLife`: `ColorScaleOverLife`, `AlphaScaleOverLife`,
+    /// `bEmitterTime` (0x0089F040 / 0x008BA1E0).
+    ColorScaleOverLife { color: Option<Dist>, alpha: Option<Dist>, emitter_time: bool },
+    /// `ParticleModuleRotationRateMultiplyLife.LifeMultiplier` (0x0089E270).
+    RotationRateLife(Option<Dist>),
+    /// `ParticleModuleMeshRotationRateOverLife`: `RotRate` (turns), `bScaleRotRate` (0x008A5000).
+    MeshRotationRateLife { dist: Option<Dist>, scale: bool },
+    /// `ParticleModuleSizeScale.SizeScale`: Size = BaseSize x scale (0x0089E040).
+    SizeScale(Option<Dist>),
+    /// `ParticleModuleSizeScaleByTime`: `SizeScaleByTime` over the particle's own clock,
+    /// `bEnableX/Y/Z` (0x0089E120).
+    SizeScaleByTime { dist: Option<Dist>, axes: [bool; 3] },
+    /// `ParticleModuleKillHeight`: `Height`, `bAbsolute`, `bFloor` (0x008BA960).
+    KillHeight { height: Option<Dist>, absolute: bool, floor: bool },
+    /// `ParticleModuleVelocityInheritParent.Scale` (0x008B92A0).
+    VelocityInheritParent(Dist),
+    /// `ParticleModuleLocationEmitter` (0x008ABCE0).
+    LocationEmitter(LocationEmitter),
+    /// A module class the port does not simulate (for the import report); an emitter class other
+    /// than `ParticleSpriteEmitter` is listed first the same way.
+    Unsupported { class: String },
+}
+
 /// One emitter (LOD 0) of a particle system.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParticleEmitterAsset {
@@ -227,28 +322,9 @@ pub struct ParticleEmitterAsset {
     pub rate_scale: Option<Dist>,
     /// (count, count low (-1 = none), emitter relative time).
     pub bursts: Vec<(i32, i32, f32)>,
-    pub lifetime: Option<Dist>,
-    pub size: Option<Dist>,
-    pub velocity: Option<Dist>,
-    pub velocity_radial: Option<Dist>,
-    pub rotation: Option<Dist>,
-    pub rotation_rate: Option<Dist>,
-    pub color: Option<Dist>,
-    pub alpha: Option<Dist>,
-    pub color_over_life: Option<Dist>,
-    pub alpha_over_life: Option<Dist>,
-    pub size_over_life: Option<Dist>,
-    /// MultiplyX/Y/Z of `ParticleModuleSizeMultiplyLife`.
-    pub size_over_life_axes: [bool; 3],
-    pub acceleration: Option<Dist>,
-    pub drag: Option<Dist>,
-    pub location: Option<Dist>,
-    /// `ParticleModuleLocationPrimitiveSphere` / `Cylinder` (the cylinder carries its height).
+    /// The LOD's `Modules` in the cooked order ([`ParticleModule`], read through the accessors).
     #[serde(default)]
-    pub sphere: Option<LocationPrimitive>,
-    #[serde(default)]
-    pub cylinder: Option<LocationPrimitive>,
-    pub sub_image: Option<Dist>,
+    pub modules: Vec<ParticleModule>,
     /// Mesh emitter (`ParticleModuleTypeDataMesh`).
     pub mesh: Option<String>,
     /// The mesh in the map's mesh table (mesh emitters).
@@ -257,35 +333,6 @@ pub struct ParticleEmitterAsset {
     /// Draw mesh particles with the emitter material (`bOverrideMaterial` / MeshMaterial).
     #[serde(default)]
     pub mesh_override_material: bool,
-    /// `ParticleModuleMeshRotation` / `MeshRotationRate` (turns about X, Y, Z).
-    #[serde(default)]
-    pub mesh_rotation: Option<Dist>,
-    #[serde(default)]
-    pub mesh_rotation_rate: Option<Dist>,
-    /// `ParticleModuleOrientationAxisLock` (`EParticleAxisLock`: 0 none, 1-3 X/Y/Z, 4-6 -X/-Y/-Z,
-    /// 7-9 rotate about X/Y/Z).
-    #[serde(default)]
-    pub axis_lock: u8,
-    /// `ParticleModuleVelocityOverLifetime`: VelOverLife over relative age, Absolute (replace the
-    /// velocity) or scale it.
-    #[serde(default)]
-    pub vel_over_life: Option<(Dist, bool)>,
-    /// `ParticleModuleOrbit` (chained by sum): offset, rotation and rotation rate (turns about
-    /// X/Y/Z), sampled at spawn (emitter time).
-    #[serde(default)]
-    pub orbit: Vec<Orbit>,
-    /// `ParticleModuleAttractorPoint`.
-    #[serde(default)]
-    pub attractor_point: Option<AttractorPoint>,
-    /// `ParticleModuleAttractorLine`: end points (emitter space), range, strength (over the
-    /// line-relative position).
-    #[serde(default)]
-    pub attractor_line: Option<([f32; 3], [f32; 3], Dist, Dist)>,
-    /// `ParticleModuleCollision`: damping factor (vector), max collisions, completion option
-    /// (0 kill, 1 freeze, 2 halt collisions, 3 freeze translation, 4 freeze rotation, 5 freeze
-    /// movement).
-    #[serde(default)]
-    pub collision: Option<(Dist, Dist, u8)>,
     /// Trail / ribbon type data (`ParticleModuleTypeDataTrail2`, `ParticleModuleTypeDataRibbon`):
     /// particles of the emitter are drawn as one strip in spawn order; texture tiling.
     #[serde(default)]
@@ -304,54 +351,6 @@ pub struct ParticleEmitterAsset {
     /// `ParticleModuleEventReceiverSpawn`: events that spawn this emitter's particles.
     #[serde(default)]
     pub events_in: Vec<EventIn>,
-    /// `DisParticleModuleRainDrops`.
-    #[serde(default)]
-    pub rain_drops: Option<RainDrops>,
-    /// `DisParticleModuleRainImpacts`.
-    #[serde(default)]
-    pub rain_impacts: Option<RainImpacts>,
-    /// `ParticleModuleSizeMultiplyVelocity`: `VelocityMultiplier` (over relative time) and
-    /// MultiplyX/Y/Z: Size *= multiplier x |Velocity| on the enabled axes, at spawn and every
-    /// update.
-    #[serde(default)]
-    pub size_mult_velocity: Option<(Dist, [bool; 3])>,
-    /// `ParticleModuleVelocity.bInWorldSpace`: the start velocity is not turned by the component
-    /// (0x008B8C20).
-    #[serde(default)]
-    pub velocity_world: bool,
-    /// `ParticleModuleAcceleration.bAlwaysInWorldSpace` (0x008B5A20 / 0x008B5D50).
-    #[serde(default)]
-    pub accel_world: bool,
-    /// `ParticleModuleAccelerationOverLifetime`: `AccelOverLife` at the relative time,
-    /// `bAlwaysInWorldSpace` (0x008B67A0).
-    #[serde(default)]
-    pub accel_over_life: Option<(Dist, bool)>,
-    /// `ParticleModuleColorScaleOverLife`: `ColorScaleOverLife`, `AlphaScaleOverLife`,
-    /// `bEmitterTime` (0x0089F040 / 0x008BA1E0).
-    #[serde(default)]
-    pub color_scale_over_life: Option<(Option<Dist>, Option<Dist>, bool)>,
-    /// `ParticleModuleRotationRateMultiplyLife.LifeMultiplier` (0x0089E270).
-    #[serde(default)]
-    pub rotation_rate_life: Option<Dist>,
-    /// `ParticleModuleMeshRotationRateOverLife`: `RotRate` (turns), `bScaleRotRate` (0x008A5000).
-    #[serde(default)]
-    pub mesh_rotation_rate_life: Option<(Dist, bool)>,
-    /// `ParticleModuleSizeScale.SizeScale`: Size = BaseSize x scale (0x0089E040).
-    #[serde(default)]
-    pub size_scale: Option<Dist>,
-    /// `ParticleModuleSizeScaleByTime`: `SizeScaleByTime` over the particle's own clock,
-    /// `bEnableX/Y/Z` (0x0089E120).
-    #[serde(default)]
-    pub size_scale_by_time: Option<(Dist, [bool; 3])>,
-    /// `ParticleModuleKillHeight`: `Height`, `bAbsolute`, `bFloor` (0x008BA960).
-    #[serde(default)]
-    pub kill_height: Option<(Dist, bool, bool)>,
-    /// `ParticleModuleVelocityInheritParent.Scale` (0x008B92A0).
-    #[serde(default)]
-    pub velocity_inherit_parent: Option<Dist>,
-    /// `ParticleModuleLocationEmitter` (0x008ABCE0).
-    #[serde(default)]
-    pub location_emitter: Option<LocationEmitter>,
     /// `ParticleModuleRequired.InterpolationMethod` (`EParticleSubUVInterpMethod`: 0 none,
     /// 1 linear, 2 linear blend, 3 random, 4 random blend).
     #[serde(default)]
@@ -375,8 +374,278 @@ pub struct ParticleEmitterAsset {
     /// particles at once (others let them live out their lifetime).
     #[serde(default)]
     pub kill_on_deactivate: bool,
-    /// Module classes present but not simulated (for the import report).
-    pub unsupported: Vec<String>,
+}
+
+/// Accessors for the classes that hold a single distribution.
+macro_rules! last_dist {
+    ($($name:ident => $variant:ident;)*) => {
+        $(
+            pub fn $name(&self) -> Option<&Dist> {
+                self.last(|m| match m {
+                    ParticleModule::$variant(d) => Some(d.as_ref()),
+                    _ => None,
+                })
+                .flatten()
+            }
+        )*
+    };
+}
+
+/// The modules as the simulation reads them. The flat layout kept one value per field and each
+/// module of a class overwrote it, also with "no table", so these read the last module of the
+/// class. The install has emitters with two modules of a class (`ParticleModuleLocation`,
+/// `SizeMultiplyLife`, `Acceleration`, `ColorOverLife`, `Velocity`, `Color`...; e.g.
+/// `Blink_Ground_01`'s Body), and in `Flare_Bolts_02`'s Embers the second Location carries no
+/// table, so that emitter has no start location. Orbits sum, in order
+/// ([`ParticleEmitterAsset::orbits`]).
+impl ParticleEmitterAsset {
+    fn last<'a, T>(&'a self, f: impl Fn(&'a ParticleModule) -> Option<T>) -> Option<T> {
+        self.modules.iter().rev().find_map(f)
+    }
+
+    last_dist! {
+        lifetime => Lifetime;
+        size => Size;
+        rotation => Rotation;
+        rotation_rate => RotationRate;
+        location => Location;
+        sub_image => SubImage;
+        mesh_rotation => MeshRotation;
+        mesh_rotation_rate => MeshRotationRate;
+        rotation_rate_life => RotationRateLife;
+        size_scale => SizeScale;
+    }
+
+    /// `StartVelocity` and `bInWorldSpace`.
+    pub fn velocity(&self) -> Option<(&Dist, bool)> {
+        self.last(|m| match m {
+            ParticleModule::Velocity { start, world, .. } => Some(start.as_ref().map(|d| (d, *world))),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    /// `StartVelocityRadial`.
+    pub fn velocity_radial(&self) -> Option<&Dist> {
+        self.last(|m| match m {
+            ParticleModule::Velocity { radial, .. } => Some(radial.as_ref()),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    /// `StartColor`.
+    pub fn color(&self) -> Option<&Dist> {
+        self.last(|m| match m {
+            ParticleModule::Color { color, .. } => Some(color.as_ref()),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    /// `StartAlpha`.
+    pub fn alpha(&self) -> Option<&Dist> {
+        self.last(|m| match m {
+            ParticleModule::Color { alpha, .. } => Some(alpha.as_ref()),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    /// `ColorOverLife`.
+    pub fn color_over_life(&self) -> Option<&Dist> {
+        self.last(|m| match m {
+            ParticleModule::ColorOverLife { color, .. } => Some(color.as_ref()),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    /// `AlphaOverLife`.
+    pub fn alpha_over_life(&self) -> Option<&Dist> {
+        self.last(|m| match m {
+            ParticleModule::ColorOverLife { alpha, .. } => Some(alpha.as_ref()),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    /// `LifeMultiplier` and MultiplyX/Y/Z.
+    pub fn size_over_life(&self) -> Option<(&Dist, [bool; 3])> {
+        self.last(|m| match m {
+            ParticleModule::SizeOverLife { dist, axes } => Some(dist.as_ref().map(|d| (d, *axes))),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    /// `Acceleration` and `bAlwaysInWorldSpace`.
+    pub fn acceleration(&self) -> Option<(&Dist, bool)> {
+        self.last(|m| match m {
+            ParticleModule::Acceleration { dist, world } => Some(dist.as_ref().map(|d| (d, *world))),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    pub fn drag(&self) -> Option<&Dist> {
+        self.last(|m| match m {
+            ParticleModule::Drag(d) => Some(d),
+            _ => None,
+        })
+    }
+
+    pub fn sphere(&self) -> Option<&LocationPrimitive> {
+        self.last(|m| match m {
+            ParticleModule::Sphere(p) => Some(p),
+            _ => None,
+        })
+    }
+
+    pub fn cylinder(&self) -> Option<&LocationPrimitive> {
+        self.last(|m| match m {
+            ParticleModule::Cylinder(p) => Some(p),
+            _ => None,
+        })
+    }
+
+    /// `EParticleAxisLock`, 0 without the module.
+    pub fn axis_lock(&self) -> u8 {
+        self.last(|m| match m {
+            ParticleModule::AxisLock(a) => Some(*a),
+            _ => None,
+        })
+        .unwrap_or(0)
+    }
+
+    /// `VelOverLife` and `Absolute`.
+    pub fn vel_over_life(&self) -> Option<(&Dist, bool)> {
+        self.last(|m| match m {
+            ParticleModule::VelOverLife { dist, absolute } => Some(dist.as_ref().map(|d| (d, *absolute))),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    /// Every `ParticleModuleOrbit`, in the cooked order (their values sum).
+    pub fn orbits(&self) -> impl Iterator<Item = &Orbit> {
+        self.modules.iter().filter_map(|m| match m {
+            ParticleModule::Orbit(o) => Some(o),
+            _ => None,
+        })
+    }
+
+    pub fn attractor_point(&self) -> Option<&AttractorPoint> {
+        self.last(|m| match m {
+            ParticleModule::AttractorPoint(a) => Some(a),
+            _ => None,
+        })
+    }
+
+    /// End points, range, strength.
+    pub fn attractor_line(&self) -> Option<([f32; 3], [f32; 3], &Dist, &Dist)> {
+        self.last(|m| match m {
+            ParticleModule::AttractorLine { end0, end1, range, strength } => Some((*end0, *end1, range, strength)),
+            _ => None,
+        })
+    }
+
+    /// Damping factor, max collisions, completion option.
+    pub fn collision(&self) -> Option<(&Dist, &Dist, u8)> {
+        self.last(|m| match m {
+            ParticleModule::Collision { damping, max_collisions, completion } => Some((damping, max_collisions, *completion)),
+            _ => None,
+        })
+    }
+
+    pub fn rain_drops(&self) -> Option<&RainDrops> {
+        self.last(|m| match m {
+            ParticleModule::RainDrops(r) => Some(r),
+            _ => None,
+        })
+    }
+
+    pub fn rain_impacts(&self) -> Option<&RainImpacts> {
+        self.last(|m| match m {
+            ParticleModule::RainImpacts(r) => Some(r),
+            _ => None,
+        })
+    }
+
+    /// `VelocityMultiplier` and MultiplyX/Y/Z.
+    pub fn size_mult_velocity(&self) -> Option<(&Dist, [bool; 3])> {
+        self.last(|m| match m {
+            ParticleModule::SizeMultVelocity { dist, axes } => Some((dist, *axes)),
+            _ => None,
+        })
+    }
+
+    /// `AccelOverLife` and `bAlwaysInWorldSpace`.
+    pub fn accel_over_life(&self) -> Option<(&Dist, bool)> {
+        self.last(|m| match m {
+            ParticleModule::AccelOverLife { dist, world } => Some(dist.as_ref().map(|d| (d, *world))),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    /// `ColorScaleOverLife`, `AlphaScaleOverLife`, `bEmitterTime`.
+    pub fn color_scale_over_life(&self) -> Option<(Option<&Dist>, Option<&Dist>, bool)> {
+        self.last(|m| match m {
+            ParticleModule::ColorScaleOverLife { color, alpha, emitter_time } => Some((color.as_ref(), alpha.as_ref(), *emitter_time)),
+            _ => None,
+        })
+    }
+
+    /// `RotRate` and `bScaleRotRate`.
+    pub fn mesh_rotation_rate_life(&self) -> Option<(&Dist, bool)> {
+        self.last(|m| match m {
+            ParticleModule::MeshRotationRateLife { dist, scale } => Some(dist.as_ref().map(|d| (d, *scale))),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    /// `SizeScaleByTime` and `bEnableX/Y/Z`.
+    pub fn size_scale_by_time(&self) -> Option<(&Dist, [bool; 3])> {
+        self.last(|m| match m {
+            ParticleModule::SizeScaleByTime { dist, axes } => Some(dist.as_ref().map(|d| (d, *axes))),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    /// `Height`, `bAbsolute`, `bFloor`.
+    pub fn kill_height(&self) -> Option<(&Dist, bool, bool)> {
+        self.last(|m| match m {
+            ParticleModule::KillHeight { height, absolute, floor } => Some(height.as_ref().map(|h| (h, *absolute, *floor))),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    pub fn velocity_inherit_parent(&self) -> Option<&Dist> {
+        self.last(|m| match m {
+            ParticleModule::VelocityInheritParent(d) => Some(d),
+            _ => None,
+        })
+    }
+
+    pub fn location_emitter(&self) -> Option<&LocationEmitter> {
+        self.last(|m| match m {
+            ParticleModule::LocationEmitter(l) => Some(l),
+            _ => None,
+        })
+    }
+
+    /// The module classes present but not simulated, in the cooked order (for the import
+    /// report).
+    pub fn unsupported(&self) -> impl Iterator<Item = &str> {
+        self.modules.iter().filter_map(|m| match m {
+            ParticleModule::Unsupported { class } => Some(class.as_str()),
+            _ => None,
+        })
+    }
 }
 
 /// `ParticleModuleLocationPrimitiveBase` as a sphere or a cylinder (spawn 0x008B42A0 /

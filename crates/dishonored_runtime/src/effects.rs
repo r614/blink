@@ -679,7 +679,7 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
     if std::env::var_os("DISH_FX_LIST").is_some() {
         for e in &map.emitters {
             let s = &map.particle_systems[e.system];
-            let unsupported: Vec<&String> = s.emitters.iter().flat_map(|x| x.unsupported.iter()).collect();
+            let unsupported: Vec<&str> = s.emitters.iter().flat_map(|x| x.unsupported().collect::<std::collections::BTreeSet<_>>()).collect();
             info!("fx emitter {} {} at {:.0} ({} emitters, unsupported {:?})", e.source, s.source, e.position(), s.emitters.len(), unsupported);
         }
     }
@@ -938,6 +938,7 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
         4 => order.sort_by(|a, b| a.age.total_cmp(&b.age)),
         _ => {}
     }
+    let (axis_lock, sub_image) = (em.axis_lock(), em.sub_image());
     for p in order {
         // A decal emitter's particle lies on the surface it was placed on; one without
         // (not placed yet) is not drawn.
@@ -958,12 +959,12 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
         let (s, co) = p.rot.sin_cos();
         // Plane of the sprite: camera facing, or locked to an emitter axis (OrientationAxisLock).
         let axis = |v: glam::Vec4| coords::dir(v.truncate()).normalize_or_zero();
-        let (br, bu) = match em.axis_lock {
+        let (br, bu) = match axis_lock {
             1 | 4 => (axis(xf.y_axis), axis(xf.z_axis)),
             2 | 5 => (axis(xf.x_axis), axis(xf.z_axis)),
             3 | 6 => (axis(xf.x_axis), axis(xf.y_axis)),
             7..=9 => {
-                let up = axis([xf.x_axis, xf.y_axis, xf.z_axis][(em.axis_lock - 7) as usize]);
+                let up = axis([xf.x_axis, xf.y_axis, xf.z_axis][(axis_lock - 7) as usize]);
                 (up.cross(cam_pos - c).normalize_or_zero(), up)
             }
             _ => (cam_right, cam_up),
@@ -997,7 +998,7 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
         // `DetermineImageIndex` (0x008B5390): linear methods take `(int)SubImageIndex(relative
         // time)` clamped to the frames; random methods a random frame (`RandomImageChanges` 0:
         // drawn once); `PSUVIM_None` keeps the first frame.
-        let f = match (em.sub_method, &em.sub_image) {
+        let f = match (em.sub_method, sub_image) {
             (1 | 2, Some(d)) => (d.eval1(rel, p.r[2]).max(0.0) as u32).min(frames - 1),
             (3 | 4, _) => ((p.r[2] * frames as f32) as u32).min(frames - 1),
             _ => 0,
@@ -1042,19 +1043,19 @@ fn clear_sprite_mesh(mesh: &mut Mesh) {
 /// the relative time, or the emitter time `et` with `bEmitterTime`).
 fn particle_look(em: &ParticleEmitterAsset, p: &Particle, et: f32) -> (Vec3, f32, Vec3) {
     let rel = (p.age / p.life).clamp(0.0, 1.0);
-    let mut size = match &em.size_scale {
+    let mut size = match em.size_scale() {
         Some(d) => p.size * Vec3::from(d.eval(rel, p.r[1])),
         None => p.size,
     };
-    if let Some(d) = &em.size_over_life {
+    if let Some((d, axes)) = em.size_over_life() {
         let m = d.eval(rel, p.r[1]);
         for k in 0..3 {
-            if em.size_over_life_axes[k] {
+            if axes[k] {
                 size[k] *= m[k];
             }
         }
     }
-    if let Some((d, axes)) = &em.size_scale_by_time {
+    if let Some((d, axes)) = em.size_scale_by_time() {
         let m = d.eval(p.age, p.r[1]);
         for k in 0..3 {
             if axes[k] {
@@ -1064,7 +1065,7 @@ fn particle_look(em: &ParticleEmitterAsset, p: &Particle, et: f32) -> (Vec3, f32
     }
     // `ParticleModuleSizeMultiplyVelocity`: Size *= VelocityMultiplier x |Velocity| on the
     // enabled axes (every update, from the reset size; the rain streaks' length).
-    if let Some((d, axes)) = &em.size_mult_velocity {
+    if let Some((d, axes)) = em.size_mult_velocity() {
         let m = Vec3::from(d.eval(rel, p.r[1])) * p.vel.length();
         for k in 0..3 {
             if axes[k] {
@@ -1072,10 +1073,10 @@ fn particle_look(em: &ParticleEmitterAsset, p: &Particle, et: f32) -> (Vec3, f32
             }
         }
     }
-    let mut color = em.color_over_life.as_ref().map(|d| Vec3::from(d.eval(rel, p.r[0]))).unwrap_or(p.color);
-    let mut alpha = em.alpha_over_life.as_ref().map(|d| d.eval1(rel, p.r[0])).unwrap_or(p.alpha);
-    if let Some((cs, als, emitter_time)) = &em.color_scale_over_life {
-        let t = if *emitter_time { et } else { rel };
+    let mut color = em.color_over_life().map(|d| Vec3::from(d.eval(rel, p.r[0]))).unwrap_or(p.color);
+    let mut alpha = em.alpha_over_life().map(|d| d.eval1(rel, p.r[0])).unwrap_or(p.alpha);
+    if let Some((cs, als, emitter_time)) = em.color_scale_over_life() {
+        let t = if emitter_time { et } else { rel };
         if let Some(d) = cs {
             color *= Vec3::from(d.eval(t, p.r[0]));
         }
@@ -1187,7 +1188,7 @@ fn simulate(
             for _ in 0..steps {
                 feed_location_sources(&sys.emitters, &mut inst.sims, &xf);
                 for (em, sim) in sys.emitters.iter().zip(inst.sims.iter_mut()).filter(|(em, _)| !crate::rain::is_rain_emitter(em)) {
-                    step(em, sim, &xf, 1.0 / 15.0, &mut rnd, (em.collision.is_some() || em.decal.is_some()).then_some(ray_fn));
+                    step(em, sim, &xf, 1.0 / 15.0, &mut rnd, (em.collision().is_some() || em.decal.is_some()).then_some(ray_fn));
                 }
                 dispatch_events(&sys.emitters, &mut inst.sims, &xf, &mut rnd);
             }
@@ -1202,7 +1203,7 @@ fn simulate(
                     crate::rain::step_emitter(em, sim, rs, &xf, dt, &mut rnd, &params, &mut rain_cam);
                 }
             } else {
-                step(em, sim, &xf, dt, &mut rnd, (em.collision.is_some() || em.decal.is_some()).then_some(ray_fn));
+                step(em, sim, &xf, dt, &mut rnd, (em.collision().is_some() || em.decal.is_some()).then_some(ray_fn));
             }
             live += sim.particles.len();
             let mut sprite_culled = false;

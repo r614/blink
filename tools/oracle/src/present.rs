@@ -48,7 +48,8 @@ pub struct FxLibrary {
     pub systems: HashMap<String, FxSystem>,
 }
 
-const FX_CACHE_VERSION: u32 = 2;
+/// 3: the emitter's modules as an ordered list (`ParticleEmitterAsset::modules`).
+const FX_CACHE_VERSION: u32 = 3;
 
 impl FxLibrary {
     /// Decode `GAMEPLAY_PARTICLES` through the level importer (as `level.rs` passes them in
@@ -171,7 +172,7 @@ impl Presenter {
         };
         self.next_inst += 1;
         let untextured = sys.emitters.iter().filter(|e| !e.0).count();
-        let infinite = sys.system.emitters.iter().filter(|e| e.lifetime.as_ref().is_none_or(|l| l.eval1(0.0, 1.0) <= 0.0)).count();
+        let infinite = sys.system.emitters.iter().filter(|e| e.lifetime().is_none_or(|l| l.eval1(0.0, 1.0) <= 0.0)).count();
         let kind = match owner {
             None => "oneshot",
             Some(Owner::Indicator) => "indicator",
@@ -310,7 +311,7 @@ impl Presenter {
             let xf = l.transform;
             let mut rnd = || next_rand(rng);
             for (em, sim) in sys.system.emitters.iter().zip(l.sims.iter_mut()) {
-                step(em, sim, &xf, dt, &mut rnd, (em.collision.is_some() || em.decal.is_some()).then_some(ray_fn));
+                step(em, sim, &xf, dt, &mut rnd, (em.collision().is_some() || em.decal.is_some()).then_some(ray_fn));
             }
             dispatch_events(&sys.system.emitters, &mut l.sims, &xf, &mut rnd);
             if l.one_shot && one_shot_finished(&l.sims) {

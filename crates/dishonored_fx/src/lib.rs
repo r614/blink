@@ -238,7 +238,7 @@ pub fn pick_source(le: &dishonored_ir::particles::LocationEmitter, sim: &mut Emi
 /// velocity) of the instance's emitter it names.
 pub fn feed_location_sources(ems: &[ParticleEmitterAsset], sims: &mut [EmitterSim], xf: &Mat4) {
     for i in 0..ems.len().min(sims.len()) {
-        let Some(le) = &ems[i].location_emitter else { continue };
+        let Some(le) = ems[i].location_emitter() else { continue };
         let src: Vec<(Vec3, Vec3)> = match ems.iter().position(|e| e.name == le.emitter) {
             Some(j) if j < sims.len() => {
                 let w = |p: &Particle| if ems[j].local_space { (xf.transform_point3(p.pos), xf.transform_vector3(p.vel)) } else { (p.pos, p.vel) };
@@ -270,8 +270,8 @@ pub fn setup_duration(em: &ParticleEmitterAsset, sim: &mut EmitterSim, rnd: &mut
     }
 }
 
-pub fn d3(d: &Option<dishonored_ir::particles::Dist>, t: f32, r: f32, def: [f32; 3]) -> Vec3 {
-    Vec3::from(d.as_ref().map(|d| d.eval(t, r)).unwrap_or(def))
+pub fn d3(d: Option<&dishonored_ir::particles::Dist>, t: f32, r: f32, def: [f32; 3]) -> Vec3 {
+    Vec3::from(d.map(|d| d.eval(t, r)).unwrap_or(def))
 }
 
 pub fn spawn_particle(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, rnd: &mut dyn FnMut() -> f32) {
@@ -281,55 +281,57 @@ pub fn spawn_particle(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4
     let et = sim.time;
     let r = [rnd(), rnd(), rnd(), rnd()];
     // No lifetime module (or 0): the particle lives until the emitter is destroyed (UE3).
-    let life = em.lifetime.as_ref().map(|d| d.eval1(et, r[0])).filter(|l| *l > 0.0).unwrap_or(f32::INFINITY);
-    let mut local = d3(&em.location, et, r[1], [0.0; 3]);
-    let start_v = d3(&em.velocity, et, r[2], [0.0; 3]);
+    let life = em.lifetime().map(|d| d.eval1(et, r[0])).filter(|l| *l > 0.0).unwrap_or(f32::INFINITY);
+    let mut local = d3(em.location(), et, r[1], [0.0; 3]);
+    let velocity = em.velocity();
+    let start_v = d3(velocity.map(|v| v.0), et, r[2], [0.0; 3]);
+    let velocity_world = velocity.is_some_and(|v| v.1);
     let mut prim_vel = Vec3::ZERO;
-    for prim in [em.sphere.as_ref(), em.cylinder.as_ref()].into_iter().flatten() {
+    for prim in [em.sphere(), em.cylinder()].into_iter().flatten() {
         let (off, v) = primitive_offset(prim, et, rnd);
         local += off;
         prim_vel += v;
     }
-    let radial = em.velocity_radial.as_ref().map(|vr| local.normalize_or_zero() * vr.eval1(et, r[2])).unwrap_or(Vec3::ZERO);
+    let radial = em.velocity_radial().map(|vr| local.normalize_or_zero() * vr.eval1(et, r[2])).unwrap_or(Vec3::ZERO);
     // `ParticleModuleLocationEmitter`: at a particle of the source emitter (the other location
     // modules' offsets on top).
-    let src = em.location_emitter.as_ref().and_then(|le| pick_source(le, sim, rnd));
+    let src = em.location_emitter().and_then(|le| pick_source(le, sim, rnd));
     let inv = xf.inverse();
     // The start velocity turns with the component unless `bInWorldSpace` (a local emitter turns
     // a world one into its space); radial and primitive velocities follow the location (0x008B8C20).
     let (pos, mut vel) = if em.local_space {
         let base = src.map(|s| inv.transform_point3(s.0)).unwrap_or(Vec3::ZERO);
-        let sv = if em.velocity_world { inv.transform_vector3(start_v) } else { start_v };
+        let sv = if velocity_world { inv.transform_vector3(start_v) } else { start_v };
         (base + local, sv + radial + prim_vel)
     } else {
         let pos = match src {
             Some(s) => s.0 + xf.transform_vector3(local),
             None => xf.transform_point3(local),
         };
-        let sv = if em.velocity_world { start_v } else { xf.transform_vector3(start_v) };
+        let sv = if velocity_world { start_v } else { xf.transform_vector3(start_v) };
         (pos, sv + xf.transform_vector3(radial + prim_vel))
     };
-    if let (Some(k), Some(s)) = (em.location_emitter.as_ref().and_then(|le| le.inherit_velocity), src) {
+    if let (Some(k), Some(s)) = (em.location_emitter().and_then(|le| le.inherit_velocity), src) {
         vel += if em.local_space { inv.transform_vector3(s.1) } else { s.1 } * k;
     }
     // `ParticleModuleVelocityInheritParent` (0x008B92A0): Scale x the instance's velocity.
-    if let Some(d) = &em.velocity_inherit_parent {
+    if let Some(d) = em.velocity_inherit_parent() {
         let pv = if em.local_space { inv.transform_vector3(sim.parent_vel) } else { sim.parent_vel };
         vel += Vec3::from(d.eval(et, r[2])) * pv;
     }
-    let accel = d3(&em.acceleration, et, r[3], [0.0; 3]);
+    let accel = d3(em.acceleration().map(|a| a.0), et, r[3], [0.0; 3]);
     // A scaled instance transform scales the particles too (the first-person hand effects ride
     // the rig drawn at the viewmodel scale); gameplay transforms are unscaled.
-    let size = d3(&em.size, et, r[0], [1.0; 3]) * xf.x_axis.truncate().length();
-    let color = d3(&em.color, et, r[1], [1.0; 3]);
-    let alpha = em.alpha.as_ref().map(|d| d.eval1(et, r[1])).unwrap_or(1.0);
+    let size = d3(em.size(), et, r[0], [1.0; 3]) * xf.x_axis.truncate().length();
+    let color = d3(em.color(), et, r[1], [1.0; 3]);
+    let alpha = em.alpha().map(|d| d.eval1(et, r[1])).unwrap_or(1.0);
     let (mut orbit_off, mut orbit_rot, mut orbit_rate) = (Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
-    for o in &em.orbit {
-        orbit_off += d3(&o.offset, et, r[1], [0.0; 3]);
-        orbit_rot += d3(&o.rotation, et, r[2], [0.0; 3]) * std::f32::consts::TAU;
-        orbit_rate += d3(&o.rotation_rate, et, r[3], [0.0; 3]) * std::f32::consts::TAU;
+    for o in em.orbits() {
+        orbit_off += d3(o.offset.as_ref(), et, r[1], [0.0; 3]);
+        orbit_rot += d3(o.rotation.as_ref(), et, r[2], [0.0; 3]) * std::f32::consts::TAU;
+        orbit_rate += d3(o.rotation_rate.as_ref(), et, r[3], [0.0; 3]) * std::f32::consts::TAU;
     }
-    let max_collisions = em.collision.as_ref().map(|c| c.1.eval1(et, r[0]).max(0.0) as u32).unwrap_or(0);
+    let max_collisions = em.collision().map(|c| c.1.eval1(et, r[0]).max(0.0) as u32).unwrap_or(0);
     sim.particles.push(Particle {
         pos,
         vel,
@@ -345,13 +347,13 @@ pub fn spawn_particle(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4
         age: 0.0,
         life,
         size,
-        rot: em.rotation.as_ref().map(|d| d.eval1(et, r[3])).unwrap_or(0.0) * std::f32::consts::TAU,
-        rot_rate: em.rotation_rate.as_ref().map(|d| d.eval1(et, r[2])).unwrap_or(0.0) * std::f32::consts::TAU,
+        rot: em.rotation().map(|d| d.eval1(et, r[3])).unwrap_or(0.0) * std::f32::consts::TAU,
+        rot_rate: em.rotation_rate().map(|d| d.eval1(et, r[2])).unwrap_or(0.0) * std::f32::consts::TAU,
         color,
         alpha,
         r,
-        mrot: d3(&em.mesh_rotation, et, r[2], [0.0; 3]) * std::f32::consts::TAU,
-        mrot_rate: d3(&em.mesh_rotation_rate, et, r[3], [0.0; 3]) * std::f32::consts::TAU,
+        mrot: d3(em.mesh_rotation(), et, r[2], [0.0; 3]) * std::f32::consts::TAU,
+        mrot_rate: d3(em.mesh_rotation_rate(), et, r[3], [0.0; 3]) * std::f32::consts::TAU,
         normal: None,
         edge2: pos,
     });
@@ -449,6 +451,10 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
     // Emitter-space points to the particle space (world unless local space).
     let to_space = |v: Vec3| if em.local_space { v } else { xf.transform_point3(v) };
     let et = sim.time;
+    // The per-frame modules, looked up once for the particles.
+    let accel_world = em.acceleration().is_some_and(|a| a.1);
+    let (accel_over_life, drag, attractor_point, attractor_line) = (em.accel_over_life(), em.drag(), em.attractor_point(), em.attractor_line());
+    let (vel_over_life, collision, rotation_rate_life, mesh_rotation_rate_life) = (em.vel_over_life(), em.collision(), em.rotation_rate_life(), em.mesh_rotation_rate_life());
     for p in sim.particles.iter_mut() {
         p.age += dt;
         let rel = (p.age / p.life).clamp(0.0, 1.0);
@@ -456,12 +462,12 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
         if p.frozen {
             continue;
         }
-        let mut a = space(p.accel, em.accel_world);
-        if let Some((d, world)) = &em.accel_over_life {
-            a += space(Vec3::from(d.eval(rel, p.r[3])), *world);
+        let mut a = space(p.accel, accel_world);
+        if let Some((d, world)) = accel_over_life {
+            a += space(Vec3::from(d.eval(rel, p.r[3])), world);
         }
         p.base_vel += a * dt;
-        if let Some(d) = &em.drag {
+        if let Some(d) = drag {
             p.base_vel *= (1.0 - d.eval1(rel, p.r[2]) * dt).max(0.0);
         }
         let mut v = p.base_vel;
@@ -480,27 +486,27 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
             }
             *v += dv;
         };
-        if let Some(ap) = &em.attractor_point {
+        if let Some(ap) = attractor_point {
             let pos = Vec3::from(ap.position.eval(et, p.r[0]));
             let target = if ap.world_space && !em.local_space { pos } else { to_space(pos) };
             pull(target, ap.range.eval1(et, p.r[1]), ap.strength.eval1(et, p.r[2]), ap.strength_by_distance, ap.affect_base_velocity, p, &mut v);
         }
-        if let Some((a0, a1, range, strength)) = &em.attractor_line {
-            let (a0, a1) = (to_space(Vec3::from(*a0)), to_space(Vec3::from(*a1)));
+        if let Some((a0, a1, range, strength)) = attractor_line {
+            let (a0, a1) = (to_space(Vec3::from(a0)), to_space(Vec3::from(a1)));
             let seg = a1 - a0;
             let t = ((p.pos - a0).dot(seg) / seg.length_squared().max(1e-6)).clamp(0.0, 1.0);
             pull(a0 + seg * t, range.eval1(t, p.r[1]), strength.eval1(t, p.r[2]), true, true, p, &mut v);
         }
-        if let Some((d, absolute)) = &em.vel_over_life {
+        if let Some((d, absolute)) = vel_over_life {
             let s = Vec3::from(d.eval(rel, p.r[1]));
-            v = if *absolute { if em.local_space { s } else { xf.transform_vector3(s) } } else { v * s };
+            v = if absolute { if em.local_space { s } else { xf.transform_vector3(s) } } else { v * s };
         }
         p.vel = v;
         let next = p.pos + v * dt;
         // Collision against the level geometry: reflect with the damping factor; past the
         // maximum count, the completion option (kill, freeze, stop colliding...).
         let mut moved = false;
-        if let (Some((damp, _, opt)), Some(ray)) = (&em.collision, ray) {
+        if let (Some((damp, _, opt)), Some(ray)) = (collision, ray) {
             if !p.halted {
                 let (wf, wt) = if em.local_space { (xf.transform_point3(p.pos), xf.transform_point3(next)) } else { (p.pos, next) };
                 if let Some((pt, n)) = ray(wf, wt) {
@@ -538,11 +544,11 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
         // `ParticleModuleRotationRateMultiplyLife` scales the (reset) rate every update
         // (0x0089E270); `MeshRotationRateOverLife` adds to (or scales) the mesh rate every update
         // (0x008A5000).
-        let rr = em.rotation_rate_life.as_ref().map_or(1.0, |d| d.eval1(rel, p.r[2]));
+        let rr = rotation_rate_life.map_or(1.0, |d| d.eval1(rel, p.r[2]));
         p.rot += p.rot_rate * rr * dt;
-        if let Some((d, scale)) = &em.mesh_rotation_rate_life {
+        if let Some((d, scale)) = mesh_rotation_rate_life {
             let v = Vec3::from(d.eval(rel, p.r[3])) * std::f32::consts::TAU;
-            if *scale {
+            if scale {
                 p.mrot_rate *= v;
             } else {
                 p.mrot_rate += v;
@@ -561,11 +567,11 @@ pub fn step(em: &ParticleEmitterAsset, sim: &mut EmitterSim, xf: &Mat4, dt: f32,
     }
     // `ParticleModuleKillHeight` (0x008BA960): particles above the height (below it with
     // `bFloor`) are killed; the height is relative to the component unless `bAbsolute`.
-    if let Some((h, absolute, floor)) = &em.kill_height {
-        let height = h.eval1(et, 0.5) + if *absolute { 0.0 } else { origin.z };
+    if let Some((h, absolute, floor)) = em.kill_height() {
+        let height = h.eval1(et, 0.5) + if absolute { 0.0 } else { origin.z };
         for p in sim.particles.iter_mut() {
             let z = if em.local_space { xf.transform_point3(p.pos).z } else { p.pos.z };
-            if (*floor && z < height) || (!*floor && z > height) {
+            if (floor && z < height) || (!floor && z > height) {
                 p.age = p.life;
             }
         }

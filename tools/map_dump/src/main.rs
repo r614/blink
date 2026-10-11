@@ -117,7 +117,7 @@ fn main() -> Result<()> {
             let d = glam::Vec2::new(p.x - x, p.y - y).length();
             if d <= r {
                 let s = &m.particle_systems[e.system];
-                println!("{d:.0} uu: emitter {} at {p:.0} xf {:?} emitters {:?}", s.source, e.transform.to_scale_rotation_translation().0, s.emitters.iter().map(|em| (em.mesh.clone(), em.blend, em.material.map(|k| m.materials[k].source.rsplit('.').next().unwrap_or("").to_string()), format!("size {:?} color {:?} alpha {:?}", em.size, em.color, em.alpha))).collect::<Vec<_>>());
+                println!("{d:.0} uu: emitter {} at {p:.0} xf {:?} emitters {:?}", s.source, e.transform.to_scale_rotation_translation().0, s.emitters.iter().map(|em| (em.mesh.clone(), em.blend, em.material.map(|k| m.materials[k].source.rsplit('.').next().unwrap_or("").to_string()), format!("size {:?} color {:?} alpha {:?}", em.size(), em.color(), em.alpha()))).collect::<Vec<_>>());
             }
         }
     }

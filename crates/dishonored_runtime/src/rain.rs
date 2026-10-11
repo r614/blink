@@ -141,7 +141,7 @@ pub struct RainEmitterState {
 }
 
 pub fn is_rain_emitter(em: &ParticleEmitterAsset) -> bool {
-    em.rain_drops.is_some() || em.rain_impacts.is_some()
+    em.rain_drops().is_some() || em.rain_impacts().is_some()
 }
 
 /// 0x00C00470: a drop placed in `bx` (min, max, relative to the emitter location already in
@@ -284,7 +284,7 @@ pub fn step_emitter(em: &ParticleEmitterAsset, sim: &mut EmitterSim, st: &mut Ra
         let rate = em.rate.as_ref().map(|d| d.eval1(et, frand())).unwrap_or(0.0);
         (rate, scale)
     };
-    if let Some(rd) = &em.rain_drops {
+    if let Some(rd) = em.rain_drops() {
         st.drops.resize(sim.particles.len(), Drop::default());
         for (p, d) in sim.particles.iter_mut().zip(st.drops.iter()) {
             p.vel = p.base_vel;
@@ -320,7 +320,7 @@ pub fn step_emitter(em: &ParticleEmitterAsset, sim: &mut EmitterSim, st: &mut Ra
                 }
             }
         }
-    } else if let Some(ri) = &em.rain_impacts {
+    } else if let Some(ri) = em.rain_impacts() {
         for p in sim.particles.iter_mut() {
             p.age += dt;
         }
@@ -356,7 +356,7 @@ pub fn step_emitter(em: &ParticleEmitterAsset, sim: &mut EmitterSim, st: &mut Ra
     // The move (UE3's bounding-box update). LIKELY: the impacts module's spawn flag (Flags |= 4
     // with `m_bFixedLocation`) keeps its particles where they landed; the velocity only aligns
     // the sprite (FinalUpdate's OldLocation = Location - Velocity).
-    if em.rain_impacts.as_ref().is_some_and(|r| r.fixed_location) {
+    if em.rain_impacts().is_some_and(|r| r.fixed_location) {
         return;
     }
     for p in sim.particles.iter_mut() {
@@ -432,7 +432,7 @@ pub fn rotator_matrix(r: [i32; 3]) -> Mat4 {
 /// The rain box extent of a template: its first emitter's first module, if that is a
 /// `DisParticleModuleRainDrops` (what 0x00B9ADF0 requires of a target).
 pub fn template_extent(sys: &dishonored_ir::particles::ParticleSystemAsset) -> Option<Vec3> {
-    sys.emitters.first()?.rain_drops.as_ref().filter(|r| r.first_module).map(|r| Vec3::from(r.extent))
+    sys.emitters.first()?.rain_drops().filter(|r| r.first_module).map(|r| Vec3::from(r.extent))
 }
 
 /// The camera's rain tick (0x00AD80A0) on the client's view, after `SetRainEmitter` changes.
@@ -580,7 +580,7 @@ pub fn drive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dishonored_ir::particles::{Dist, FloatDist, ParticleParam};
+    use dishonored_ir::particles::{Dist, FloatDist, ParticleModule, ParticleParam};
 
     #[test]
     fn rain_box_puts_the_camera_on_its_boundary() {
@@ -698,7 +698,7 @@ mod tests {
 
     #[test]
     fn rain_drops_fill_the_box_then_respawn_where_it_moved() {
-        let em = ParticleEmitterAsset { rain_drops: Some(drops_module()), rate: Some(Dist::constant([500.0; 3], 1)), ..Default::default() };
+        let em = ParticleEmitterAsset { modules: vec![ParticleModule::RainDrops(drops_module())], rate: Some(Dist::constant([500.0; 3], 1)), ..Default::default() };
         let mut sim = EmitterSim::default();
         let mut st = RainEmitterState::default();
         let mut cam = RainCamera::default();
