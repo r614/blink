@@ -7,6 +7,7 @@
 //! the test harness. Nothing here depends on Bevy.
 
 pub mod adrenaline;
+pub mod anim;
 pub mod blink;
 pub mod climb;
 pub mod dlc06;
@@ -50,16 +51,34 @@ use state::{MoveMode, PlayerId, PlayerState, WorldState};
 use tuning::CombatTuning;
 
 /// Everything constant during a match.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SimConfig {
     pub gameplay: GameplayConfig,
     pub tuning: CombatTuning,
+    /// The sequence table (`GameplayConfig::sequences` in key order, [`anim::SeqTable`]).
+    pub anim: std::sync::Arc<anim::SeqTable>,
+    /// The host's clip data ([`anim::AnimSource`]; [`anim::NoClips`] without the install).
+    pub anim_source: std::sync::Arc<dyn anim::AnimSource>,
+}
+
+impl std::fmt::Debug for SimConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SimConfig").field("gameplay", &self.gameplay).field("tuning", &self.tuning).field("sequences", &self.anim.len()).finish_non_exhaustive()
+    }
 }
 
 impl SimConfig {
+    /// A config whose sequences step by their decoded lengths and notifies only (no clips).
     pub fn new(gameplay: GameplayConfig) -> Self {
         let tuning = CombatTuning::from_config(&gameplay);
-        Self { gameplay, tuning }
+        let anim = std::sync::Arc::new(anim::SeqTable::new(&gameplay.sequences));
+        Self { gameplay, tuning, anim, anim_source: std::sync::Arc::new(anim::NoClips) }
+    }
+
+    /// The same config with the host's clip data (the install's trees, skeletons and clips).
+    pub fn with_anim_source(mut self, source: std::sync::Arc<dyn anim::AnimSource>) -> Self {
+        self.anim_source = source;
+        self
     }
 
     /// Load the config JSON extracted from the install by `gameplay_config`.
@@ -205,7 +224,8 @@ pub fn step_world(
             p.pitch = input.pitch;
             let mut local = Vec::new();
             let mut acts = Vec::new();
-            left_hand::update(p, &input, &ctx, g, &cfg.tuning, &mut local, &mut acts, false, &mut out.events);
+            let pa = state.anim.get(&p.id);
+            left_hand::update(p, &input, &ctx, g, &cfg.tuning, pa, &mut local, &mut acts, false, &mut out.events);
             actions.extend(acts.into_iter().map(|a| (i, a)));
             vitals::tick(p, &powers::effective_vitals(&p0, g), dt);
             p.prev_buttons = input.buttons;
@@ -285,10 +305,11 @@ pub fn step_world(
         } else {
             input
         };
-        combat::update_sword(p, &sword_input, &cfg.tuning, dt, &mut out.events);
+        let pa = state.anim.get(&p.id);
+        combat::update_sword(p, &sword_input, &cfg.tuning, pa, &cfg.anim, dt, &mut out.events);
         let mut local = Vec::new();
         let mut acts = Vec::new();
-        left_hand::update(p, &left_input, &ctx, g, &cfg.tuning, &mut local, &mut acts, bend_active, &mut out.events);
+        left_hand::update(p, &left_input, &ctx, g, &cfg.tuning, pa, &mut local, &mut acts, bend_active, &mut out.events);
         actions.extend(acts.into_iter().map(|a| (i, a)));
         spawns.extend(local.into_iter().map(|(k, pos, vel)| (p.id, k, pos, vel)));
         let breath = powers::attribute(&p0, g, "Attribute_BreathCapacityIncrease", 0.0);
@@ -304,7 +325,22 @@ pub fn step_world(
         p.prev_buttons = input.buttons;
         p.last_input = input;
         takedown::step_afflictions(state, i, dt, g, &mut out.events);
+        // The sequences the pawn's states asked for this tick (they play in this tick's advance).
+        anim::sync_requests(state, i, cfg);
     }
+    // The animation advance (tick_order.md: each pawn's skeletal mesh ticks after its pawn's
+    // physics and states, the notifies firing inside the advance). No handler reads another
+    // pawn's physics, so advancing after the whole group equals the per-pawn interleaving.
+    {
+        let mut ao = anim::StepOut::default();
+        anim::step(state, cfg, world, &mut ao);
+        out.events.extend(ao.events);
+        actions.extend(ao.actions);
+        spawns.extend(ao.spawns);
+    }
+    // The pose barrier: the paired moves' `RMM_Translate` root motion moves the pawns now, after
+    // their physics and before the melee sweep reads them.
+    sync_motion::step(state, world, cfg);
     // Rat attack groups.
     let rat_dt = DT * powers::world_time_scale(state, g, false);
     if rat_dt > 0.0 && state.players.iter().any(|p| p.kind == state::PawnKind::Rat) {
@@ -367,9 +403,15 @@ pub fn step_world(
 
     // Health before the sword resolves (assassinations give adrenaline by the victim's health).
     let pre_health: Vec<(PlayerId, f32)> = state.players.iter().map(|p| (p.id, p.vitals.health)).collect();
-    combat::resolve_sword_hits(state, world, g, &cfg.tuning, &mut out.events);
-    fatality::step(state, g, &mut out.events);
-    sync_motion::step(state, world, g);
+    combat::resolve_sword_hits(state, world, cfg, &mut out.events);
+    fatality::step(state, g);
+    // The paired moves the sweep started play from this tick (their contexts start at the press;
+    // a master's notifies call for no left-hand action or projectile).
+    {
+        let mut ao = anim::StepOut::default();
+        anim::start_paired(state, cfg, world, &mut ao);
+        out.events.extend(ao.events);
+    }
     movement::slide_impacts(state, mv, &cfg.gameplay.vitals, &mut out.events);
 
     for e in &out.events {
@@ -546,6 +588,15 @@ pub fn step_world(
         .collect();
     noise::body_falls(state, &fell, g, &mut out.events);
 
+    // The sequences asked for after the pawn group (paired moves, deaths, throws): they play
+    // from the next tick's advance (a throw's first update runs in the hit's tick).
+    {
+        let mut ao = anim::StepOut::default();
+        let deaths = out.events.clone();
+        anim::after_group(state, cfg, &deaths, world, &mut ao);
+        out.events.extend(ao.events);
+    }
+
     // The camera update (0x00AD80A0): each pawn's crosshair target for the view and the world as
     // this tick leaves them; the next tick's Use and the HUD read it.
     let focus: Vec<Option<crosshair::Crosshair>> = state.players.iter().map(|p| if p.kind == state::PawnKind::Human { crosshair::target(state, p, world, cfg) } else { None }).collect();
@@ -656,6 +707,15 @@ pub fn state_hash(state: &WorldState) -> u64 {
         mix(pr.position.x.to_bits() as u64);
         mix(pr.position.y.to_bits() as u64);
         mix(pr.position.z.to_bits() as u64);
+    }
+    // The pawns' layers (the playheads that fire notifies).
+    for (id, a) in &state.anim {
+        for (l, s) in a.layers.iter().enumerate() {
+            let Some(s) = s else { continue };
+            mix(*id as u64 | (l as u64) << 32 | (s.playing as u64) << 40);
+            mix(s.seq as u64 | (s.token as u64) << 16);
+            mix(s.time.to_bits() as u64);
+        }
     }
     h
 }

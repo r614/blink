@@ -28,12 +28,9 @@ use dishonored_ir::items::{ExplosionConfig, GrenadeConfig};
 use dishonored_world::{WorldQuery, channel, geom::closest_segment_segment};
 use glam::Vec3;
 
-/// `Gadgets_Grenade_Deploy`: projectile at 0.300 s, back to idle at 0.680 s.
-pub const GRENADE_FIRE: f32 = 0.300;
-pub const GRENADE_EXIT: f32 = 0.680;
-/// `Gadgets_SpringRazor_Deploy`: `DisNotify_PlaceSpringRazor` at 0.200 s, length 0.367 s.
-pub const RAZOR_PLACE: f32 = 0.200;
-pub const RAZOR_EXIT: f32 = 0.367;
+// The deploys play on the player's left arm (`crate::anim`): `Gadgets_Grenade_Deploy` throws at
+// its `DishonoredNotify_FireProjectile` and ends at its `AnimStateAdvance`,
+// `Gadgets_SpringRazor_Deploy` places at its `DisNotify_PlaceSpringRazor` and ends with its length.
 
 pub fn grenade_cfg(cfg: &GameplayConfig, kind: ProjectileKind) -> &GrenadeConfig {
     if kind == ProjectileKind::StickyGrenade { &cfg.items.gadgets.sticky_grenade } else { &cfg.items.gadgets.grenade }

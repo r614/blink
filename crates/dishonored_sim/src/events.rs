@@ -216,4 +216,11 @@ pub enum SimEvent {
     RatBite { rat: PlayerId, victim: PlayerId },
     /// Rats set upon an NPC (its swarm-melee state starts; `rat` the first attacker).
     RatsAttackStart { victim: PlayerId, rat: PlayerId },
+    // --- animation (crate::anim) ---
+    /// A notify a pawn's sequence crossed in this tick's advance (its `Time` in `[t0, t1)`):
+    /// `sequence` indexes the config's sequence table (`crate::anim::SeqTable`), `notify` that
+    /// sequence's notifies (`SequenceInfo::notifies`), `t0` is the step's start (sequence
+    /// seconds). For the presentation's sounds, particles, drops and severs from the
+    /// simulation's playhead.
+    AnimNotify { pawn: PlayerId, sequence: u16, notify: u16, t0: f32 },
 }

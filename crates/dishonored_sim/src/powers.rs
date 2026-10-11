@@ -386,15 +386,10 @@ pub fn set_charm(p: &mut PlayerState, i: usize, on: bool, cfg: &GameplayConfig) 
 // ---------------------------------------------------------------------------------------
 // Bend Time
 
-/// Notify times of the cast animations (`Ply_Powers_as`): `DisNotify_BendTime` at 0.140 s,
-/// `DisNotify_DevouringSwarm` at 0.165 s, `DisNotify_Possession` at 0.172 s of the Out anim;
-/// the casts end (`AnimStateExit`) at 1.295 / 1.679 / 1.117 s.
-pub const BEND_TIME_NOTIFY: f32 = 0.140;
-pub const BEND_TIME_EXIT: f32 = 1.295;
-pub const SWARM_NOTIFY: f32 = 0.165;
-pub const SWARM_EXIT: f32 = 1.679;
-pub const POSSESS_NOTIFY: f32 = 0.172;
-pub const POSSESS_EXIT: f32 = 1.117;
+// The casts play on the caster's left arm (`crate::anim`, `Ply_Powers_as`): `DisNotify_BendTime`
+// of `Powers_Cast_BendTime`, `DisNotify_DevouringSwarm` of `Powers_Cast_Swarm` and
+// `DisNotify_Possession` of `Powers_Cast_Possession_Out` use the power; each cast's
+// `AnimStateExit` ends it.
 
 /// Start Bend Time for `caster` (0x00BF5190): dilations and duration of its level.
 pub fn start_bend_time(state: &mut WorldState, caster: PlayerId, cfg: &GameplayConfig, events: &mut Vec<SimEvent>) {

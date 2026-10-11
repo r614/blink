@@ -1,8 +1,11 @@
 //! Combat/power values derived from `GameplayConfig`. Timings the original drives from
-//! animation notifies are read from the decoded Startup.upk AnimSets (`anim_notifies`,
-//! U-021); the remaining SPECULATIVE values are listed in research/UNKNOWNS.md.
+//! animation notifies are read from the config's sequence table (`GameplayConfig::sequences`,
+//! decoded from the AnimSets); the states that play those sequences take them from the playhead
+//! (`crate::anim`), these values stand where a rule still counts time. The remaining
+//! SPECULATIVE values are listed in research/UNKNOWNS.md.
 
-use dishonored_ir::gameplay::GameplayConfig;
+use crate::anim::{self, ASSASSINATION_SET, CROSSBOW_MESH_SET, CROSSBOW_SET, FATALITY_SET, GUNS_SET, PISTOL_SET, POWERS_SET, SWING_CLIPS, SWORD_ATTACK_SET, SWORD_VERSUS_SET};
+use dishonored_ir::gameplay::{ASSASSINATION_MASTERS, GameplayConfig, SequenceInfo};
 use serde::{Deserialize, Serialize};
 
 /// The player's gun reload (`DisItemContext_ReloadGunPlayer`, start 0x00C2AA80, tick
@@ -22,14 +25,29 @@ pub struct ReloadTiming {
     pub reload_out: f32,
 }
 
+/// `DisTweaks_ReloadGunPlayer.m_fReloadTime` of `Twk_Inv_PistolCorvo` (0.75) and of the crossbow
+/// (1.0, the class default: `Twk_Inv_CrossbowCorvo` and its cooked fallbacks leave it); the
+/// crossbow's reload actions' `m_fPlayRateOverride` (1.3). Tweak values the config does not load
+/// yet (U-501).
+const PISTOL_RELOAD_TIME: f32 = 0.75;
+const CROSSBOW_RELOAD_TIME: f32 = 1.0;
+const CROSSBOW_RELOAD_RATE: f32 = 1.3;
+
 impl ReloadTiming {
-    /// Pistol_Reload_In exit 0.426, `m_fReloadTime` 0.75 (`Twk_Inv_PistolCorvo`), Pistol_Reload_Out
-    /// exit 0.302.
-    pub const PISTOL: ReloadTiming = ReloadTiming { reload_in: 0.426, time: 0.75, reload_out: 0.302 };
-    /// Crossbow_Reload_In exit 0.225 and Crossbow_Reload_Out exit 0.169 at play rate 1.3,
-    /// `m_fReloadTime` 1.0 (the class default: `Twk_Inv_CrossbowCorvo` and its cooked fallbacks
-    /// leave it).
-    pub const CROSSBOW: ReloadTiming = ReloadTiming { reload_in: 0.225 / 1.3, time: 1.0, reload_out: 0.169 / 1.3 };
+    /// `Pistol_Reload_In` / `Pistol_Reload_Out` `AnimStateExit` (`Ply_Pistol_as`) around the
+    /// pistol's `m_fReloadTime`.
+    pub fn pistol(g: &GameplayConfig) -> Self {
+        ReloadTiming { reload_in: anim::exit_time(g, PISTOL_SET, "Pistol_Reload_In"), time: PISTOL_RELOAD_TIME, reload_out: anim::exit_time(g, PISTOL_SET, "Pistol_Reload_Out") }
+    }
+    /// `Crossbow_Reload_In` / `Crossbow_Reload_Out` exits (`Ply_Crossbow_as`) at the actions' play
+    /// rate around the crossbow's `m_fReloadTime`.
+    pub fn crossbow(g: &GameplayConfig) -> Self {
+        ReloadTiming {
+            reload_in: anim::exit_time(g, CROSSBOW_SET, "Crossbow_Reload_In") / CROSSBOW_RELOAD_RATE,
+            time: CROSSBOW_RELOAD_TIME,
+            reload_out: anim::exit_time(g, CROSSBOW_SET, "Crossbow_Reload_Out") / CROSSBOW_RELOAD_RATE,
+        }
+    }
 
     /// (seconds into the reload when the magazine loads, seconds when the reload ends) for the
     /// weapon's `Attribute_ReloadSpeed` and `Attribute_FastReload`.
@@ -95,56 +113,39 @@ pub fn countdown_ticks(time: f32, dt: f32) -> u32 {
     }
 }
 
-fn pistol_stages() -> ReloadTiming {
-    ReloadTiming::PISTOL
-}
-fn crossbow_stages() -> ReloadTiming {
-    ReloadTiming::CROSSBOW
-}
-fn crossbow_fire_recovery() -> f32 {
-    0.3983666
-}
-fn crossbow_fast_fire() -> f32 {
-    0.62483305 / 1.5
-}
-fn crossbow_fire_notify() -> f32 {
-    0.03361667
-}
-fn crossbow_fast_fire_notify() -> f32 {
-    0.0
-}
-
-/// One player attack clip's `DishonoredNotify_AttackZone` and the end of its attack state.
+/// One attack sequence's `DishonoredNotify_AttackZone` and the end of its attack state, in
+/// play seconds at rate 1 (sequence times over `RateScale`).
 ///
 /// The notify's tick handler (0x00A8E760) opens the versus zone and then the damage zone
-/// when the clip time crosses `end - m_fDamageZoneMaxTime - m_fVersusZoneMaxTime` and
-/// `end - m_fDamageZoneMaxTime` (each clamped to the notify start). Entering the damage
-/// zone (melee context slot 115, 0x00C13140) sets `m_bDamageIsPosssible` and clears
-/// `m_AlreadyHitActors`; the context tick (0x00C13640) sweeps for victims every tick while
-/// that flag and the attack zone hold (0x00BFF7B0), until the notify ends (0x00A8E710).
-/// The hit can therefore only land in the last `m_fDamageZoneMaxTime` of the attack zone.
+/// on the step of the window whose `[before, after)` holds `Duration - m_fDamageZoneMaxTime -
+/// m_fVersusZoneMaxTime` and `Duration - m_fDamageZoneMaxTime` (each clamped to the notify
+/// start). Entering the damage zone (melee context slot 115, 0x00C13140) sets
+/// `m_bDamageIsPosssible` and clears `m_AlreadyHitActors`; the context tick (0x00C13640) sweeps
+/// for victims every tick while that flag and the attack zone hold (0x00BFF7B0), until the notify
+/// ends (0x00A8E710). The hit can therefore only land in the last `m_fDamageZoneMaxTime` of the
+/// attack zone. The swing's state reads this from its sequence's playhead (`crate::anim`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct SwingTiming {
-    /// Notify start and duration (seconds into the clip).
+    /// Notify start and duration.
     pub zone_start: f32,
     pub zone_duration: f32,
     pub damage_zone_max: f32,
-    /// `DishonoredNotify_AttackInterruptable` (`AnimStateExit` when the clip has none).
+    /// `DishonoredNotify_AttackInterruptable` (`AnimStateExit` when the sequence has none).
     pub end: f32,
 }
 
 impl SwingTiming {
-    /// `Ply_Sword_Attack_as` (Startup.upk) in `SwordState::swing_clip` order:
-    /// `Sword_Ready_AttackRight_A_Small`, `AttackLeft_A_Small`, `AttackRight_B_Small`,
-    /// `AttackLeft_B_Small`, `Sword_Sneak_Attack_Small` (no interruptable notify: its
-    /// `AnimStateExit`).
-    pub const PLAYER: [SwingTiming; 5] = [
-        SwingTiming { zone_start: 0.138, zone_duration: 0.207, damage_zone_max: 0.05, end: 0.632 },
-        SwingTiming { zone_start: 0.158, zone_duration: 0.186, damage_zone_max: 0.05, end: 0.579 },
-        SwingTiming { zone_start: 0.104, zone_duration: 0.187, damage_zone_max: 0.05, end: 0.566 },
-        SwingTiming { zone_start: 0.122, zone_duration: 0.243, damage_zone_max: 0.05, end: 0.594 },
-        SwingTiming { zone_start: 0.086, zone_duration: 0.258, damage_zone_max: 0.05, end: 0.779 },
-    ];
+    /// The timing of an attack sequence (its first `DishonoredNotify_AttackZone`).
+    pub fn of(s: &SequenceInfo) -> Option<Self> {
+        let z = s.notify("DishonoredNotify_AttackZone")?;
+        let r = s.rate_scale_or_one();
+        Some(SwingTiming {
+            zone_start: z.time / r,
+            zone_duration: z.duration / r,
+            damage_zone_max: z.payload.get("m_fDamageZoneMaxTime").copied().unwrap_or(0.0) / r,
+            end: s.notify_time("DishonoredNotify_AttackInterruptable").unwrap_or_else(|| s.exit_time()),
+        })
+    }
 
     /// Clip time at which the damage zone opens.
     pub fn damage_start(&self) -> f32 {
@@ -196,10 +197,9 @@ pub struct CombatTuning {
     pub drop_rule: DropRule,
     /// `AnimStateExit` of the assassination clips the move sets play, by the direction
     /// 0x00BBA970 returns (0 front, 1 left, 2 right, 3 back): `Sword_Ready_Assassination_*_Master`
-    /// and `_Drop*_Master` of `Ply_Sword_Assassination_as`.
-    #[serde(default = "assassination_times")]
+    /// and `_Drop*_Master` of `Ply_Sword_Assassination_as` (the move's length when no layer plays
+    /// its master: `SwordState::lock_time`).
     pub assassination_times: [f32; 4],
-    #[serde(default = "drop_assassination_times")]
     pub drop_assassination_times: [f32; 4],
     /// The synced short fatality of a killing blow (`DisTweaks_MeleeAttackPlayer`
     /// `m_ForehandKill_Synced` / `m_BackhandKill_Synced`, 0x00C0A590): its chance
@@ -210,18 +210,22 @@ pub struct CombatTuning {
     pub synced_attack_chance: f32,
     #[serde(default = "synced_attack_angle")]
     pub synced_attack_angle: f32,
-    #[serde(default = "short_fatality_times")]
     pub short_fatality_times: [f32; 4],
-    // --- sword timings (LIKELY: Ply_Sword_Attack_as / Ply_Sword_Versus_as notifies;
-    // stagger and recoil still SPECULATIVE) ---
-    /// Uniform swing phases of AI-driven pawns (guards, civilians): a port approximation,
-    /// their own clips are not timed in the simulation (U-600).
+    // --- sword timings (Ply_Sword_Attack_as / Ply_Sword_Versus_as notifies; stagger and recoil
+    // still SPECULATIVE) ---
+    /// Swing phases of a pawn whose swing plays no sequence (the special classes' moves, whose
+    /// sets the table does not hold): the means of the player's four ready small attacks' attack
+    /// zone start, zone length and the rest to `AttackInterruptable` (a port approximation, U-600).
     pub swing_startup: f32,
     pub swing_active: f32,
     pub swing_recovery: f32,
-    /// The player's attack clips, indexed by `SwordState::swing_clip`.
+    /// The player's attack clips, indexed by `SwordState::swing_clip` (`Ply_Sword_Attack_as`:
+    /// `Sword_Ready_AttackRight_A_Small`, `AttackLeft_A_Small`, `AttackRight_B_Small`,
+    /// `AttackLeft_B_Small`, `Sword_Sneak_Attack_Small`).
     pub player_swings: [SwingTiming; 5],
-    pub parry_window: f32,
+    /// `DisNotify_BlockParryZone` of `Sword_Ready_ParryIdle_In` (start, duration): the parry
+    /// window of a block that plays no sequence (`combat::parry_zone`).
+    pub parry_zone: [f32; 2],
     /// `DisTweaks_MeleeBlockPlayer.m_fTapForPerfectParryWindow`: a block started this
     /// recently always parries (CONFIRMED, 0x00C22B60).
     pub parry_tap_window: f32,
@@ -271,7 +275,8 @@ pub struct CombatTuning {
     #[serde(default)]
     pub pistol_noise_radius: f32,
     pub pistol_reserve: u16,
-    // pistol timings (LIKELY: Ply_Pistol_as / Ply_Guns_as / CorvoGun_Mag_as notifies)
+    // pistol timings (Ply_Pistol_as / Ply_Guns_as notifies)
+    /// `Guns_Ready_Equip` and `Pistol_Fire` `AnimStateExit`.
     pub pistol_equip: f32,
     pub pistol_fire_recovery: f32,
     /// Whole normal reload: `ReloadIn` + `m_fReloadTime` + `ReloadOut` (see [`ReloadTiming`]).
@@ -279,7 +284,6 @@ pub struct CombatTuning {
     /// `DisItemContext_ReloadGunPlayer` stages of the pistol (`Twk_Inv_PistolCorvo`'s
     /// `DisTweaks_ReloadGunPlayer`): the `ReloadIn` action (Pistol_Reload_In exit), the timed
     /// stage `m_fReloadTime` (divided by `Attribute_ReloadSpeed`), the `ReloadOut` action.
-    #[serde(default = "pistol_stages")]
     pub pistol_reload_stages: ReloadTiming,
 
     // --- crossbow (CONFIRMED: Twk_Proj_Arrow gravity multiplier / stealth mult) ---
@@ -345,27 +349,24 @@ pub struct CombatTuning {
     #[serde(default)]
     pub bolt_headshot_mult: f32,
     pub crossbow_reserve: u16,
+    /// `Guns_Ready_Equip` `AnimStateExit`.
     pub crossbow_equip: f32,
     /// Whole normal reload (see `crossbow_reload_stages`).
     pub crossbow_reload: f32,
     /// The crossbow's reload stages (`Twk_Inv_CrossbowCorvo`: In / Out at play rate 1.3).
-    #[serde(default = "crossbow_stages")]
     pub crossbow_reload_stages: ReloadTiming,
-    /// `FireCrossbow` action (Crossbow_Fire `DishonoredNotify_AnimStateExit`).
-    #[serde(default = "crossbow_fire_recovery")]
+    /// `FireCrossbow` action (`Ply_Crossbow_as` Crossbow_Fire `DishonoredNotify_AnimStateExit`).
     pub crossbow_fire_recovery: f32,
     /// `m_FireReloadFast` (`FireReloadFastCrossbow`: Crossbow_Fire_FastReload exit 0.625 s at
     /// `m_fPlayRateOverride` 1.5): with `Attribute_FastReload`, a shot that leaves a bolt to load
     /// plays this action and loads it at the end, with no reload stage (0x00C2E570, 0x00C2E730).
-    #[serde(default = "crossbow_fast_fire")]
     pub crossbow_fast_fire: f32,
     /// `DishonoredNotify_FireProjectile` of `Crossbow_Fire` in `Crossbows_as` (0.0336 s): the
     /// bolt leaves when the fire action's animation passes it, not on the press
-    /// (0x00A96890 -> the item context's fire, 0x00C38230).
-    #[serde(default = "crossbow_fire_notify")]
+    /// (0x00A96890 -> the item context's fire, 0x00C38230); the crossbow mesh's layer fires it
+    /// (`crate::anim`).
     pub crossbow_fire_notify: f32,
     /// The same notify of `Crossbow_Fire_FastReload` (0.0 s: the shot leaves on the press).
-    #[serde(default = "crossbow_fast_fire_notify")]
     pub crossbow_fast_fire_notify: f32,
 
     // --- Windblast (CONFIRMED: Twk_WindBlast; per level, index = `m_CurrentLevel - 1`, the
@@ -391,7 +392,6 @@ pub struct CombatTuning {
     /// the `DisNotify_WindBlast` of the player's `Powers_Cast_Windblast` (0x00A96AE0). The
     /// power's own `m_fWarmupTime` only leads to the fire mode (0x00BF9720), which waits for the
     /// notify while the cast action plays.
-    #[serde(default = "windblast_start_delay")]
     pub windblast_start_delay: f32,
 
     // --- Dark Vision (CONFIRMED: Twk_DarkVision) ---
@@ -470,11 +470,6 @@ pub struct DropRule {
 fn one() -> f32 {
     1.0
 }
-/// `Ply_Powers_as` `Powers_Cast_Windblast` `DisNotify_WindBlast` (configs cached before the
-/// value was loaded).
-fn windblast_start_delay() -> f32 {
-    0.27
-}
 fn assassinate_ray_scale() -> f32 {
     1.25
 }
@@ -502,20 +497,22 @@ fn homing_mult() -> f32 {
 fn drop_rule() -> DropRule {
     DropRule { hit_window: 4.0, min_drop_down_vel: 100.0, max_allowed_drop_jump_vel: 0.0, min_drop_dist: 0.0, max_drop_dist: 350.0 }
 }
-fn assassination_times() -> [f32; 4] {
-    [2.062, 2.271, 2.281, 1.886]
-}
-fn drop_assassination_times() -> [f32; 4] {
-    [1.900, 1.900, 1.900, 1.973]
-}
 fn synced_attack_chance() -> f32 {
     1.0
 }
 fn synced_attack_angle() -> f32 {
     45.0
 }
-fn short_fatality_times() -> [f32; 4] {
-    [1.299, 1.322, 1.279, 1.272]
+
+/// The four ready small attacks' mean attack zone start, zone length and rest to the swing's end
+/// (`CombatTuning::swing_startup`).
+fn mean_small_phases(swings: &[SwingTiming; 5]) -> (f32, f32, f32) {
+    let n = 4.0;
+    let ready = &swings[..4];
+    let start = ready.iter().map(|w| w.zone_start).sum::<f32>() / n;
+    let active = ready.iter().map(|w| w.zone_duration).sum::<f32>() / n;
+    let rest = ready.iter().map(|w| (w.end - w.zone_start - w.zone_duration).max(0.0)).sum::<f32>() / n;
+    (start, active, rest)
 }
 
 fn v(map: &std::collections::BTreeMap<String, f32>, key: &str, default: f32) -> f32 {
@@ -529,6 +526,14 @@ impl CombatTuning {
         let cb = &c.crossbow.values;
         let wb = &c.windblast.values;
         let dv = &c.dark_vision.values;
+        let player_swings: [SwingTiming; 5] = std::array::from_fn(|i| SwingTiming::of(anim::info(c, SWORD_ATTACK_SET, SWING_CLIPS[i])).unwrap_or_else(|| panic!("{} has no DishonoredNotify_AttackZone", SWING_CLIPS[i])));
+        let (swing_startup, swing_active, swing_recovery) = mean_small_phases(&player_swings);
+        let masters = |set: &str, from: usize| -> [f32; 4] { std::array::from_fn(|i| anim::exit_time(c, set, ASSASSINATION_MASTERS[from + i])) };
+        let parry = anim::info(c, SWORD_VERSUS_SET, "Sword_Ready_ParryIdle_In");
+        let parry_zone = parry.notify("DisNotify_BlockParryZone").map(|n| [n.time / parry.rate_scale_or_one(), n.duration / parry.rate_scale_or_one()]).expect("Sword_Ready_ParryIdle_In has no DisNotify_BlockParryZone");
+        let notify = |set: &str, seq: &str, class: &str| anim::info(c, set, seq).notify_time(class).unwrap_or_else(|| panic!("{set}.{seq} has no {class}"));
+        let pistol_stages = ReloadTiming::pistol(c);
+        let crossbow_stages = ReloadTiming::crossbow(c);
         CombatTuning {
             attack_range: v(m, "attack.m_fMaxContextRange", 210.0),
             attack_sweep_size: v(m, "attack.m_fSweepingAttackSize", 60.0),
@@ -556,22 +561,19 @@ impl CombatTuning {
                 min_drop_dist: v(m, "drop_assassinate.m_fMinDropDistToTarget", 0.0),
                 max_drop_dist: v(m, "drop_assassinate.m_fMaxDropDistToTarget", 350.0),
             },
-            // Ply_Sword_Assassination_as AnimStateExit: Front 2.062, Left 2.271, Right 2.281,
-            // Back 1.886; DropFront / DropLeft / DropRight 1.900, DropBack 1.973.
-            assassination_times: assassination_times(),
-            drop_assassination_times: drop_assassination_times(),
-            // Twk_Inv_SwordCorvo `m_fChanceOfSyncedAttack` 1.0; Ply_Sword_Fatality_as AnimStateExit.
+            // The masters' AnimStateExit (Ply_Sword_Assassination_as; the synced short fatalities'
+            // in Ply_Sword_Fatality_as).
+            assassination_times: masters(ASSASSINATION_SET, 0),
+            drop_assassination_times: masters(ASSASSINATION_SET, 4),
+            // Twk_Inv_SwordCorvo `m_fChanceOfSyncedAttack` 1.0.
             synced_attack_chance: synced_attack_chance(),
             synced_attack_angle: synced_attack_angle(),
-            short_fatality_times: short_fatality_times(),
-            // "Small" attacks: DishonoredNotify_AttackZone starts 0.104-0.158 s (mean 0.13),
-            // lasts 0.186-0.243 s (mean 0.21); AttackInterruptable at ~0.6 s.
-            swing_startup: 0.13,
-            swing_active: 0.21,
-            swing_recovery: 0.26,
-            player_swings: SwingTiming::PLAYER,
-            // DisNotify_BlockParryZone on Sword_Block_*: t=0.001, duration 0.430.
-            parry_window: 0.43,
+            short_fatality_times: masters(FATALITY_SET, 8),
+            swing_startup,
+            swing_active,
+            swing_recovery,
+            player_swings,
+            parry_zone,
             parry_tap_window: v(m, "block.m_fTapForPerfectParryWindow", 0.2),
             force_block_after_tap: v(m, "block.m_fForceBlockTimeOnPerfectParryTap", 0.3),
             stagger_time: 1.0,
@@ -595,11 +597,10 @@ impl CombatTuning {
             // `EAINoiseLoudness4` = `m_LoudnessDistanceArray[15]` when the config predates the field.
             pistol_noise_radius: v(pb, "fire.ai_noise_radius", c.ai.loudness_distances.get(15).copied().unwrap_or(6000.0)),
             pistol_reserve: 10,
-            // Guns_Ready_Equip AnimStateExit 0.43; Pistol_Fire exit 0.30.
-            pistol_equip: 0.43,
-            pistol_fire_recovery: 0.3,
-            pistol_reload: ReloadTiming::PISTOL.total(0.0),
-            pistol_reload_stages: ReloadTiming::PISTOL,
+            pistol_equip: anim::exit_time(c, GUNS_SET, "Guns_Ready_Equip"),
+            pistol_fire_recovery: anim::exit_time(c, PISTOL_SET, "Pistol_Fire"),
+            pistol_reload: pistol_stages.total(0.0),
+            pistol_reload_stages: pistol_stages,
 
             bolt_gravity_mult: v(cb, "projectile.m_fGravityMultiplier", 1.3),
             bolt_stealth_mult: v(cb, "projectile.m_fDamageMultiplier_Stealth", 2.0),
@@ -634,15 +635,14 @@ impl CombatTuning {
             },
             bolt_headshot_mult: c.items.inventory.crossbow_headshot_mult.trunc(),
             crossbow_reserve: 10,
-            // Guns_Ready_Equip exit 0.43; Crossbow_Fire exit 0.398 (Ply_Crossbow_as).
-            crossbow_equip: 0.43,
-            crossbow_reload: ReloadTiming::CROSSBOW.total(0.0),
-            crossbow_reload_stages: ReloadTiming::CROSSBOW,
-            crossbow_fire_recovery: v(cb, "fire.exit_time", crossbow_fire_recovery()),
+            crossbow_equip: anim::exit_time(c, GUNS_SET, "Guns_Ready_Equip"),
+            crossbow_reload: crossbow_stages.total(0.0),
+            crossbow_reload_stages: crossbow_stages,
+            crossbow_fire_recovery: anim::exit_time(c, CROSSBOW_SET, "Crossbow_Fire"),
             // Crossbow_Fire_FastReload `AnimStateExit` over `m_FireReloadFast.m_fPlayRateOverride`.
-            crossbow_fast_fire: v(cb, "fire.fast_exit_time", 0.62483305) / v(cb, "fire.m_FireReloadFast.m_fPlayRateOverride", 1.5),
-            crossbow_fire_notify: v(cb, "fire.notify_time", crossbow_fire_notify()),
-            crossbow_fast_fire_notify: v(cb, "fire.fast_notify_time", crossbow_fast_fire_notify()),
+            crossbow_fast_fire: anim::exit_time(c, CROSSBOW_SET, "Crossbow_Fire_FastReload") / v(cb, "fire.m_FireReloadFast.m_fPlayRateOverride", 1.0),
+            crossbow_fire_notify: notify(CROSSBOW_MESH_SET, "Crossbow_Fire", "DishonoredNotify_FireProjectile"),
+            crossbow_fast_fire_notify: notify(CROSSBOW_MESH_SET, "Crossbow_Fire_FastReload", "DishonoredNotify_FireProjectile"),
 
             windblast_cost: c.windblast.mana_cost,
             windblast_angle: [v(wb, "m_Levels.m_Angle", 135.0), v(wb, "m_Levels[1].m_Angle", 135.0)],
@@ -655,7 +655,7 @@ impl CombatTuning {
             windblast_wall_damage: v(wb, "m_HitWallAdditionalDamage", 100.0),
             windblast_wall_min_speed: v(wb, "m_fMinSpeedToExplodeNPCs", 500.0),
             windblast_explode_chance: v(wb, "m_fChanceToExplodeNPCs", 0.3),
-            windblast_start_delay: v(wb, "cast.notify_time", windblast_start_delay()),
+            windblast_start_delay: notify(POWERS_SET, "Powers_Cast_Windblast", "DisNotify_WindBlast"),
 
             dark_vision_cost: c.dark_vision.mana_cost,
             dark_vision_duration: v(dv, "m_Levels[1].m_fDuration", v(dv, "m_Levels.m_fDuration", 30.0)),

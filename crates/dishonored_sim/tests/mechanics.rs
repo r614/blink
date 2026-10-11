@@ -422,10 +422,13 @@ fn sword_hit_block_parry() {
     assert!(staggered);
 }
 
-/// U-590: the original (engine hook, fixed 1/60 s step) lands the hit on a guard 110 uu
-/// ahead 0.300-0.350 s after the press: the damage zone is the last `m_fDamageZoneMaxTime`
-/// (0.05 s) of the clip's `DishonoredNotify_AttackZone` (0.138 + 0.207 for
-/// `Sword_Ready_AttackRight_A_Small`, so 0.295-0.345 s), not its start.
+/// U-590: the damage zone is the last `m_fDamageZoneMaxTime` (0.05 s) of the clip's
+/// `DishonoredNotify_AttackZone` (0.138 + 0.207 for `Sword_Ready_AttackRight_A_Small`, so
+/// 0.2956-0.3456 s), not its start. The swing's sequence plays from the press's own tick
+/// (tick_order.md: a state's request plays in the same tick's advance) and the zone opens in the
+/// advance whose step holds its time (0x00A8E760), before the sweep: the step `[0.283, 0.300)`, the
+/// 17th tick after the press. The hook measured 0.300-0.350 s on the doorman (U-976: one tick
+/// later than this order gives).
 #[test]
 fn sword_hit_lands_in_the_damage_zone() {
     let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.), (2, Vec3::new(110., 0., STAND_Z + 1.), 180.)]);
@@ -441,14 +444,14 @@ fn sword_hit_lands_in_the_damage_zone() {
         }
         panic!("no hit");
     };
-    // First swing: Right_A, damage zone 0.295 s -> the first 60 Hz tick past it (0.300 s).
-    assert_eq!(hit_tick(&mut r), 18);
+    // First swing: Right_A, damage zone 0.2956 s, in the step [17, 18) x 1/60.
+    assert_eq!(hit_tick(&mut r), 17);
     r.steps(60, &[(1, input(0., 0, 0)), (2, input(180., 0, 0))]);
-    // Second swing: Left_A, 0.158 + 0.186 - 0.05 = 0.294 s -> 0.300 s.
-    assert_eq!(hit_tick(&mut r), 18);
+    // Second swing: Left_A, 0.158 + 0.186 - 0.05 = 0.294 s: the same step.
+    assert_eq!(hit_tick(&mut r), 17);
     r.steps(60, &[(1, input(0., 0, 0)), (2, input(180., 0, 0))]);
-    // Third: Right_B, 0.104 + 0.187 - 0.05 = 0.241 s -> 0.250 s.
-    assert_eq!(hit_tick(&mut r), 15);
+    // Third: Right_B, 0.104 + 0.187 - 0.05 = 0.241 s: the step [14, 15).
+    assert_eq!(hit_tick(&mut r), 14);
 }
 
 #[test]
@@ -469,7 +472,9 @@ fn npcs_never_assassinate() {
     r.state.player_mut(1).unwrap().kind = dishonored_sim::state::PawnKind::Guard;
     r.settle();
     r.step(&[(1, input(0., 0, buttons::PRIMARY)), (2, input(0., 0, 0))]);
-    r.steps(40, &[(1, input(0., 0, 0)), (2, input(0., 0, 0))]);
+    // The guard's attack chain (`AttackShort`: `Sword_Attack_ShortSmall*` / `Attack_Fast*`, damage
+    // zones 0.32 to 0.83 s into the sequence).
+    r.steps(90, &[(1, input(0., 0, 0)), (2, input(0., 0, 0))]);
     assert!(!r.events.iter().any(|e| matches!(e, SimEvent::Death { cause: DamageCause::Assassination | DamageCause::DropAssassination, .. })));
     assert!(r.p(2).alive);
     assert!(r.p(2).vitals.health < 70.0, "the swing still lands: {}", r.p(2).vitals.health);
@@ -890,10 +895,37 @@ fn parry_tap_window_and_forced_block() {
     assert!((t.parry_tap_window - 0.2).abs() < 1e-6 && (t.force_block_after_tap - 0.3).abs() < 1e-6);
     assert!((t.block_half_angle - 50.0).abs() < 1e-6);
     let s = |block_time: f32, force_block: f32| SwordState { phase: SwordPhase::Blocking, block_time, force_block, ..Default::default() };
-    assert!(parries(&s(0.05, 0.0), t));
-    assert!(parries(&s(0.4, 0.0), t), "inside the BlockParryZone notify");
-    assert!(!parries(&s(0.6, 0.0), t));
-    assert!(!parries(&s(0.05, 0.2), t), "a forced block after a tap parry only blocks");
+    assert!(parries(&s(0.05, 0.0), t, false), "the tap window");
+    assert!(parries(&s(0.4, 0.0), t, true), "inside the BlockParryZone window");
+    assert!(!parries(&s(0.6, 0.0), t, false));
+    assert!(!parries(&s(0.05, 0.2), t, true), "a forced block after a tap parry only blocks");
+    // The window of a block without its sequence: the player's `Sword_Ready_ParryIdle_In`
+    // `DisNotify_BlockParryZone` (0.001 s, 0.430 s long).
+    assert!((t.parry_zone[0] - 0.001).abs() < 1e-3 && (t.parry_zone[1] - 0.43).abs() < 1e-3, "{:?}", t.parry_zone);
+}
+
+/// The block plays `Sword_Ready_ParryIdle_In` on the upper body: its `DisNotify_BlockParryZone`
+/// window is open from the block's first advance until its 0.43 s run out, which is what the
+/// parry reads.
+#[test]
+fn block_parry_zone_is_the_block_sequence_window() {
+    use dishonored_sim::anim::layer;
+    let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.0), 0.)]);
+    r.settle();
+    let block = |b| PlayerInput { buttons: b, ..Default::default() };
+    r.step(&[(1, block(buttons::BLOCK))]);
+    let open = |r: &Run| dishonored_sim::combat::parry_zone(r.p(1), r.state.anim.get(&1), &r.cfg.anim, &r.cfg.tuning);
+    assert_eq!(r.p(1).sword.phase, SwordPhase::Blocking);
+    assert!(r.state.anim.get(&1).unwrap().layers[layer::UPPER_BODY].is_some(), "the block sequence plays");
+    assert!(open(&r), "open after the press tick's advance");
+    let mut n = 1;
+    while open(&r) && n < 60 {
+        r.step(&[(1, block(buttons::BLOCK))]);
+        n += 1;
+    }
+    // The window opens in the press tick's step ([0, dt) holds 0.001) and ends in the step
+    // where its 0.43 s run out (elapsed reaches 0.43 at 0.431 s): 25 open ticks.
+    assert_eq!(n, 26, "ticks with the zone open + the closing one");
 }
 
 #[test]

@@ -241,7 +241,16 @@ fn possession_runs_for_the_host_duration() {
     let aim = |b| PlayerInput { yaw: 0.0, buttons: b, left_hand: LeftHand::Possession, ..Default::default() };
     r.steps(5, &[(1, aim(buttons::SECONDARY))]);
     r.step(&[(1, aim(0))]);
-    assert_eq!(r.p(1).possess.stage, PossessStage::PrePossess);
+    // The release plays `Powers_Cast_Possession_Out` from its own tick; its
+    // `DisNotify_Possession` takes the host in the step that crosses it.
+    assert_eq!(r.p(1).possess.stage, PossessStage::Inactive);
+    let at = r.cfg.gameplay.sequence("Ply_Powers_as", "Powers_Cast_Possession_Out").unwrap().notify_time("DisNotify_Possession").unwrap();
+    let mut n = 0;
+    while r.p(1).possess.stage != PossessStage::PrePossess && n < 60 {
+        r.step(&[(1, aim(0))]);
+        n += 1;
+    }
+    assert_eq!(n, (at / dishonored_sim::movement::DT).floor() as usize, "the notify at {at} s");
     assert_eq!(r.p(1).vitals.mana, 40.0, "m_ManaCost 60");
     r.steps(70, &[(1, aim(0))]);
     assert_eq!(r.p(1).possess.stage, PossessStage::Active);
