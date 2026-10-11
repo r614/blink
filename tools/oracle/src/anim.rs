@@ -666,11 +666,10 @@ pub fn cmd_anim_clip(
     }
 
     // Filter out bones below exclude_below if specified
-    let exclude_set = if let Some(exclude_name) = &exclude_below {
-        build_exclude_set(&bones, exclude_name)
-    } else {
-        std::collections::HashSet::new()
-    };
+    let mut exclude_set = std::collections::HashSet::new();
+    for name in exclude_below.iter().flat_map(|s| s.split(',')).map(str::trim).filter(|s| !s.is_empty()) {
+        exclude_set.extend(build_exclude_set(&bones, name));
+    }
 
     let compare_bones: Vec<String> = compare_bones.into_iter()
         .filter(|b| !exclude_set.contains(b))

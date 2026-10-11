@@ -5,6 +5,18 @@ Build: GOG Definitive Edition, `Dishonored.exe` SHA-256 `70da9613â€¦c6fb` un
 
 ---
 
+## 2026-10-11: The measuring instrument for animation (`oracle anim info / compare / clip`), first numbers
+- **Question:** ARCHITECTURE.md step 1: can the original's per-tick bone captures be compared with the port continuously, and what do the first numbers say about U-865 ("the baked Empty_Idle_04 head track runs 4 ticks behind")?
+- **Method:** `tools/oracle/src/anim.rs`: `anim info` (a capture sidecar's meshes, nodes, frames, the sequences playing), `anim compare` (a `DISH_ANIM_DUMP` port dump against a capture: per-bone and per-tick rotation angles, the lag that minimizes them, the port's full-body sequence against the capture's playing sequences and their playhead offset), `anim clip` (one sequence from the AnimSet data posed at the capture's node time, compared bone by bone: the Edge decoder and the retargeting alone). Run on `stealth/detect_1300`'s capture (the party guard, 201 ticks, `Empty_Idle_04` on node 22).
+- **Findings:**
+  - The capture format as cooked: `meshes[]` each with `bones` [index, name], `nodes` [{name, class, sequence: bool, children: count}], delta-encoded `frames` with `t` on every frame, `cs` keyed by bone index (quaternion x 1e4, translation x 100), `nodes` keyed by node index ([weight x 1e3, relevant] or [.., sequence, time x 1e3, rate x 1e3]), `blend`.
+  - `Empty_Idle_04` posed from `Npc_EliteGuard_empty_as` at the node's time matches the captured component-space bones to a mean 0.40 deg on the head, neck, spine, root, upper arm and hand over all 201 frames (max 6.4 deg in frames 0-7, the `Empty_Idle` crossfade), best clip-time offset 0 ticks. The clip playback is right and in time; U-865's lag is above it (the runtime's chain start and clock, the look-at additive, the blink). CONFIRMED.
+  - Off the clip as expected: the legs 2.8 deg (the foot placement controls, U-280), the coat flaps `Back_pan_*` 4-7 deg (not decoded).
+  - New: every finger joint is 36-66 deg off (max 180) and `handHelperBone_L/R_jnt` 33-42 deg, with the hand itself at 0.4 deg: the Edge joint order assumed by `AnimLibrary::edge_order` is wrong inside the hand blocks (U-970). Every NPC's hands are posed wrong in the port; the fingers are small enough on screen that nobody saw it.
+- **Implementation:** the three commands, documented in ORACLE.md "Comparing the port"; unit tests for the delta reconstruction, the angle, the lag search (on distinct frames) and the exclude walk (the cooked root is its own parent). Agents: the first versions were written by Haiku subagents and repaired (the info's tick range and sequences, the lag test, the exclude walk that spun forever).
+- **Open:** U-970 (the hand joints); the runtime-side `anim compare` against a scenario replay needs the ambient idle pinned in the port as the capture had it; the evaluator replay (ARCHITECTURE.md step 3) measures the rest of U-865.
+
+---
 ## 2026-10-10 â€” AnimTree node-graph IR decoder
 
 - **Question:** Can the cooked `AnimTree` assets be decoded as node graphs, so that one evaluator can play every tree instead of the hand-coded layers of `NPC_Human_at` and the player's pickers (research/ARCHITECTURE.md)?
