@@ -123,6 +123,47 @@ pub fn load_sequences(content: &Content, db: &TweakDb, root_motion: &BTreeMap<St
     Ok(out)
 }
 
+/// The animation of the simulation's NPC trees (with the install, `dishonored_content`'s
+/// `AnimSource`): the trees, the profile's body skeleton, its mesh rotation, its sets bound to the
+/// skeleton with clips decoded on first use, its locomotion config.
+pub struct NpcTreeData {
+    /// `Npc_Common_at.NPC_Human_at` and `Npc_Common_at.NPC_Dead_at` (`Startup`).
+    pub human: dishonored_ir::anim_tree::AnimTreeAsset,
+    pub dead: dishonored_ir::anim_tree::AnimTreeAsset,
+    pub skeleton: Vec<dishonored_ir::BoneAsset>,
+    /// Mesh space -> the pawn's frame as the presentation places the body (`RotOrigin`, then
+    /// turned to face +X: `characters::load_model`; the mesh component's own rotation is not
+    /// decoded).
+    pub mesh_rotation: glam::Quat,
+    pub clips: crate::characters::LazyAnimSets,
+    pub loco: dishonored_ir::npc_anim::LocoConfig,
+}
+
+/// [`NpcTreeData`] of [`NPC_TWEAK`]'s profile.
+pub fn load_npc_tree_data(content: &Content) -> Result<NpcTreeData> {
+    let pkgs: Vec<String> = crate::ai_config::NPC_ANIM_PACKAGES.iter().map(|s| s.to_string()).collect();
+    let looks = crate::characters::resolve_appearances(content, &pkgs, &[NPC_TWEAK.to_string()])?;
+    let look = looks.get(NPC_TWEAK).with_context(|| format!("{NPC_TWEAK} not resolved"))?;
+    let (body_pkg, body) = look.body.clone().with_context(|| format!("{NPC_TWEAK}: no m_pSkeletalMesh"))?;
+    let skeleton = crate::characters::load_skeleton(content, &body_pkg, &body)?;
+    let pkg = content.package(&body_pkg)?;
+    let mesh = (0..pkg.exports.len()).find(|&i| pkg.export_class(i) == "SkeletalMesh" && pkg.obj_path(ObjRef::Export(i)).eq_ignore_ascii_case(&body)).with_context(|| format!("{body} not in {body_pkg}"))?;
+    let raw = crate::skeletal_mesh::read_skeletal_mesh(&pkg, mesh)?;
+    let r = crate::util::rotator_matrix(raw.rot_origin[0], raw.rot_origin[1], raw.rot_origin[2]);
+    let f = r.transform_vector3(glam::Vec3::Z);
+    let mesh_rotation = glam::Quat::from_mat4(&(glam::Mat4::from_rotation_z(-f.y.atan2(f.x)) * r));
+    let clips = crate::characters::LazyAnimSets::bind(content, &look.anim.sets, &skeleton, &skeleton)?;
+    let loco = crate::npc_anim::load_loco_config(content, look.anim.locomotion.as_ref().with_context(|| format!("{NPC_TWEAK}: no locomotion config"))?)?;
+    Ok(NpcTreeData {
+        human: crate::anim_tree::load_anim_tree(content, "Startup", "Npc_Common_at.NPC_Human_at")?,
+        dead: crate::anim_tree::load_anim_tree(content, "Startup", "Npc_Common_at.NPC_Dead_at")?,
+        skeleton,
+        mesh_rotation,
+        clips,
+        loco,
+    })
+}
+
 /// The NPC profile of [`NPC_TWEAK`]: its `m_pAnimDefClass` chains, its `m_AnimSets` object names
 /// in tweak order and its items' prefixes.
 pub fn load_npc_anim(content: &Content, prov: &mut BTreeMap<String, String>) -> Result<NpcAnimConfig> {
