@@ -301,6 +301,17 @@ counted; they finish with their automatic outputs.
 | `AkPostEvent` | mission sound |
 | Presentation | camera fades (timed), cinematic mode, HUD toggles, tutorials, chapters, statistics, achievements, materials on actors, ambient sounds: no-ops, counted apart |
 
+Step order (2026-10-11, systems/tick_order.md section 1, systems/kismet.md K-1): the original's
+world tick runs every game sequence's `UpdateOp` (`TG_PreAsyncWork` 0x006552C0, slot 92) before
+its actor loop (0x00651A80). `MissionMatch::step` does the same: `kismet_host::update` first (the
+start event once, the interpreter's tick, then post, presentation, matinees, streaming, spawns),
+then the AI and the simulation, the mission, and `kismet_host::raise` at the end (the step's
+gameplay events activate theirs; the approach hooks; a committed map change travels, between steps
+so that the host swaps the collision, and the touches at the destination are raised at once). An
+event raised in step N runs in step N + 1; its own `Activated` is recorded in step N, the ops
+behind it in N + 1, as the hook records them. Pawns a matinee places stay on its pose through the
+simulation (`cutscene::hold`, `PHYS_Interpolating`).
+
 ### Boyle (`harness kismet`)
 
 The original mission runs from its first event to its last:
@@ -554,7 +565,7 @@ those events as "class, no originator" (`player_events.rs`, `player_events()`). 
 | `DisSeqEvt_Choke` (6) | the `StateNPCMasterBeingChoked` state: enter 0x00A7C270 (0), the win 0x00A6D380 (1, choke stage 2), the loss 0x00A74720 (2, stage 4), the exit 0x00A7C4D0 (2 unless a result was given, or 1 when the next state is the knocked-out one); originator the NPC, instigator the player | `SimEvent::ChokeStart` / `ChokeEnd` (Win 1, Lose and Cancel 2) | all 6 |
 | `DisSeqEvent_Windblasted` (9) | the NPC windblast reaction: 0x00C53790 fires output 0 "Pushed" for an NPC that resists (0x00B4B4C0), else 0x00C4DE90 starts the reaction and fires 0/1 by whether the resulting state is the thrown one (class `DAT_0145F184`); instigator the caster | `SimEvent::Windblasted` where the throw starts (`step_windblasts`): output 1 | all 9 as "Thrown"; "Pushed" needs the armour state |
 | `DisSeqEvent_PowerUsed` (21) | the power component's slot 94 (0x00BF32F0 -> 0x00BF30C0): the player's events of exactly that class, the first output named for the power plus `m_CurrentLevel - 1` ("Blink 2"); called by the activation of Windblast (0x00BFB950), Blink (0x00BFC990), Dark Vision (0x00BE89E0), Devouring Swarm (0x00BFAE60) | `SimEvent::PowerUsed` at the port's matching moments (`left_hand`, `blink`, `powers`) | 4 powers. Bend Time (0x00BFA180) and Possess (0x00BE7730) activations were traced and do not call slot 94: left open. `PowerEquipped` (a subclass, 0x00C44FE0 / 0x00C4BA70, from the equip contexts) is not fed |
-| `DisSeqEvent_Lock` (25) | `Lock` 0x00A4E870 (0, always) and `Unlock` 0x00A4E910 (1, only if locked) of `DishonoredUsableObject` (doors via 0x00A32490 / 0x00A324B0); originator the usable, instigator its last user (+0x2C8) | `DisSeqAct_Lock` queues the output; fired next step | all 25 (the Kismet's own locks) |
+| `DisSeqEvent_Lock` (25) | `Lock` 0x00A4E870 (0, always) and `Unlock` 0x00A4E910 (1, only if locked) of `DishonoredUsableObject` (doors via 0x00A32490 / 0x00A324B0); originator the usable, instigator its last user (+0x2C8) | `DisSeqAct_Lock` queues the output; the feed at the end of the step fires it, the next update runs it | all 25 (the Kismet's own locks) |
 | `DisSeqEvent_Climb` (1) | the climb state: enter 0x00A72B00 (0), exit 0x00A6E2C0 (1), originator the chain (pawn +0xAA0), instigator the pawn | `SimEvent::Climb`, chain by name in the active map | 1 |
 | `DisSeqEvent_KeyHoleUsed` (37) | the door's `AltInteract` 0x00A38580 (output 0) when Use is held `m_fAltInteractActivateTime` at a shut door, its exit 0x00A2E4E0 (output 1); originator the door, instigator the player pawn, exact | `InteractEvent::KeyHole` from `dishonored_sim::interactables` (systems/interactables.md) | all 37 instances (the level ones have output 0 only) |
 | `DisSeqEvent_Tripwire` (7) | `Trip` 0x00A28B40 -> 0x00A21A30, once per wire (touch 0x00A30C00, damage 0x00A28BB0); originator the wire, instigator the tripper, inexact, no output list (every output) | `InteractEvent::Tripwire` | all 7 |

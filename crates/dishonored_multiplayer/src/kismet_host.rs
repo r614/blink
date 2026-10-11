@@ -23,6 +23,11 @@
 //!   soiree plays its matinee by GUID;
 //! - `DisSeqAct_DialogScriptedChoice` opens the shared choice view.
 //!
+//! In the match's step the interpreter ticks first ([`update`], before the simulation: the
+//! original's world tick runs the sequences' `UpdateOp` before its actors, systems/tick_order.md
+//! section 1) and the step's gameplay activates its events at the end ([`raise`]), so an event
+//! raised in step N runs in step N + 1, as in the original.
+//!
 //! Anything not supported is logged once per class by the interpreter and counted.
 
 use super::{Interaction, MissionMatch};
@@ -358,7 +363,8 @@ pub struct HostState {
     door_events: Vec<(u32, usize)>,
     /// `DisSeqAct_AIDoFollow`: follower -> (leader, distance, run).
     followers: BTreeMap<PlayerId, (PlayerId, f32, bool)>,
-    /// AI noises made this step (`DisSeqAct_AINoise`), heard by the crowd next step.
+    /// AI noises the Kismet made (`DisSeqAct_AINoise`, the world actors' events): the match hands
+    /// the update's to the crowd before the step's AI and the end of step's to the next step's.
     pub noises: Vec<SimEvent>,
     /// Shots each pawn has fired (`SimEvent::Fired`).
     shots: BTreeMap<PlayerId, u32>,
@@ -1021,7 +1027,7 @@ impl H<'_> {
 /// `DisSeqEvent_BreakableBroken` (0x00a3a5f0: originator the breakable, no instigator),
 /// `DisSeqEvent_WhaleOilBattery` (0x00c81d70 / 0x00c7d660: originator and instigator the
 /// battery), `DisSeqEvent_WhaleOilReceptacle` (0x00c7b490 / 0x00c7b6b0: originator the
-/// receptacle, instigator the battery). AI noises are heard next step.
+/// receptacle, instigator the battery). The AI noises go to the crowd ([`HostState::noises`]).
 fn world_events(k: &mut Kismet, h: &mut H, evs: Vec<dishonored_sim::world_actors::WorldEvent>) {
     use dishonored_sim::world_actors::WorldEvent;
     if evs.is_empty() {
@@ -3711,18 +3717,21 @@ pub fn track_views(m: &mut MissionMatch, inputs: &mut [(PlayerId, dishonored_sim
     run.st.tracking.retain(|_, t| t.hold || t.alpha < 1.0);
 }
 
-/// One step of the Kismet: feed gameplay events, tick, apply map changes.
-///
-/// `climbables`: the names of the active map's climbable chains, in the order the simulation
-/// indexes them (`SimEvent::Climb`).
-pub fn step(m: &mut MissionMatch, sim_events: &[SimEvent], dt: f32, cfg: &SimConfig, climbables: &[String]) {
+/// The Kismet's part at the start of a step, before the simulation: the original's world tick
+/// runs every game sequence's `UpdateOp(dt)` (vtable slot 92) from `TG_PreAsyncWork`
+/// (0x006552C0) before its actor loop (0x00651A80; systems/tick_order.md section 1, kismet.md
+/// K-1), so the events the previous step's gameplay activated ([`raise`]) run here, one tick
+/// after the gameplay that raised them. The mission's start event is given once first (a remote
+/// event between two ticks: this update processes it, before the step's actors). Then the
+/// interpreter ticks and what it changed reaches the world before the simulation reads it: the
+/// post manager's slot, the camera fade and highlights, the playing matinees, level streaming,
+/// the spawns. A map change the tick commits is carried out by [`raise`] at the end of the step,
+/// where the host swaps the collision before the next one.
+pub fn update(m: &mut MissionMatch, dt: f32, cfg: &SimConfig) {
     let Some(mut run) = m.kismet.take() else { return };
     let setup = run.setup.clone();
     let db = run.k.db.clone();
     run.k.players = m.humans.clone();
-    if run.st.player_ev.climbables != climbables {
-        run.st.player_ev.climbables = climbables.to_vec();
-    }
     {
         let KismetRun { k, st, .. } = &mut run;
         let mut h = H { m, st, setup: setup.clone(), cfg, db: db.clone() };
@@ -3741,11 +3750,11 @@ pub fn step(m: &mut MissionMatch, sim_events: &[SimEvent], dt: f32, cfg: &SimCon
             if let Some(r) = h.m.state.conv.as_mut() {
                 r.external_matinees = true;
             }
-            feed(k, &mut h, sim_events);
-            approach_hooks(&mut h);
             // The world tick's dt is scaled by `WorldInfo.TimeDilation` (the player dilation);
             // `ExecuteActiveOps` scales it again by world / player for the ops not flagged
-            // `m_bAlwaysOutOfBendTime` (kismet.md K-2, F-3).
+            // `m_bAlwaysOutOfBendTime` (kismet.md K-2, F-3). The dilation is the one the last
+            // step left, as the original's tick takes the one its managers set at the end of the
+            // previous tick (0x0065DA60).
             let player = dishonored_sim::powers::player_time_dilation(&h.m.world, &h.cfg.gameplay);
             let world = dishonored_sim::powers::world_time_scale(&h.m.world, &h.cfg.gameplay, false);
             let ratio = if player != 0.0 { world / player } else { 1.0 };
@@ -3755,9 +3764,47 @@ pub fn step(m: &mut MissionMatch, sim_events: &[SimEvent], dt: f32, cfg: &SimCon
             cutscene::apply(k, &mut h); // [interp]
             apply_streaming(k, &mut h); // [streaming]
             h.drain_spawns(k);
-            commit_map_change(k, &mut h);
         }
         // Unsupported op / event classes the interpreter met (once per class).
+        for n in std::mem::take(&mut k.notices) {
+            h.note(n);
+        }
+    }
+    m.kismet = Some(run);
+}
+
+/// The Kismet's part at the end of a step, after the simulation and the mission: the step's
+/// gameplay activates its events (`CheckActivate` / `ActivateEvent` queue them in their
+/// sequences, as the original's actors do during their tick) and the next step's [`update`] runs
+/// them; the original NPCs' approach hooks; then the map change the update committed (the level
+/// travel, done between steps so that the host swaps the collision before the next one) and
+/// the touches where the travel put the players. The activated events wait in the interpreter's state between the steps, which a
+/// save keeps.
+///
+/// `climbables`: the names of the active map's climbable chains, in the order the simulation
+/// indexes them (`SimEvent::Climb`).
+pub fn raise(m: &mut MissionMatch, sim_events: &[SimEvent], cfg: &SimConfig, climbables: &[String]) {
+    let Some(mut run) = m.kismet.take() else { return };
+    let setup = run.setup.clone();
+    let db = run.k.db.clone();
+    run.k.players = m.humans.clone();
+    if run.st.player_ev.climbables != climbables {
+        run.st.player_ev.climbables = climbables.to_vec();
+    }
+    {
+        let KismetRun { k, st, .. } = &mut run;
+        let mut h = H { m, st, setup, cfg, db };
+        if h.st.started {
+            feed(k, &mut h, sim_events);
+            approach_hooks(&mut h);
+            // The travel places the players at the destination, among the levels the change
+            // loaded: their touches there are raised at once (UE3 `FarMoveActor` updates the
+            // touching actors of a teleported actor, LIKELY: not traced in this build), so they
+            // run in the next update with the levels' `SeqEvent_LevelLoaded`.
+            if commit_map_change(k, &mut h) {
+                touches(k, &mut h);
+            }
+        }
         for n in std::mem::take(&mut k.notices) {
             h.note(n);
         }
@@ -4061,7 +4108,8 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
             b.state = BrainState::WalkToPoint;
         }
     }
-    // Doors the Kismet opened or closed last step: `DisSeqEvent_Door` Opened (0) / Closed (1).
+    // Doors the Kismet opened or closed in this step's update: `DisSeqEvent_Door` Opened (0) /
+    // Closed (1).
     for (a, out) in std::mem::take(&mut h.st.door_events) {
         let n = k.trigger(h, "DisSeqEvent_Door", &[Obj::Actor(a)], Obj::None, Some(vec![out]));
         if !n.is_empty() {
@@ -4244,7 +4292,46 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
     // Player- and world-side events (crouch, combat, tasks, possession, choke, Windblast, powers,
     // climbing, locks): `player_events.rs`.
     player_events::feed(k, h, sim_events);
-    // Touches (players; NPC pawns for events that are not player-only).
+    touches(k, h);
+    // `SeqEvent_LOS` (engine): a player looking at the originator, within `TriggerDistance`
+    // and with it within `ScreenCenterDistance` pixels of the screen centre, activates "Look";
+    // looking away activates "Stop Look". The port measures the screen distance on a
+    // 1280-pixel-wide view with the default 90 degree field of view; obstructions are not
+    // tested.
+    for e in k.events_for("SeqEvent_LOS", &[]) {
+        let Some(orig @ Obj::Actor(a)) = k.event_originator(e) else { continue };
+        let Some(target) = h.pos_of(&orig) else { continue };
+        let range = k.prop_float(e, "TriggerDistance");
+        let px = k.prop_float(e, "ScreenCenterDistance");
+        let max_angle = (px / 640.0).atan();
+        for p in h.m.humans.clone() {
+            let Some(pl) = h.m.world.player(p).filter(|x| x.alive) else { continue };
+            let eye = pl.position + Vec3::Z * 64.0;
+            let d = target - eye;
+            let (yaw, pitch) = (pl.yaw.to_radians(), pl.pitch.to_radians());
+            let fwd = Vec3::new(yaw.cos() * pitch.cos(), yaw.sin() * pitch.cos(), pitch.sin());
+            let looking = (range <= 0.0 || d.length() <= range) && fwd.angle_between(d.normalize_or_zero()) <= max_angle;
+            let was = h.st.los.contains(&(e, p));
+            if looking && !was {
+                h.st.los.insert((e, p));
+                if k.check_activate(h, e, Obj::Actor(a), Obj::Pawn(p), false, Some(vec![0]), false) {
+                    h.note(format!("looked at {}", h.db.actors[a as usize].name));
+                }
+            } else if !looking && was {
+                h.st.los.remove(&(e, p));
+                if k.op(e).outputs.len() > 1 {
+                    k.check_activate(h, e, Obj::Actor(a), Obj::Pawn(p), false, Some(vec![1]), false);
+                }
+            }
+        }
+    }
+    conversation_events(k, h);
+}
+
+/// Touches (players; NPC pawns for events that are not player-only): every `SeqEvent_Touch` of
+/// the loaded levels against where the pawns stand now; a pawn that came in activates
+/// "Touched", one that left "UnTouched" (`touch`).
+fn touches(k: &mut Kismet, h: &mut H) {
     let touch_events = k.events_for("SeqEvent_Touch", &[]);
     for e in touch_events {
         let Some(Obj::Actor(a)) = k.event_originator(e) else { continue };
@@ -4295,39 +4382,10 @@ fn feed(k: &mut Kismet, h: &mut H, sim_events: &[SimEvent]) {
             }
         }
     }
-    // `SeqEvent_LOS` (engine): a player looking at the originator, within `TriggerDistance`
-    // and with it within `ScreenCenterDistance` pixels of the screen centre, activates "Look";
-    // looking away activates "Stop Look". The port measures the screen distance on a
-    // 1280-pixel-wide view with the default 90 degree field of view; obstructions are not
-    // tested.
-    for e in k.events_for("SeqEvent_LOS", &[]) {
-        let Some(orig @ Obj::Actor(a)) = k.event_originator(e) else { continue };
-        let Some(target) = h.pos_of(&orig) else { continue };
-        let range = k.prop_float(e, "TriggerDistance");
-        let px = k.prop_float(e, "ScreenCenterDistance");
-        let max_angle = (px / 640.0).atan();
-        for p in h.m.humans.clone() {
-            let Some(pl) = h.m.world.player(p).filter(|x| x.alive) else { continue };
-            let eye = pl.position + Vec3::Z * 64.0;
-            let d = target - eye;
-            let (yaw, pitch) = (pl.yaw.to_radians(), pl.pitch.to_radians());
-            let fwd = Vec3::new(yaw.cos() * pitch.cos(), yaw.sin() * pitch.cos(), pitch.sin());
-            let looking = (range <= 0.0 || d.length() <= range) && fwd.angle_between(d.normalize_or_zero()) <= max_angle;
-            let was = h.st.los.contains(&(e, p));
-            if looking && !was {
-                h.st.los.insert((e, p));
-                if k.check_activate(h, e, Obj::Actor(a), Obj::Pawn(p), false, Some(vec![0]), false) {
-                    h.note(format!("looked at {}", h.db.actors[a as usize].name));
-                }
-            } else if !looking && was {
-                h.st.los.remove(&(e, p));
-                if k.op(e).outputs.len() > 1 {
-                    k.check_activate(h, e, Obj::Actor(a), Obj::Pawn(p), false, Some(vec![1]), false);
-                }
-            }
-        }
-    }
-    // Conversation outputs and soirees since the last step.
+}
+
+/// Conversation outputs and soirees since the last feed.
+fn conversation_events(k: &mut Kismet, h: &mut H) {
     let log = &h.m.state.conv_log;
     let start = match &h.st.conv_last {
         Some(last) => log.iter().rposition(|e| e == last).map(|i| i + 1).unwrap_or(h.st.conv_seen.min(log.len())),
@@ -4432,18 +4490,18 @@ fn apply_streaming(k: &mut Kismet, h: &mut H) {
     }
 }
 
-/// `SeqAct_CommitMapChange` ran this step: swap maps (or end the mission when the map is not
-/// one of its maps).
-fn commit_map_change(k: &mut Kismet, h: &mut H) {
+/// `SeqAct_CommitMapChange` ran in this step's update: swap maps (or end the mission when the
+/// map is not one of its maps). True when the players were placed at the travel destination.
+fn commit_map_change(k: &mut Kismet, h: &mut H) -> bool {
     if !std::mem::take(&mut h.st.commit) {
-        return;
+        return false;
     }
-    let Some(map) = h.st.pending_map.take() else { return };
+    let Some(map) = h.st.pending_map.take() else { return false };
     let in_mission = h.m.setup.maps.iter().any(|m| m.eq_ignore_ascii_case(&map));
     if !in_mission {
         h.note(format!("level change to {map}: leaves the mission"));
         h.act(vec![Action::Complete(format!("Mission complete: travel to {map}"))]);
-        return;
+        return false;
     }
     let tag = h.st.travel.as_ref().map(|t| t.0.clone()).unwrap_or_default();
     let from = h.st.map.clone();
@@ -4453,7 +4511,8 @@ fn commit_map_change(k: &mut Kismet, h: &mut H) {
             k.unload_map(f);
         }
     }
-    if !h.m.current_map.eq_ignore_ascii_case(&map) || from.is_none() {
+    let placed = !h.m.current_map.eq_ignore_ascii_case(&map) || from.is_none();
+    if placed {
         let cfg = h.cfg;
         h.m.travel(&map, &tag, cfg);
     }
@@ -4478,6 +4537,7 @@ fn commit_map_change(k: &mut Kismet, h: &mut H) {
         }
     }
     h.drain_spawns(k);
+    placed
 }
 
 /// Kismet parts of the mission view: usables, the scripted choice, the HUD target.
@@ -4726,8 +4786,8 @@ mod tests {
             self.m.world.player_mut(1).unwrap()
         }
 
-        /// One step as `step` runs it: the start event once, the gameplay events fed, then `ticks`
-        /// of the interpreter.
+        /// The start event once, the gameplay events fed as the end of a step feeds them
+        /// ([`raise`]), then `ticks` of the interpreter (the next steps' [`update`]s).
         fn feed_events(&mut self, events: &[SimEvent], ticks: u32) {
             let setup = self.run.setup.clone();
             let db = self.run.k.db.clone();
@@ -5387,6 +5447,39 @@ mod tests {
         r.feed_events(&[], 2);
         assert_eq!(sinks.iter().map(|s| r.ran(*s)).collect::<Vec<_>>(), [1, 0, 1], "Stand Up");
         assert_eq!(r.run.k.ops[ev as usize].instigator, Obj::Pawn(1));
+    }
+
+    /// The match's step runs the Kismet first (systems/tick_order.md section 1: `UpdateOp` from
+    /// `TG_PreAsyncWork` 0x006552C0 before the actor loop 0x00651A80): an event the step's gameplay
+    /// activates (the journal opened, `DisSeqEvent_JournalViewed`) runs in the next step's update,
+    /// not in its own step. Between the two the activated event is state: a save taken there
+    /// restores it, and the restored match runs it as the uninterrupted one does.
+    #[test]
+    fn a_gameplay_event_runs_in_the_next_steps_update_and_a_save_between_keeps_it() {
+        use crate::mission::save;
+        use dishonored_sim::input::{PlayerInput, actions};
+        let mut g = GraphBuilder::new();
+        g.remote_event("Start");
+        let (ev, sinks) = event_with_sinks(&mut g, "DisSeqEvent_JournalViewed", &["Out"]);
+        let cfg = sim_cfg();
+        let ks = KismetSetup { db: g.db, start_event: "Start".into(), seed: 1, ..Default::default() };
+        let setup = super::super::MissionSetup { kismet: Some(ks), starts: vec![(Vec3::ZERO, 0.0)], start_map: "T".into(), ..Default::default() };
+        let mut m = MissionMatch::new(setup.clone(), &cfg);
+        m.add_player(1, "p", 0, &cfg);
+        let world = dishonored_world::CollisionWorld::from_triangles(Vec::new(), Vec::new());
+        let idle = [(1, PlayerInput::default())];
+        let ran = |m: &MissionMatch| m.kismet.as_ref().unwrap().k.coverage.activations.get(&sinks[0]).copied().unwrap_or(0);
+        let triggered = |m: &MissionMatch| m.kismet.as_ref().unwrap().k.ops[ev as usize].trigger_count;
+        m.step(&idle, &world, &cfg);
+        m.step(&[(1, PlayerInput { action: actions::OPEN_JOURNAL, ..Default::default() })], &world, &cfg);
+        assert_eq!((triggered(&m), ran(&m)), (1, 0), "activated by the step's gameplay, not run in it");
+        let bytes = save::encode(&m, 0, "test").unwrap();
+        let (_, mut back) = save::restore(&bytes, setup).unwrap();
+        assert_eq!(save::state_hash(&back), save::state_hash(&m), "the save holds the pending event");
+        m.step(&idle, &world, &cfg);
+        back.step(&idle, &world, &cfg);
+        assert_eq!((ran(&m), ran(&back)), (1, 1), "the next step's update runs it, in both");
+        assert_eq!(save::state_hash(&back), save::state_hash(&m));
     }
 
     /// `PlayerCombat` (0x00AB9FA0): output 0 when a hostile in combat tracks the player at

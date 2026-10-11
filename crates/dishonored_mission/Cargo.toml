@@ -8,6 +8,6 @@ description = "Custom mission framework: objectives/tasks, story flags, markers,
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
-glam.workspace = true
+glam = { workspace = true, features = ["serde"] }
 ron = "0.12"
 dishonored_conversation.workspace = true

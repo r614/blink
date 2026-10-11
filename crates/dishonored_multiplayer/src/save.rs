@@ -277,8 +277,11 @@ fn player_in_combat(m: &MissionMatch) -> bool {
     !m.engaged.is_empty()
 }
 
-/// Once per step, after the mission and the Kismet ran (engine tick order: timers, the
-/// pending autosave 0x00a0c530, the pending mission-start save 0x00a09640).
+/// Once per step, at its end: after the Kismet's update, the simulation, the mission and the
+/// Kismet's feed (engine tick order: timers, the pending autosave 0x00a0c530, the pending
+/// mission-start save 0x00a09640). A save written after the step holds the Kismet events the
+/// step's gameplay activated for the next update to run (the interpreter's stacks and impulses
+/// serialize with it).
 pub(super) fn tick(m: &mut MissionMatch, dt: f32, combat: &dishonored_ir::items::CombatSaveConfig) {
     // Save-disable types popped since the last step start their wait (0x009F95F0); the
     // engine counts the timer down.
