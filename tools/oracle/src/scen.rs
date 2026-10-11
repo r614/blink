@@ -5,11 +5,18 @@
 //! - `results.json`: per scenario status (`pass` / `fail` / `unmeasured` / `error`), every
 //!   check with its port value, reference and status, the first divergence, setup notes;
 //! - `capture_requests.json` / `CAPTURE_REQUESTS.md`: every unmeasured expectation, for the hook;
-//! - `traces/<system>__<name>.json`: the port traces; `SCORECARD.md`, `WORKLIST.md`, dossiers.
+//! - `traces/<system>__<name>.json`: the port traces (`.anim.json`: the recorded NPCs' animation
+//!   per tick, `dishonored_oracle::anim::AnimTrack` by subject); `SCORECARD.md`, `WORKLIST.md`,
+//!   dossiers.
+//!
+//! A scenario that records `Bones` / `AnimState` is compared with its capture sidecar
+//! (`anim-<spec hash>.json` beside the original's trace) whether or not it has animation
+//! checkpoints: the scorecard's `anim` column and its "Animation residuals" table.
 
 use crate::present::FxLibrary;
-use crate::runner;
+use crate::{port_anim, runner};
 use anyhow::{Result, bail};
+use dishonored_oracle::anim::{self as oanim, AnimData, AnimSubject, AnimSummary, AnimTrack};
 use dishonored_oracle::cache::{self, OracleKey, Probe, Provenance};
 use dishonored_oracle::diff;
 use dishonored_oracle::report::{Scorecard, Table, WorkItem};
@@ -133,6 +140,8 @@ pub struct ScenarioResult {
     pub spec_hash: String,
     pub trace_file: Option<String>,
     pub checks: Vec<Check>,
+    /// The animation residual of every recorded subject (`Bones` / `AnimState`).
+    pub anim: Vec<AnimSummary>,
 }
 
 #[derive(Serialize)]
@@ -142,6 +151,8 @@ pub struct CaptureRequest {
     pub checkpoint: String,
     pub metric: String,
     pub port_value: Option<f64>,
+    /// The port's value as text (a name metric's name).
+    pub port_text: String,
     pub note: String,
     pub capture: Option<String>,
     pub spec_hash: String,
@@ -181,6 +192,9 @@ fn status_of(checks: &[Check]) -> &'static str {
 }
 
 fn cmp_text(c: &Check) -> String {
+    if let Some(n) = &c.expected_name {
+        return n.clone();
+    }
     match c.cmp {
         Cmp::Eq => format!("{} +- {}", c.expected, c.tol),
         Cmp::AtLeast => format!(">= {}", c.expected - c.tol),
@@ -188,8 +202,36 @@ fn cmp_text(c: &Check) -> String {
     }
 }
 
-fn val(v: Option<f64>) -> String {
-    v.map(|v| if v.fract() == 0.0 && v.abs() < 1e9 { format!("{v:.0}") } else { format!("{v:.3}") }).unwrap_or_else(|| "missing".into())
+/// The original's animation sidecar of a scenario (`anim-<spec hash>.json` beside its trace),
+/// as the track of the first subject the spec records (one subject per capture today).
+fn load_capture(root: &Path, exe: Option<[u8; 32]>, s: &Scenario, notes: &mut Vec<String>) -> BTreeMap<String, AnimTrack> {
+    let mut out = BTreeMap::new();
+    let subjects = s.anim_subjects();
+    let (Some(e), Some(first)) = (exe, subjects.first()) else { return out };
+    let key = OracleKey { exe_sha256: e, subject: s.name.clone(), probe: Probe::Trace, query_hash: s.spec_hash() };
+    let path = key.path(root).with_file_name(format!("anim-{:016x}.json", s.spec_hash()));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        notes.push(format!("animation records: no capture sidecar {}", path.display()));
+        return out;
+    };
+    match oanim::parse_capture(&text) {
+        Ok(t) => {
+            out.insert(first.clone(), t);
+            if subjects.len() > 1 {
+                notes.push(format!("animation records: the capture is compared with `{first}` only (one subject per capture)"));
+            }
+        }
+        Err(e) => notes.push(format!("animation records: {}: {e:#}", path.display())),
+    }
+    out
+}
+
+fn anim_cell(r: &ScenarioResult) -> String {
+    if r.anim.is_empty() { "-".into() } else { r.anim.iter().map(AnimSummary::cell).collect::<Vec<_>>().join("; ") }
+}
+
+fn plays_text(v: &[(String, usize)]) -> String {
+    if v.is_empty() { "-".into() } else { v.iter().take(3).map(|(s, n)| format!("{s} ({n})")).collect::<Vec<_>>().join(", ") }
 }
 
 /// Select scenarios: names (full or the part after the system), `--system S` (repeatable),
@@ -253,6 +295,7 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
                     spec_hash: format!("{:016x}", s.spec_hash()),
                     trace_file: None,
                     checks: Vec::new(),
+                    anim: Vec::new(),
                 };
                 if s.sweep.is_some() {
                     r.status = "sweep".into();
@@ -268,7 +311,9 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
                     }
                     None => unreachable!(),
                 };
-                let run = match runner::run(s, &maps, fx.clone()) {
+                let mut anim_notes = Vec::new();
+                let mut captures = load_capture(&root, exe, s, &mut anim_notes);
+                let mut run = match runner::run(s, &maps, fx.clone(), &captures) {
                     Ok(x) => x,
                     Err(e) => {
                         r.status = "error".into();
@@ -278,7 +323,21 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
                 };
                 r.seconds = run.seconds;
                 r.notes = run.notes;
-                r.checks = s.evaluate(&run.trace);
+                r.notes.extend(anim_notes);
+                // The recorded subjects on both sides, with the profile's tree layout and bone
+                // groups.
+                let profile = port_anim::profile().ok();
+                let mut anim = AnimData::new();
+                for subj in s.anim_subjects() {
+                    let sub = AnimSubject { capture: captures.remove(&subj), port: run.anim.remove(&subj), layout: profile.map(|p| p.layout.clone()), groups: profile.map(|p| p.groups.clone()).unwrap_or_default() };
+                    anim.insert(subj, sub);
+                }
+                if !anim.is_empty() {
+                    let ports: BTreeMap<&String, &Option<AnimTrack>> = anim.iter().map(|(k, v)| (k, &v.port)).collect();
+                    let _ = std::fs::write(trace_dir.join(format!("{}.anim.json", s.name.replace('/', "__"))), serde_json::to_string(&ports).unwrap_or_default());
+                }
+                r.anim = anim.iter().map(|(k, v)| oanim::summarize(k, v)).collect();
+                r.checks = s.evaluate_with(&run.trace, &anim);
                 r.passed = r.checks.iter().filter(|c| c.status == CheckStatus::Pass).count();
                 r.failed = r.checks.iter().filter(|c| c.status == CheckStatus::Fail).count();
                 r.unmeasured = r.checks.iter().filter(|c| c.status == CheckStatus::Unmeasured).count();
@@ -306,7 +365,7 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
                             Divergence { against: "original".into(), tick: Some(x.tick), text: format!("[{group}] {}", divergence_text(&x)) }
                         })
                     }
-                    None => r.checks.iter().find(|c| c.status == CheckStatus::Fail).map(|c| Divergence { against: "checkpoint".into(), tick: c.tick, text: format!("{}: {} = {} (original {}; {})", c.checkpoint, c.metric, val(c.actual), cmp_text(c), c.source) }),
+                    None => r.checks.iter().find(|c| c.status == CheckStatus::Fail).map(|c| Divergence { against: "checkpoint".into(), tick: c.tick, text: format!("{}: {} = {} (original {}; {})", c.checkpoint, c.metric, c.actual_text(), cmp_text(c), c.source) }),
                 };
                 let file = trace_dir.join(format!("{}.json", s.name.replace('/', "__")));
                 if std::fs::write(&file, serde_json::to_string(&run.trace).unwrap_or_default()).is_ok() {
@@ -317,7 +376,9 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
             .collect()
     });
     let mut card = Scorecard { title: "Scenarios: the port against the original's measurements and traces".into(), ..Default::default() };
-    let mut table = Table::new("Scenarios", &["scenario", "status", "pass/fail/unmeasured/unverified", "channels agree/offset/diverge", "first divergence", "s"]);
+    let mut table = Table::new("Scenarios", &["scenario", "status", "pass/fail/unmeasured/unverified", "channels agree/offset/diverge", "first divergence", "anim (body mean / max at lag 0, best lag and its body mean)", "s"]);
+    let mut anim_table = Table::new("Animation residuals", &["scenario", "subject", "ticks capture / port / fresh bones", "body mean / max deg", "legs", "hands", "head", "lag (body mean)", "same full-body sequence", "capture plays (FullBodySlot)", "port plays (FullBodySlot)", "notes"]);
+    let mut anim_checks = Table::new("Animation checks", &["scenario", "checkpoint", "metric", "port", "capture", "expected", "status"]);
     let mut chan_table = Table::new("Trace comparison per channel group", &["scenario", "group", "agree/offset/diverge", "first divergence", "offsets (events: counts and timing)", "diverging ticks"]);
     let mut group_tot: BTreeMap<String, (usize, u32, u32, u32, u32, u64, u64)> = BTreeMap::new();
     let mut checks_table = Table::new("Checks", &["scenario", "checkpoint", "metric", "port", "expected", "status", "reference"]);
@@ -361,7 +422,16 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
             (None, None) => "-".into(),
         };
         let chans = r.trace_compare.as_ref().map(|c| format!("{}/{}/{} of {}", c.agree, c.offset, c.diverge, c.channels)).unwrap_or_else(|| "-".into());
-        table.row(vec![r.name.clone(), r.status.clone(), format!("{}/{}/{}/{}", r.passed, r.failed, r.unmeasured, r.unverified), chans, div, format!("{:.2}", r.seconds)]);
+        table.row(vec![r.name.clone(), r.status.clone(), format!("{}/{}/{}/{}", r.passed, r.failed, r.unmeasured, r.unverified), chans, div, anim_cell(&r), format!("{:.2}", r.seconds)]);
+        for a in &r.anim {
+            let g = |k: &str| a.groups.get(k).map(|x| format!("{:.3} / {:.2}", x.mean, x.max)).unwrap_or_else(|| "-".into());
+            let lag = match (a.lag, a.lag_body_mean) {
+                (Some(l), Some(m)) => format!("{l:+} ({m:.3})"),
+                _ => "-".into(),
+            };
+            let same = if a.same_sequence.1 > 0 { format!("{} of {} ticks", a.same_sequence.0, a.same_sequence.1) } else { "-".into() };
+            anim_table.row(vec![r.name.clone(), a.subject.clone(), format!("{} / {} / {}", a.capture_ticks, a.port_ticks, a.fresh_ticks), g("body"), g("legs"), g("hands"), g("head"), lag, same, plays_text(&a.capture_plays), plays_text(&a.port_plays), a.notes.join("; ")]);
+        }
         for g in r.trace_compare.iter().flat_map(|c| &c.groups) {
             chan_table.row(vec![r.name.clone(), g.group.clone(), format!("{}/{}/{}", g.agree, g.offset, g.diverge), g.first_tick.map(|t| format!("tick {t}: {}", g.first)).unwrap_or_else(|| "-".into()), if g.note.is_empty() { g.offsets.join(", ") } else { g.note.clone() }, g.spans.join(", ")]);
             let e = group_tot.entry(g.group.clone()).or_default();
@@ -374,15 +444,18 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
                 CheckStatus::Unmeasured => "unmeasured",
                 CheckStatus::Unverified => "unverified",
             };
-            checks_table.row(vec![r.name.clone(), c.checkpoint.clone(), c.metric.clone(), val(c.actual), if c.reference == Reference::Unmeasured { "?".into() } else { cmp_text(c) }, st.into(), format!("{:?}: {}", c.reference, c.source)]);
+            checks_table.row(vec![r.name.clone(), c.checkpoint.clone(), c.metric.clone(), c.actual_text(), if c.reference == Reference::Unmeasured { "?".into() } else { cmp_text(c) }, st.into(), format!("{:?}: {}", c.reference, c.source)]);
+            if c.metric.starts_with("Anim") {
+                anim_checks.row(vec![r.name.clone(), c.checkpoint.clone(), c.metric.clone(), c.actual_text(), c.capture.clone().unwrap_or_else(|| "-".into()), if c.reference == Reference::Unmeasured { "?".into() } else { cmp_text(c) }, st.into()]);
+            }
             if matches!(c.status, CheckStatus::Unmeasured | CheckStatus::Unverified) {
                 let note = if c.status == CheckStatus::Unverified { format!("unverified (measured {}, sampling to confirm): {}", cmp_text(c), c.source) } else { c.source.clone() };
-                captures.push(CaptureRequest { scenario: r.name.clone(), map: r.map.clone(), checkpoint: c.checkpoint.clone(), metric: c.metric.clone(), port_value: c.actual, note, capture: s.capture.clone(), spec_hash: r.spec_hash.clone() });
+                captures.push(CaptureRequest { scenario: r.name.clone(), map: r.map.clone(), checkpoint: c.checkpoint.clone(), metric: c.metric.clone(), port_value: c.actual, port_text: c.actual_text(), note, capture: s.capture.clone(), spec_hash: r.spec_hash.clone() });
             }
             if c.status == CheckStatus::Fail {
                 items.push(WorkItem {
                     id: format!("scenario:{}:{}:{}", r.name, c.checkpoint, c.metric),
-                    title: format!("{}: {} {} = {} (original {})", r.name, c.checkpoint, c.metric, val(c.actual), cmp_text(c)),
+                    title: format!("{}: {} {} = {} (original {})", r.name, c.checkpoint, c.metric, c.actual_text(), cmp_text(c)),
                     probe: "scenario".into(),
                     system: r.system.clone(),
                     count: 1,
@@ -421,12 +494,18 @@ pub fn run(chosen: Vec<&Scenario>, out: &Path, exe: Option<[u8; 32]>, jobs: Opti
     card.tables.push(table);
     card.tables.push(chan_table);
     card.tables.push(checks_table);
+    if !anim_table.rows.is_empty() {
+        card.tables.push(anim_table);
+    }
+    if !anim_checks.rows.is_empty() {
+        card.tables.push(anim_checks);
+    }
     let res = Results { totals: tot, by_system, scenarios: out_results, capture_requests: captures };
     std::fs::write(out.join("results.json"), serde_json::to_string_pretty(&res)?)?;
     std::fs::write(out.join("capture_requests.json"), serde_json::to_string_pretty(&res.capture_requests)?)?;
     let mut md = String::from("# Capture requests for the hook (unmeasured expectations)\n\nEach row: run the scenario's setup and input on the original (`capture`), then cache the trace\nunder the scenario's spec hash, or measure the metric and add the value to the spec\n(`status: Measured`, with the source).\n\n| scenario | map | checkpoint | metric | port value | capture |\n|---|---|---|---|---|---|\n");
     for c in &res.capture_requests {
-        md.push_str(&format!("| {} | {} | {} | `{}` | {} | {} |\n", c.scenario, c.map, c.checkpoint, c.metric, val(c.port_value), c.capture.clone().unwrap_or_default().replace('|', "/")));
+        md.push_str(&format!("| {} | {} | {} | `{}` | {} | {} |\n", c.scenario, c.map, c.checkpoint, c.metric, c.port_text, c.capture.clone().unwrap_or_default().replace('|', "/")));
     }
     std::fs::write(out.join("CAPTURE_REQUESTS.md"), md)?;
     Ok((res, card, items))

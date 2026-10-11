@@ -6,6 +6,8 @@
 //! - [`query`]: query sets (collision first) and the import of `probe_launch` captures;
 //! - [`scenario`]: the scenario spec (map, setup, fixed-step input, checkpoints, records);
 //! - [`trace`]: per-tick behaviour traces;
+//! - [`anim`]: per-tick AnimTree node states and bones of a pawn (capture sidecar and port),
+//!   the animation residuals and metrics;
 //! - [`diff`]: agreement, clustering by object, first divergence;
 //! - [`report`]: scorecard, work list and evidence dossiers;
 //! - [`coverage`]: the static scan of every package against what the port's source handles.
@@ -18,6 +20,7 @@
 //! The port side (the headless runner calling `dishonored_world`, `dishonored_sim`...) lives in
 //! the `oracle` tool so this crate builds in seconds and never depends on Bevy or the runtime.
 
+pub mod anim;
 pub mod cache;
 pub mod coverage;
 pub mod diff;

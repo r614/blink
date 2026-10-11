@@ -15,7 +15,8 @@
 //!                                            compare port dump vs oracle capture
 //! oracle anim clip --capture F --skeleton PKG MESH --set PKG SET --sequence S [--node N] [--bones B,B]
 //!                  [--exclude-below B] [--frames A..B] [--json OUT]  pose and compare a single clip
-//! oracle scenario [NAME...] [--system S]... [--all] [--jobs N] [--json] [--dir DIR] [--out DIR]
+//! oracle scenario [NAME...] [--system S]... [--all] [--anim] [--jobs N] [--json] [--dir DIR] [--out DIR]
+//!                                            (--anim alone: every scenario recording animation)
 //! oracle sweep [--out DIR] [--no-coverage]   every cached map and scenario -> scorecard + work list
 //! oracle bench import|queries --map M        measure the port's costs
 //! oracle cache list
@@ -28,6 +29,8 @@
 mod anim;
 mod querygen;
 mod port;
+#[cfg(feature = "scenarios")]
+mod port_anim;
 #[cfg(feature = "scenarios")]
 mod present;
 #[cfg(feature = "scenarios")]
@@ -67,7 +70,7 @@ impl Args {
         while i < self.0.len() {
             let a = &self.0[i];
             if a.starts_with("--") {
-                if !matches!(a.as_str(), "--dlc" | "--no-cache" | "--no-coverage" | "--rebuild" | "--all" | "--json") {
+                if !matches!(a.as_str(), "--dlc" | "--no-cache" | "--no-coverage" | "--rebuild" | "--all" | "--json" | "--anim") {
                     i += 1;
                 }
             } else {
@@ -127,7 +130,7 @@ fn main() -> Result<()> {
         "cache" => cmd_cache(&a),
         "index" => dishonored_oracle::index::cli::run(&a.0[1..]),
         _ => {
-            eprintln!("{}", include_str!("main.rs").lines().skip(2).take(20).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
+            eprintln!("{}", include_str!("main.rs").lines().skip(2).take(21).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
             bail!("unknown command `{cmd}`")
         }
     }
@@ -787,7 +790,11 @@ fn cmd_scenario(a: &Args) -> Result<(Scorecard, Vec<WorkItem>)> {
     let all = scen::load(&scenario_dir(a))?;
     let systems = a.all("--system");
     let names = if a.flag("--all") { Vec::new() } else { names };
-    let chosen = scen::select(&all, &names, &systems);
+    let mut chosen = scen::select(&all, &names, &systems);
+    // `--anim` without names: every scenario that records animation (`Bones` / `AnimState`).
+    if a.flag("--anim") && names.is_empty() {
+        chosen.retain(|s| !s.anim_subjects().is_empty());
+    }
     if chosen.is_empty() {
         bail!("no scenario matches {names:?} / --system {systems:?} in {}", scenario_dir(a).display());
     }
@@ -801,8 +808,9 @@ fn cmd_scenario(a: &Args) -> Result<(Scorecard, Vec<WorkItem>)> {
         if a.flag("--json") {
             println!("{}", serde_json::to_string_pretty(&res)?);
         } else {
-            // The per-system and per-scenario tables (after the residual table write_report adds).
-            for t in card.tables.iter().filter(|t| t.title == "Per system" || t.title == "Scenarios" || t.title.starts_with("Agreement with the original")) {
+            // The per-system and per-scenario tables (after the residual table write_report adds),
+            // and the animation residuals of the scenarios that record animation.
+            for t in card.tables.iter().filter(|t| t.title == "Per system" || t.title == "Scenarios" || t.title.starts_with("Agreement with the original") || t.title.starts_with("Animation ")) {
                 print!("{}", t.markdown());
             }
             let t = &res.totals;

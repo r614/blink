@@ -286,6 +286,21 @@ pub enum Metric {
     /// Mean / variance of a numeric `key=value` over the matching events.
     EventMean(String, String),
     EventVar(String, String),
+    /// Animation (a `Bones` / `AnimState` subject against its capture sidecar, [`crate::anim`]):
+    /// the mean angle (degrees) between the port's and the original's component-space bones over
+    /// the port's ticks `from..=to` at lag 0, for a group (`body`, `legs`, `hands`, `head`), `all`,
+    /// or bone names separated by commas; only the bones the capture refreshes on a tick count.
+    AnimBoneMean(String, String, u32, u32),
+    /// The largest such angle.
+    AnimBoneMax(String, String, u32, u32),
+    /// The sequence playing on a node at a tick (the node by its capture number or `NodeName`;
+    /// on a blend node, the heaviest sequence of its subtree): a name, compared with
+    /// [`Expect::name`].
+    AnimSeq(String, String, u32),
+    /// That sequence's time (s).
+    AnimSeqTime(String, String, u32),
+    /// The tick offset (capture tick = port tick + lag) that minimizes the body mean over the run.
+    AnimLag(String),
 }
 
 /// How an expectation compares.
@@ -320,7 +335,10 @@ pub enum Reference {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Expect {
     pub metric: Metric,
+    /// The reference of a numeric metric (unused by a name metric: 0).
+    #[serde(default)]
     pub value: f64,
+    #[serde(default)]
     pub tol: f64,
     /// Where the reference value comes from (a measurement, a doc and date).
     pub source: String,
@@ -328,6 +346,9 @@ pub struct Expect {
     pub cmp: Cmp,
     #[serde(default)]
     pub status: Reference,
+    /// The reference of a name metric (`AnimSeq`), compared case-insensitively.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -586,15 +607,45 @@ impl Scenario {
 
     /// Every expectation evaluated on a trace, with its status.
     pub fn evaluate(&self, t: &Trace) -> Vec<Check> {
+        self.evaluate_with(t, &crate::anim::AnimData::default())
+    }
+
+    /// The subjects whose animation the spec records (`Bones` / `AnimState`), in record order.
+    pub fn anim_subjects(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for r in &self.record {
+            if let Record::Bones(s, _) | Record::AnimState(s) = r {
+                if !out.iter().any(|x| x.eq_ignore_ascii_case(s)) {
+                    out.push(s.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Every expectation evaluated on a trace and the run's animation records, with its status.
+    pub fn evaluate_with(&self, t: &Trace, anim: &crate::anim::AnimData) -> Vec<Check> {
         let mut out = Vec::new();
         for cp in &self.checkpoints {
             for e in &cp.expect {
-                let actual = crate::diff::metric_value(t, &e.metric);
-                let ok = actual.is_some_and(|a| match e.cmp {
-                    Cmp::Eq => (a - e.value).abs() <= e.tol,
-                    Cmp::AtLeast => a >= e.value - e.tol,
-                    Cmp::AtMost => a <= e.value + e.tol,
-                });
+                let (actual, actual_name) = if crate::anim::is_anim(&e.metric) {
+                    match crate::anim::metric_value(&e.metric, anim) {
+                        Some(crate::anim::AnimValue::Num(v)) => (Some(v), None),
+                        Some(crate::anim::AnimValue::Name(n)) => (None, Some(n)),
+                        None => (None, None),
+                    }
+                } else {
+                    (crate::diff::metric_value(t, &e.metric), None)
+                };
+                let ok = match (&e.name, &actual_name) {
+                    (Some(want), Some(got)) => want.eq_ignore_ascii_case(got),
+                    (Some(_), None) | (None, Some(_)) => false,
+                    (None, None) => actual.is_some_and(|a| match e.cmp {
+                        Cmp::Eq => (a - e.value).abs() <= e.tol,
+                        Cmp::AtLeast => a >= e.value - e.tol,
+                        Cmp::AtMost => a <= e.value + e.tol,
+                    }),
+                };
                 let status = match (e.status, ok) {
                     (Reference::Unmeasured, _) => CheckStatus::Unmeasured,
                     (Reference::Unverified, _) => CheckStatus::Unverified,
@@ -605,7 +656,25 @@ impl Scenario {
                     Metric::Count(p) | Metric::FirstAt(p) | Metric::EventValue(p, _) | Metric::EventSum(p, _) | Metric::Lifetime(p) | Metric::Unended(p) | Metric::Between(p, _) => EventPattern::parse(p).first(t).map(|ev| ev.tick),
                     _ => None,
                 };
-                out.push(Check { checkpoint: cp.name.clone(), metric: metric_label(&e.metric), cmp: e.cmp, expected: e.value, tol: e.tol, actual, status, reference: e.status, source: e.source.clone(), tick: first_event });
+                let capture = crate::anim::capture_value(&e.metric, anim).map(|v| match v {
+                    crate::anim::AnimValue::Num(x) => format!("{x:.3}"),
+                    crate::anim::AnimValue::Name(n) => n,
+                });
+                out.push(Check {
+                    checkpoint: cp.name.clone(),
+                    metric: metric_label(&e.metric),
+                    cmp: e.cmp,
+                    expected: e.value,
+                    tol: e.tol,
+                    actual,
+                    status,
+                    reference: e.status,
+                    source: e.source.clone(),
+                    tick: first_event,
+                    actual_name,
+                    expected_name: e.name.clone(),
+                    capture,
+                });
             }
         }
         out
@@ -651,6 +720,27 @@ pub struct Check {
     pub source: String,
     /// Tick of the first matching event (event metrics).
     pub tick: Option<u32>,
+    /// A name metric's port value and reference (`AnimSeq`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_name: Option<String>,
+    /// The metric read from the capture sidecar where it has a one-sided value (`AnimSeq`,
+    /// `AnimSeqTime`): what a Measured reference states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<String>,
+}
+
+impl Check {
+    /// The port's value as text (a name metric's name).
+    pub fn actual_text(&self) -> String {
+        match (&self.actual_name, self.actual) {
+            (Some(n), _) => n.clone(),
+            (None, Some(v)) if v.fract() == 0.0 && v.abs() < 1e9 => format!("{v:.0}"),
+            (None, Some(v)) => format!("{v:.3}"),
+            (None, None) => "missing".into(),
+        }
+    }
 }
 
 /// A compact metric label: `Count(Effect:Vfx_*)`.
@@ -679,6 +769,11 @@ pub fn metric_label(m: &Metric) -> String {
         Metric::Abs(a) => format!("Abs({})", metric_label(a)),
         Metric::EventMean(p, k) => format!("EventMean({p}, {k})"),
         Metric::EventVar(p, k) => format!("EventVar({p}, {k})"),
+        Metric::AnimBoneMean(s, b, a, z) => format!("AnimBoneMean({s}, {b}, {a}, {z})"),
+        Metric::AnimBoneMax(s, b, a, z) => format!("AnimBoneMax({s}, {b}, {a}, {z})"),
+        Metric::AnimSeq(s, n, t) => format!("AnimSeq({s}, {n}, {t})"),
+        Metric::AnimSeqTime(s, n, t) => format!("AnimSeqTime({s}, {n}, {t})"),
+        Metric::AnimLag(s) => format!("AnimLag({s})"),
     }
 }
 
@@ -929,6 +1024,45 @@ mod tests {
         let mut s2 = s.clone();
         s2.checkpoints.clear();
         assert_eq!(s.spec_hash(), s2.spec_hash());
+    }
+
+    /// Animation metrics read the run's animation records: a name metric passes on its name, a
+    /// bone metric on its value, a missing record fails a measured expectation.
+    #[test]
+    fn anim_metrics_and_names() {
+        use crate::anim::{AnimData, AnimFrame, AnimSubject, AnimTrack, BoneGroup, NodeSample, SeqSample, TreeLayout};
+        let s = Scenario::parse(
+            r#"(name: "stealth/x", system: Stealth, map: "M", ticks: 3, record: [Bones("guard", ["+world"]), AnimState("guard")], checkpoints: [(name: "anim", expect: [
+                (metric: AnimSeq("guard", "FullBodySlot", 1), name: Some("Empty_Idle_04"), source: "capture"),
+                (metric: AnimSeq("guard", "FullBodySlot", 1), name: Some("Empty_Idle_03"), source: "capture"),
+                (metric: AnimSeqTime("guard", "22", 1), value: 0.083, tol: 0.002, source: "capture"),
+                (metric: AnimBoneMean("guard", "body", 0, 2), value: 1.0, tol: 0, cmp: AtMost, source: "capture"),
+                (metric: AnimLag("guard"), value: 0, tol: 1, source: "capture"),
+                (metric: AnimBoneMax("nobody", "body", 0, 2), value: 1.0, tol: 0, cmp: AtMost, source: "capture"),
+            ])])"#,
+        )
+        .unwrap();
+        assert_eq!(s.anim_subjects(), vec!["guard".to_string()]);
+        let frame = |t: u32, deg: f32| {
+            let h = (deg.to_radians() * 0.5).sin_cos();
+            let mut f = AnimFrame { tick: t, ..Default::default() };
+            f.nodes.insert(22, NodeSample { weight: 1.0, relevant: true, seq: Some(SeqSample { name: "Empty_Idle_04".into(), time: 0.067 + t as f32 / 60.0, rate: 1.0 }) });
+            f.bones.insert(0, ([0.0, 0.0, h.0, h.1], [0.0; 3]));
+            f
+        };
+        let track = |off: f32| AnimTrack { bones: vec!["spine_1_jnt".into()], frames: (0..3).map(|t| frame(t, t as f32 * 10.0 + off)).collect() };
+        let layout = TreeLayout { names: [("fullbodyslot".to_string(), 11)].into(), below: [(11, vec![22]), (22, vec![22])].into() };
+        let sub = AnimSubject { capture: Some(track(0.0)), port: Some(track(0.5)), layout: Some(layout), groups: [("spine_1_jnt".to_string(), BoneGroup::Body)].into() };
+        let data: AnimData = [("guard".to_string(), sub)].into();
+        let checks = s.evaluate_with(&Trace::default(), &data);
+        let st: Vec<CheckStatus> = checks.iter().map(|c| c.status).collect();
+        assert_eq!(st, vec![CheckStatus::Pass, CheckStatus::Fail, CheckStatus::Pass, CheckStatus::Pass, CheckStatus::Pass, CheckStatus::Fail]);
+        assert_eq!(checks[0].actual_text(), "Empty_Idle_04");
+        assert_eq!(checks[0].capture.as_deref(), Some("Empty_Idle_04"));
+        assert!((checks[3].actual.unwrap() - 0.5).abs() < 1e-3, "{:?}", checks[3].actual);
+        assert_eq!(checks[5].actual_text(), "missing");
+        // Without the records every animation metric is missing.
+        assert!(s.evaluate(&Trace::default()).iter().all(|c| c.actual.is_none() && c.actual_name.is_none()));
     }
 
     #[test]
