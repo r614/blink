@@ -615,6 +615,17 @@ impl TreeState {
         }
     }
 
+    /// The requests of `inputs` (slot plays and stops, filter targets, stack channels, a blink)
+    /// landed without a tick, as the end of [`Self::update`] lands them: a requester outside the
+    /// one that drives the update (the oracle's scenario runner pinning an NPC's ambient idle)
+    /// asks between two updates; the continuous inputs are not read.
+    pub fn request(&mut self, shape: &TreeShape, inputs: &TreeInputs) {
+        self.apply_requests(shape, inputs);
+        if let Some(rate) = inputs.blink {
+            self.start_blink(shape, rate);
+        }
+    }
+
     /// [`AnimTreeInstance::pose`] of a state kept apart from its shape.
     pub fn pose(&self, shape: &TreeShape, clips: &dyn Clips) -> Pose {
         match shape.root {

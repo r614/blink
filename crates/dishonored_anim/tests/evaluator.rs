@@ -226,6 +226,30 @@ fn slot_channel_holds_its_last_frame_without_a_blend_out() {
     assert!(angle(inst.pose(&clips)[0].0, q(90.0)) < EPS);
 }
 
+/// A request landed between two updates (`TreeState::request`) is the same request landed at
+/// the end of the first update.
+#[test]
+fn request_between_updates_lands_as_the_updates_own() {
+    let clips = Stub::new().constant("Loop", 1.0, [Some(q(0.0)), None, None]).constant("Act", 1.0, [Some(q(90.0)), None, None]);
+    let t = tree(vec![seq("Loop", "Loop"), with_seq(seq("Chan", ""), |p| if let NodeProps::Sequence { looping, .. } = p { *looping = false }), node("Slot", "DisAnimNodeSlot", NodeProps::Slot { early_anim_end: true }, vec![link(0, 1.0), link(1, 0.0)])], 2);
+    let shape = TreeShape::new(&t, &skeleton(), Quat::IDENTITY);
+    let play = [SlotRequest { slot: "Slot".into(), action: SlotAction::Play { sequence: "Act".into(), rate: 1.0, blend_in: 0.2, blend_out: Some(0.1), looping: false, start: 0.15 } }];
+    let filters = [FilterTarget { node: "Missing".into(), target: 1.0, time: 0.1 }];
+    let (mut a, mut b) = (shape.initial_state(), shape.initial_state());
+    a.update(&shape, &clips, &TreeInputs { slots: &play, filters: &filters, ..Default::default() }, 0.05);
+    b.update(&shape, &clips, &TreeInputs::default(), 0.05);
+    b.request(&shape, &TreeInputs { slots: &play, filters: &filters, ..Default::default() });
+    assert_eq!(a, b);
+    for _ in 0..3 {
+        a.update(&shape, &clips, &TreeInputs::default(), 0.05);
+        b.update(&shape, &clips, &TreeInputs::default(), 0.05);
+    }
+    assert_eq!(a, b);
+    let inst = AnimTreeInstance::from_parts(Arc::new(shape), b);
+    assert!((inst.sequence(1).unwrap().time - 0.3).abs() < 1e-5, "started at 0.15, three ticks on");
+    assert!((inst.children_weights(2)[1] - 0.75).abs() < 1e-5);
+}
+
 #[test]
 fn sync_group_shares_one_phase_with_the_heaviest_as_master() {
     let clips = Stub::new().constant("Short", 1.0, [Some(q(0.0)), None, None]).constant("Long", 2.0, [Some(q(0.0)), None, None]);
