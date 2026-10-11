@@ -7,7 +7,8 @@ description = "UE3 AnimTree evaluation over the cooked node graph: baked clip sa
 
 [dependencies]
 dishonored_ir.workspace = true
-glam.workspace = true
+glam = { workspace = true, features = ["serde"] }
+serde.workspace = true
 
 [dev-dependencies]
 dishonored_assets.workspace = true

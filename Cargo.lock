@@ -2497,6 +2497,7 @@ dependencies = [
  "dishonored_assets",
  "dishonored_ir",
  "glam",
+ "serde",
  "serde_json",
 ]
 

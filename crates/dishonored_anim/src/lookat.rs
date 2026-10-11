@@ -10,6 +10,7 @@
 //! the AI's look-at cursor into the torso and head aims (0x009176F0) is `dishonored_ai::head`.
 
 use dishonored_ir::npc_anim::LookatMode;
+use serde::{Deserialize, Serialize};
 
 /// The nine cell weights of a grid for an aim (degrees: yaw right, pitch up) against the
 /// grid's ranges (right, left, up, down; left and down negative).
@@ -43,8 +44,9 @@ pub fn node_weights(mode: &LookatMode, head: [f32; 2], torso: [f32; 2]) -> [f32;
 /// MaxDurationBetweenBlink]` seconds at a play rate in `[MinBlinkSpeed, MaxBlinkSpeed]`
 /// (`ArkComponentLookatConfig` class defaults 0.5-6 s, 1-2). Uniform rolls from a seeded xorshift
 /// like the runtime's (`PawnAnim::rand`); the original's roll was not traced (U-280), so a run
-/// is deterministic but not the original's sequence of blinks.
-#[derive(Clone, Debug)]
+/// is deterministic but not the original's sequence of blinks. Part of the instance's
+/// `tree::TreeState` (the countdown and the generator's state travel with it).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlinkTimer {
     pub interval: [f32; 2],
     pub rate: [f32; 2],

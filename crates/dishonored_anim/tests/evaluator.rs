@@ -1,15 +1,19 @@
 //! The evaluator on hand-built trees (no install): a three-bone chain, clips of constant (or
 //! linear) transforms behind a stub `Clips`, and the node rules the retail replay relies on:
 //! per-bone masks, additive deltas, blend weights, slot channels, sync groups, root options and
-//! root motion, stack channels, the tick order.
+//! root motion, stack channels, the tick order; and the per-mesh state's round trip through
+//! serde.
 
+use dishonored_anim::lookat::BlinkTimer;
 use dishonored_anim::pose::{self, Pose};
-use dishonored_anim::tree::{SlotAction, SlotRequest, TreeInputs};
-use dishonored_anim::{AnimTreeInstance, BakedClip, ClipRef, Clips};
+use dishonored_anim::tree::{FilterTarget, LocoInput, LookInput, SlotAction, SlotRequest, TreeInputs};
+use dishonored_anim::{AnimTreeInstance, BakedClip, ClipRef, Clips, TreeShape, TreeState};
 use dishonored_ir::BoneAsset;
 use dishonored_ir::anim_tree::{AnimChild, AnimNode, AnimTreeAsset, NodeProps, RootBoneOption, RootRotationOption};
+use dishonored_ir::npc_anim::{LocoConfig, LocoModifier, LookatMode, SpeedMode};
 use glam::{Quat, Vec3};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 const EPS: f32 = 1e-4;
 
@@ -364,4 +368,140 @@ fn deterministic_across_instances() {
         inst.pose(&clips)
     };
     assert_eq!(run(), run());
+}
+
+/// A tree with every kind of per-mesh state: physics (fall, or the rest) -> additive (the
+/// look-at grids over the blink stack) -> upper-body filter -> full-body slot -> locomotion,
+/// whose loops share a sync group and extract root motion: nodes 0-2 the speed-mode slots, 3
+/// the specific anim, 4 the locomotion node, 5 the slot channel, 6 the slot, 7 the filter's
+/// target, 8 the filter, 9 the blink, 10 the stack, 11 the look-at, 12 the additive, 13 the fall,
+/// 14 the physics node (root).
+fn state_tree() -> AnimTreeAsset {
+    let speed_slot = |name: &str, synchronize: bool| {
+        with_seq(seq(name, ""), |p| {
+            if let NodeProps::Sequence { sync_group, synchronize: s, root_bone, root_rotation, .. } = p {
+                *sync_group = "LocoGroup".into();
+                *s = synchronize;
+                *root_bone = [RootBoneOption::Translate; 3];
+                *root_rotation = [RootRotationOption::Extract; 3];
+            }
+        })
+    };
+    let one_shot = |name: &str| with_seq(seq(name, ""), |p| if let NodeProps::Sequence { looping, .. } = p { *looping = false });
+    let blink = with_seq(seq("Blink", "Blink"), |p| {
+        if let NodeProps::Sequence { looping, playing, keep_undefined, .. } = p {
+            *looping = false;
+            *playing = false;
+            *keep_undefined = true;
+        }
+    });
+    let mut filter = node("UpperBodyFilter", "AnimNodeBlendPerBone", NodeProps::BlendPerBone { branches: vec!["mid".into()], local_space: false, exclude_branch: false }, vec![link(6, 1.0), link(7, 1.0)]);
+    filter.raw.push(("Child2Weight".into(), "0".into()));
+    let mut additive = node("Additive", "AnimNodeAdditiveBlending", NodeProps::AdditiveBlending, vec![link(10, 1.0), link(11, 1.0)]);
+    additive.children[1].additive = true;
+    let loco = NodeProps::Locomotion { rate: 2000.0, range: 100.0, min_ratio: 0.1, modifier_blend: 0.5 };
+    tree(
+        vec![
+            speed_slot("SpeedModeSlot0", false),
+            speed_slot("SpeedModeSlot1", true),
+            speed_slot("SpeedModeSlot2", true),
+            one_shot("Specific"),
+            node("LocoBlender", "ArkAnimNodeLocomotion", loco, vec![link(0, 1.0), link(1, 0.0), link(2, 0.0), link(3, 0.0)]),
+            one_shot("Chan"),
+            node("FullBodySlot", "DisAnimNodeSlot", NodeProps::Slot { early_anim_end: true }, vec![link(4, 1.0), link(5, 0.0)]),
+            seq("Upper", "Upper"),
+            filter,
+            blink,
+            node("BlinkBlender", "ArkAnimNodeStack", NodeProps::Other, vec![link(8, 1.0), link(9, 0.0)]),
+            node("LookatBlender", "ArkAnimNodeLookAt", NodeProps::AimOffset { grids: vec!["Aim".into(); 18] }, Vec::new()),
+            additive,
+            seq("Fall", "Fall"),
+            node("PhysicsBlender", "AnimNodeBlendByPhysics", NodeProps::BlendByPhysics, vec![link(13, 1.0), link(12, 0.0)]),
+        ],
+        14,
+    )
+}
+
+/// Two modifiers (`Sword` with its own idle loop), an idle and a walk speed mode.
+fn state_loco_config() -> LocoConfig {
+    let mode = |name: &str, anims: &[(&str, f32)]| SpeedMode { name: name.into(), move_anims: anims.iter().map(|(a, s)| (a.to_string(), *s)).collect(), ..Default::default() };
+    let walk = [("WalkS", 100.0), ("WalkW", 100.0), ("WalkN", 100.0), ("WalkE", 100.0)];
+    LocoConfig {
+        modifiers: vec![LocoModifier { name: "Empty".into(), speed_multiplier: 1.0, ..Default::default() }, LocoModifier { name: "Sword".into(), speed_multiplier: 1.2, ..Default::default() }],
+        speed_names: vec!["Idle".into(), "Walk".into()],
+        modes: vec![mode("EmptyIdle", &[("Idle", 0.0)]), mode("Walk", &walk), mode("SwordIdle", &[("Idle2", 0.0)])],
+        table: vec![0, 1, 2, 1],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn state_round_trips_through_serde_and_resumes_identically() {
+    let clips = Stub::new()
+        .constant("Idle", 2.0, [Some(q(5.0)), Some(q(5.0)), None])
+        .constant("Idle2", 1.5, [Some(q(-5.0)), Some(q(8.0)), None])
+        .moving("WalkS", 100.0, 0.0)
+        .moving("WalkW", 100.0, 0.0)
+        .moving("WalkN", 100.0, 0.0)
+        .moving("WalkE", 80.0, 20.0)
+        .constant("Start", 0.3, [None, Some(q(30.0)), None])
+        .constant("Act", 0.5, [Some(q(60.0)), None, None])
+        .constant("Upper", 1.0, [None, Some(q(-20.0)), Some(q(15.0))])
+        .constant("Blink", 0.2, [None, None, Some(q(45.0))])
+        .constant("Aim", 1.0, [None, Some(q(1.0)), None])
+        .constant("AimH", 1.0, [None, Some(q(3.0)), Some(q(2.0))])
+        .constant("AimT", 1.0, [None, Some(q(-2.0)), None])
+        .constant("Fall", 1.0, [Some(q(-10.0)), None, None]);
+    let (bones, t, cfg) = (skeleton(), state_tree(), state_loco_config());
+    let mode = LookatMode { name: "EmptyIdle".into(), head_range: [60.0, -60.0, 30.0, -30.0], torso_range: [45.0, -45.0, 20.0, -20.0], head: vec!["AimH".into(); 9], torso: vec!["AimT".into(); 9], ..Default::default() };
+    let play = [SlotRequest { slot: "FullBodySlot".into(), action: SlotAction::Play { sequence: "Act".into(), rate: 1.0, blend_in: 0.1, blend_out: Some(0.1), looping: false, start: 0.0 } }];
+    let stop = [SlotRequest { slot: "FullBodySlot".into(), action: SlotAction::Stop { blend_out: 0.2 } }];
+    let filters = [FilterTarget { node: "UpperBodyFilter".into(), target: 1.0, time: 0.2 }];
+    // Per tick: a slot play (twice) and a stop, a filter target, the modifier switched with its
+    // crossfade, a specific anim asked then released, a turning and accelerating velocity, a
+    // moving aim, one blink asked besides the timer's.
+    let inputs = |k: usize| TreeInputs {
+        physics: Some(1),
+        slots: match k {
+            2 | 25 => &play[..],
+            18 => &stop[..],
+            _ => &[],
+        },
+        filters: if k == 3 { &filters[..] } else { &[] },
+        stacks: &[],
+        locomotion: Some(LocoInput { config: &cfg, modifier: if k < 6 { "Empty" } else { "Sword" }, velocity: (10.0 + 2.0 * k as f32, 30.0 + 3.0 * k as f32), specific: (2..6).contains(&k).then_some(("Start", 0.1)) }),
+        look: Some(LookInput { mode: &mode, head: [10.0 + k as f32, 5.0], torso: [5.0, -3.0], weight: 0.8 }),
+        blink: (k == 4).then_some(1.5),
+    };
+    let dt = 1.0 / 60.0;
+    let shape = Arc::new(TreeShape::new(&t, &bones, q(90.0)));
+    // The cooked state is the one `new` starts from.
+    assert_eq!(*AnimTreeInstance::new(&t, &bones).state(), shape.initial_state());
+    let mut a = AnimTreeInstance::from_shape(shape.clone());
+    a.set_blink_timer(Some(BlinkTimer::new([0.05, 0.15], [1.0, 2.0], 7)));
+    for k in 0..12 {
+        a.update(&clips, &inputs(k), dt);
+    }
+    let json = serde_json::to_string(a.state()).unwrap();
+    let restored: TreeState = serde_json::from_str(&json).unwrap();
+    assert_eq!(&restored, a.state());
+    // The look-at mode's grids, the requested modifier and the slot's sequence are in the state.
+    assert!(json.contains("AimH") && json.contains("Sword") && json.contains("Act"), "{json}");
+    let mut b = AnimTreeInstance::from_parts(shape.clone(), restored);
+    assert!(Arc::ptr_eq(a.shape(), b.shape()));
+    let mut moved = false;
+    for k in 12..40 {
+        let i = inputs(k);
+        a.update(&clips, &i, dt);
+        b.update(&clips, &i, dt);
+        assert_eq!(a.state(), b.state(), "tick {k}");
+        assert_eq!(a.pose(&clips), b.pose(&clips), "tick {k}");
+        assert_eq!(a.root_delta(), b.root_delta(), "tick {k}");
+        moved |= a.root_delta().0.length() > 0.0 && a.root_delta().1 != 0.0;
+    }
+    assert!(moved, "the locomotion loops extract root motion");
+    // A clone copies the state and shares the shape.
+    let c = b.clone();
+    assert!(Arc::ptr_eq(c.shape(), &shape));
+    assert_eq!(c.into_state(), *b.state());
 }

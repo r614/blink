@@ -1,6 +1,13 @@
 //! [`AnimTreeInstance`]: one skeletal mesh's state over a cooked AnimTree
 //! (`dishonored_ir::anim_tree::AnimTreeAsset`), its tick and its pose.
 //!
+//! The instance is a [`TreeShape`] and a [`TreeState`]. The shape is what the cooked tree, the
+//! skeleton and the mesh rotation fix (the graph, the tick order, each node's parameters, the
+//! reference pose, the sync groups), built once and shared through an `Arc`; the state is what a
+//! tick changes (weights and their blends, sequence players, slot channels, the locomotion and
+//! look-at nodes, the blink timer), `Clone` and serializable, so the simulation keeps one per
+//! pawn in its snapshots and rebuilds the instance with [`AnimTreeInstance::from_parts`].
+//!
 //! The tick follows UE3's `USkeletalMeshComponent::TickAnimNodes` over the tree's
 //! `AnimTickArray` (parents before children: a node is added when the last of its parents
 //! reaches it, then its own children follow; the order reproduces every cooked
@@ -55,6 +62,8 @@ use dishonored_ir::BoneAsset;
 use dishonored_ir::anim_tree::{AnimTreeAsset, NodeProps, RootBoneOption, RootRotationOption};
 use dishonored_ir::npc_anim::{LocoConfig, LookatMode};
 use glam::{Quat, Vec3};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// UE3 `ZERO_ANIMWEIGHT_THRESH`: weights at or below it are not relevant.
 pub const ZERO_WEIGHT: f32 = 0.00001;
@@ -67,27 +76,33 @@ const PHYSICS_BLEND: f32 = 0.1;
 const BLINK_NODE: &str = "BlinkBlender";
 
 /// One sequence player's state (`AnimNodeSequence`: `AnimSeqName`, `CurrentTime`, `Rate`,
-/// `bPlaying`, `bLooping`).
-#[derive(Clone, Debug)]
+/// `bPlaying`, `bLooping`, `bReverseSync`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SeqState {
     pub name: String,
     pub time: f32,
     pub rate: f32,
     pub playing: bool,
     pub looping: bool,
-    group: Option<usize>,
-    synchronize: bool,
+    /// `bReverseSync` (the locomotion node sets it from its loops' direction).
     reverse_sync: bool,
-    root_bone: [RootBoneOption; 3],
-    root_rotation: [RootRotationOption; 3],
-    keep_undefined: bool,
     /// This update's advance: (time before, signed move), for root motion.
     moved: Option<(f32, f32)>,
 }
 
+/// A sequence node's fixed options: its sync group (`SynchGroupName`), `bSynchronize`,
+/// `RootBoneOption` / `RootRotationOption` per axis, `m_bDontUseRefPoseOnNonDefinedBones`.
 #[derive(Clone, Debug)]
+struct SeqShape {
+    group: Option<usize>,
+    synchronize: bool,
+    root_bone: [RootBoneOption; 3],
+    root_rotation: [RootRotationOption; 3],
+    keep_undefined: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct LocoState {
-    params: LocoParams,
     /// The node's smoothed velocity (angle from facing in degrees, speed).
     vel: Option<(f32, f32)>,
     modifier: Option<String>,
@@ -97,9 +112,10 @@ struct LocoState {
     specific: Option<(String, f32, f32, bool)>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct LookState {
-    /// `Anims[].AnimName`: nine head, then nine torso cells.
+    /// `Anims[].AnimName`: nine head, then nine torso cells (the cooked grids until a look-at
+    /// mode names its own).
     names: Vec<String>,
     /// The cells' weights.
     cells: Vec<f32>,
@@ -107,26 +123,51 @@ struct LookState {
     weight: f32,
 }
 
+/// A node's class and its fixed parameters.
 #[derive(Clone, Debug)]
 enum Kind {
     Sequence,
-    Physics { last: Option<u8> },
+    Physics,
     List,
-    PerBone { mask: Vec<f32>, local_space: bool, target: f32, left: f32 },
+    PerBone { mask: Vec<f32>, local_space: bool },
     Additive,
-    Slot { active: usize, blend_out: Option<f32> },
+    Slot,
     Stack,
-    Locomotion(Box<LocoState>),
-    LookAt(Box<LookState>),
+    Locomotion(LocoParams),
+    LookAt,
     Pass,
 }
 
+/// The class-specific part of a node's state.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+enum KindState {
+    /// Sequences (their player is `NodeState::seq`), lists, additive blends, stacks and the
+    /// nodes passed through.
+    Plain,
+    Physics { last: Option<u8> },
+    /// `Child2WeightTarget` and the time left to reach it.
+    PerBone { target: f32, left: f32 },
+    Slot { active: usize, blend_out: Option<f32> },
+    Locomotion(Box<LocoState>),
+    LookAt(Box<LookState>),
+}
+
+/// A node's place in the graph and its fixed parameters.
 #[derive(Clone, Debug)]
-struct Node {
+struct NodeShape {
     name: String,
     kind: Kind,
     children: Vec<Option<usize>>,
     additive: Vec<bool>,
+    /// The cooked `TickArrayIndex`.
+    tick_index: Option<usize>,
+    seq: Option<SeqShape>,
+}
+
+/// What a tick changes on a node.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct NodeState {
+    kind: KindState,
     /// `Children[i].Weight` (for `AnimNodeBlendPerBone`: 1 and `Child2Weight`).
     weights: Vec<f32>,
     /// `TargetWeight` and `BlendTimeToGo` of lists and slots.
@@ -134,8 +175,6 @@ struct Node {
     left: f32,
     /// `NodeTotalWeight`.
     total: f32,
-    /// The cooked `TickArrayIndex`.
-    tick_index: Option<usize>,
     seq: Option<SeqState>,
 }
 
@@ -143,8 +182,6 @@ struct Node {
 struct Group {
     name: String,
     members: Vec<usize>,
-    /// `FAnimGroup::RateScale` (the locomotion node's `m_fMostRelevantRateScale`).
-    rate_scale: f32,
 }
 
 /// A slot request (`AnimNodeSlot::PlayCustomAnim` / `StopCustomAnim`).
@@ -227,10 +264,13 @@ pub struct TreeInputs<'a> {
     pub blink: Option<f32>,
 }
 
-/// One mesh's evaluation of an AnimTree.
+/// What the cooked tree, the skeleton and the mesh rotation fix: the graph and its tick order,
+/// each node's parameters (per-bone masks, sequence options and sync groups, the locomotion
+/// node's tunables), the skeleton's parents and reference pose, and the state the cooked values
+/// start from. Built once per tree and skeleton and shared by the meshes that use them.
 #[derive(Clone, Debug)]
-pub struct AnimTreeInstance {
-    nodes: Vec<Node>,
+pub struct TreeShape {
+    nodes: Vec<NodeShape>,
     root: Option<usize>,
     order: Vec<usize>,
     /// Parents of each node (unique), for the slots' end-of-anim handling.
@@ -239,52 +279,82 @@ pub struct AnimTreeInstance {
     bind: Pose,
     groups: Vec<Group>,
     mesh_rotation: Quat,
+    /// The look-at component's blink node (`BlinkBlender`).
+    blink_node: Option<usize>,
+    /// The cooked children weights, sequences, times and rates, filter targets and look-at
+    /// grids ([`Self::initial_state`]).
+    initial: TreeState,
+}
+
+/// What a tick changes: per node the children weights, their targets and blend time and
+/// `NodeTotalWeight`, the sequence players, the slots' active channels, the filters' targets,
+/// the physics node's last physics, the locomotion node's smoothed velocity and modifiers, the
+/// look-at cells; the sync groups' rate scales, the last root motion and the blink timer. It
+/// reads only against the [`TreeShape`] it was made from (`TreeShape::initial_state`, then the
+/// ticks of an instance of that shape).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TreeState {
+    nodes: Vec<NodeState>,
+    /// `FAnimGroup::RateScale` of each sync group (the locomotion node's
+    /// `m_fMostRelevantRateScale`).
+    group_rates: Vec<f32>,
     root_motion: (Vec3, f32),
     blink: Option<BlinkTimer>,
 }
 
-impl AnimTreeInstance {
-    /// Instantiate `tree` for a mesh with `skeleton`: per-node state from the cooked values
-    /// (children weights, sequences, times, rates), per-bone masks of the per-bone filters.
-    pub fn new(tree: &AnimTreeAsset, skeleton: &[BoneAsset]) -> Self {
-        let mut nodes: Vec<Node> = tree
-            .nodes
-            .iter()
-            .map(|n| {
-                let children: Vec<Option<usize>> = n.children.iter().map(|c| c.node).collect();
-                let additive = n.children.iter().map(|c| c.additive).collect();
-                let mut weights: Vec<f32> = n.children.iter().map(|c| c.weight).collect();
-                let mut seq = None;
-                let kind = match &n.props {
-                    NodeProps::Sequence { seq: name, rate, looping, playing, synchronize, reverse_sync, root_bone, root_rotation, keep_undefined, .. } => {
-                        let time = raw_f32(&n.raw, "CurrentTime").unwrap_or(0.0);
-                        seq = Some(SeqState { name: name.clone(), time, rate: *rate, playing: *playing, looping: *looping, group: None, synchronize: *synchronize, reverse_sync: *reverse_sync, root_bone: *root_bone, root_rotation: *root_rotation, keep_undefined: *keep_undefined, moved: None });
-                        Kind::Sequence
-                    }
-                    NodeProps::BlendByPhysics => Kind::Physics { last: None },
-                    NodeProps::BlendList => Kind::List,
-                    NodeProps::BlendPerBone { branches, local_space, exclude_branch } => {
-                        // `Child2Weight` / `Child2WeightTarget` as cooked (`UpperBodyFilter` 1,
-                        // `FaceFilter` the class default 0); the source's weight is 1.
-                        let child2 = raw_f32(&n.raw, "Child2Weight").unwrap_or(0.0);
-                        let target = raw_f32(&n.raw, "Child2WeightTarget").unwrap_or(child2);
-                        weights = vec![1.0, child2];
-                        Kind::PerBone { mask: pose::branch_weights(skeleton, branches, *exclude_branch), local_space: *local_space, target, left: 0.0 }
-                    }
-                    NodeProps::AdditiveBlending => Kind::Additive,
-                    NodeProps::Slot { .. } => Kind::Slot { active: 0, blend_out: None },
-                    NodeProps::Locomotion { rate, range, min_ratio, modifier_blend } => {
-                        Kind::Locomotion(Box::new(LocoState { params: LocoParams { rate: *rate, range: *range, min_ratio: *min_ratio, modifier_blend: *modifier_blend }, vel: None, modifier: None, prev: None, specific: None }))
-                    }
-                    NodeProps::AimOffset { grids } => Kind::LookAt(Box::new(LookState { names: grids.clone(), cells: vec![0.0; grids.len()], weight: 0.0 })),
-                    NodeProps::Other if n.class == "ArkAnimNodeStack" => Kind::Stack,
-                    NodeProps::Other if n.class == "ArkAnimNodeBlendPose" => Kind::List,
-                    _ => Kind::Pass,
-                };
-                let target = weights.clone();
-                Node { name: n.name.clone(), kind, children, additive, weights, target, left: 0.0, total: 0.0, tick_index: raw_usize(&n.raw, "TickArrayIndex"), seq }
-            })
-            .collect();
+/// One mesh's evaluation of an AnimTree: the shared [`TreeShape`] and the mesh's
+/// [`TreeState`].
+#[derive(Clone, Debug)]
+pub struct AnimTreeInstance {
+    shape: Arc<TreeShape>,
+    state: TreeState,
+}
+
+impl TreeShape {
+    /// The shape of `tree` for a mesh with `skeleton` and the mesh's `RotOrigin` rotation (mesh
+    /// space -> the pawn's frame, for [`AnimTreeInstance::root_delta`]): per-bone masks of the
+    /// per-bone filters, the sequences' options and sync groups, the tick order, and the state
+    /// from the cooked values (children weights, sequences, times, rates).
+    pub fn new(tree: &AnimTreeAsset, skeleton: &[BoneAsset], mesh_rotation: Quat) -> Self {
+        let mut nodes: Vec<NodeShape> = Vec::with_capacity(tree.nodes.len());
+        let mut states: Vec<NodeState> = Vec::with_capacity(tree.nodes.len());
+        for n in &tree.nodes {
+            let children: Vec<Option<usize>> = n.children.iter().map(|c| c.node).collect();
+            let additive = n.children.iter().map(|c| c.additive).collect();
+            let mut weights: Vec<f32> = n.children.iter().map(|c| c.weight).collect();
+            let (mut seq, mut seq_state) = (None, None);
+            let (kind, kind_state) = match &n.props {
+                NodeProps::Sequence { seq: name, rate, looping, playing, synchronize, reverse_sync, root_bone, root_rotation, keep_undefined, .. } => {
+                    let time = raw_f32(&n.raw, "CurrentTime").unwrap_or(0.0);
+                    seq = Some(SeqShape { group: None, synchronize: *synchronize, root_bone: *root_bone, root_rotation: *root_rotation, keep_undefined: *keep_undefined });
+                    seq_state = Some(SeqState { name: name.clone(), time, rate: *rate, playing: *playing, looping: *looping, reverse_sync: *reverse_sync, moved: None });
+                    (Kind::Sequence, KindState::Plain)
+                }
+                NodeProps::BlendByPhysics => (Kind::Physics, KindState::Physics { last: None }),
+                NodeProps::BlendList => (Kind::List, KindState::Plain),
+                NodeProps::BlendPerBone { branches, local_space, exclude_branch } => {
+                    // `Child2Weight` / `Child2WeightTarget` as cooked (`UpperBodyFilter` 1,
+                    // `FaceFilter` the class default 0); the source's weight is 1.
+                    let child2 = raw_f32(&n.raw, "Child2Weight").unwrap_or(0.0);
+                    let target = raw_f32(&n.raw, "Child2WeightTarget").unwrap_or(child2);
+                    weights = vec![1.0, child2];
+                    (Kind::PerBone { mask: pose::branch_weights(skeleton, branches, *exclude_branch), local_space: *local_space }, KindState::PerBone { target, left: 0.0 })
+                }
+                NodeProps::AdditiveBlending => (Kind::Additive, KindState::Plain),
+                NodeProps::Slot { .. } => (Kind::Slot, KindState::Slot { active: 0, blend_out: None }),
+                NodeProps::Locomotion { rate, range, min_ratio, modifier_blend } => (
+                    Kind::Locomotion(LocoParams { rate: *rate, range: *range, min_ratio: *min_ratio, modifier_blend: *modifier_blend }),
+                    KindState::Locomotion(Box::new(LocoState { vel: None, modifier: None, prev: None, specific: None })),
+                ),
+                NodeProps::AimOffset { grids } => (Kind::LookAt, KindState::LookAt(Box::new(LookState { names: grids.clone(), cells: vec![0.0; grids.len()], weight: 0.0 }))),
+                NodeProps::Other if n.class == "ArkAnimNodeStack" => (Kind::Stack, KindState::Plain),
+                NodeProps::Other if n.class == "ArkAnimNodeBlendPose" => (Kind::List, KindState::Plain),
+                _ => (Kind::Pass, KindState::Plain),
+            };
+            let target = weights.clone();
+            nodes.push(NodeShape { name: n.name.clone(), kind, children, additive, tick_index: raw_usize(&n.raw, "TickArrayIndex"), seq });
+            states.push(NodeState { kind: kind_state, weights, target, left: 0.0, total: 0.0, seq: seq_state });
+        }
         // Sync groups by name, in name order (deterministic).
         let mut names: Vec<String> = tree.nodes.iter().filter_map(|n| match &n.props {
             NodeProps::Sequence { sync_group, .. } if !sync_group.is_empty() && sync_group != "None" => Some(sync_group.clone()),
@@ -292,7 +362,7 @@ impl AnimTreeInstance {
         }).collect();
         names.sort();
         names.dedup();
-        let mut groups: Vec<Group> = names.into_iter().map(|name| Group { name, members: Vec::new(), rate_scale: 1.0 }).collect();
+        let mut groups: Vec<Group> = names.into_iter().map(|name| Group { name, members: Vec::new() }).collect();
         for (i, n) in tree.nodes.iter().enumerate() {
             if let NodeProps::Sequence { sync_group, .. } = &n.props {
                 if let Some(g) = groups.iter().position(|g| &g.name == sync_group) {
@@ -312,18 +382,14 @@ impl AnimTreeInstance {
             }
         }
         let order = tick_order(&nodes, &node_parents, tree.root);
-        AnimTreeInstance { nodes, root: tree.root, order, node_parents, bones: pose::parents(skeleton), bind: pose::bind_pose(skeleton), groups, mesh_rotation: Quat::IDENTITY, root_motion: (Vec3::ZERO, 0.0), blink: None }
+        let blink_node = nodes.iter().position(|n| n.name.eq_ignore_ascii_case(BLINK_NODE));
+        let initial = TreeState { nodes: states, group_rates: vec![1.0; groups.len()], root_motion: (Vec3::ZERO, 0.0), blink: None };
+        TreeShape { nodes, root: tree.root, order, node_parents, bones: pose::parents(skeleton), bind: pose::bind_pose(skeleton), groups, mesh_rotation, blink_node, initial }
     }
 
-    /// The mesh's `RotOrigin` rotation (mesh space -> the pawn's frame), for [`Self::root_delta`].
-    pub fn with_mesh_rotation(mut self, rotation: Quat) -> Self {
-        self.mesh_rotation = rotation;
-        self
-    }
-
-    /// Let the instance roll its own blinks (the look-at component's timer; `lookat::BlinkTimer`).
-    pub fn set_blink_timer(&mut self, timer: Option<BlinkTimer>) {
-        self.blink = timer;
+    /// The state [`AnimTreeInstance::new`] starts from: the cooked values, no blink timer.
+    pub fn initial_state(&self) -> TreeState {
+        self.initial.clone()
     }
 
     /// The node named `name` (`NodeName`, else the export's name).
@@ -347,28 +413,102 @@ impl AnimTreeInstance {
         &self.order
     }
 
+    /// The mesh's `RotOrigin` rotation (mesh space -> the pawn's frame).
+    pub fn mesh_rotation(&self) -> Quat {
+        self.mesh_rotation
+    }
+}
+
+impl AnimTreeInstance {
+    /// Instantiate `tree` for a mesh with `skeleton`: per-node state from the cooked values
+    /// (children weights, sequences, times, rates), per-bone masks of the per-bone filters.
+    pub fn new(tree: &AnimTreeAsset, skeleton: &[BoneAsset]) -> Self {
+        Self::from_shape(Arc::new(TreeShape::new(tree, skeleton, Quat::IDENTITY)))
+    }
+
+    /// An instance of a shared shape, from its cooked state.
+    pub fn from_shape(shape: Arc<TreeShape>) -> Self {
+        let state = shape.initial_state();
+        AnimTreeInstance { shape, state }
+    }
+
+    /// An instance of a shared shape resumed from a state of that shape (a snapshot's). Panics
+    /// when the state's nodes or sync groups are not the shape's.
+    pub fn from_parts(shape: Arc<TreeShape>, state: TreeState) -> Self {
+        assert!(state.nodes.len() == shape.nodes.len() && state.group_rates.len() == shape.groups.len(), "TreeState of another TreeShape ({} nodes, {} groups; the shape has {}, {})", state.nodes.len(), state.group_rates.len(), shape.nodes.len(), shape.groups.len());
+        AnimTreeInstance { shape, state }
+    }
+
+    /// The mesh's `RotOrigin` rotation (mesh space -> the pawn's frame), for [`Self::root_delta`].
+    pub fn with_mesh_rotation(mut self, rotation: Quat) -> Self {
+        Arc::make_mut(&mut self.shape).mesh_rotation = rotation;
+        self
+    }
+
+    /// The shared shape.
+    pub fn shape(&self) -> &Arc<TreeShape> {
+        &self.shape
+    }
+
+    /// The per-mesh state.
+    pub fn state(&self) -> &TreeState {
+        &self.state
+    }
+
+    /// The per-mesh state, the shape dropped.
+    pub fn into_state(self) -> TreeState {
+        self.state
+    }
+
+    /// Let the instance roll its own blinks (the look-at component's timer; `lookat::BlinkTimer`).
+    pub fn set_blink_timer(&mut self, timer: Option<BlinkTimer>) {
+        self.state.blink = timer;
+    }
+
+    /// The node named `name` (`NodeName`, else the export's name).
+    pub fn node_index(&self, name: &str) -> Option<usize> {
+        self.shape.node_index(name)
+    }
+
+    /// The node at a cooked `TickArrayIndex` (the oracle capture's node numbering; 0 is the tree
+    /// object itself, which has no node here).
+    pub fn node_at_tick_index(&self, index: usize) -> Option<usize> {
+        self.shape.node_at_tick_index(index)
+    }
+
+    /// The cooked `TickArrayIndex` of a node.
+    pub fn tick_index(&self, node: usize) -> Option<usize> {
+        self.shape.tick_index(node)
+    }
+
+    /// Nodes in tick order (parents before children), the root first.
+    pub fn tick_order(&self) -> &[usize] {
+        self.shape.tick_order()
+    }
+
     /// A node's children weights (for the look-at node, its cell weights).
     pub fn children_weights(&self, node: usize) -> Vec<f32> {
-        match &self.nodes[node].kind {
-            Kind::LookAt(l) => l.cells.clone(),
-            _ => self.nodes[node].weights.clone(),
+        let n = &self.state.nodes[node];
+        match &n.kind {
+            KindState::LookAt(l) => l.cells.clone(),
+            _ => n.weights.clone(),
         }
     }
 
     /// A node's `NodeTotalWeight` after the last update.
     pub fn total_weight(&self, node: usize) -> f32 {
-        self.nodes[node].total
+        self.state.nodes[node].total
     }
 
     /// A sequence node's state.
     pub fn sequence(&self, node: usize) -> Option<&SeqState> {
-        self.nodes.get(node).and_then(|n| n.seq.as_ref())
+        self.state.nodes.get(node).and_then(|n| n.seq.as_ref())
     }
 
     /// Replay: a sequence node's state as a capture records it (`NodeTotalWeight`,
     /// `AnimSeqName`, `CurrentTime`, `Rate`). On another node only the weight is set.
     pub fn set_node_state(&mut self, node: usize, weight: f32, sequence: &str, time: f32, rate: f32) {
-        let n = &mut self.nodes[node];
+        let n = &mut self.state.nodes[node];
         n.total = weight;
         if let Some(s) = n.seq.as_mut() {
             if s.name != sequence {
@@ -382,15 +522,15 @@ impl AnimTreeInstance {
     /// Replay: a blend node's children weights as a capture records them (`Children[i].Weight`;
     /// for the look-at node, its cell weights at full look-at weight).
     pub fn set_children_weights(&mut self, node: usize, weights: &[f32]) {
-        let n = &mut self.nodes[node];
+        let n = &mut self.state.nodes[node];
         match &mut n.kind {
-            Kind::LookAt(l) => {
+            KindState::LookAt(l) => {
                 for (c, w) in l.cells.iter_mut().zip(weights) {
                     *c = *w;
                 }
                 l.weight = 1.0;
             }
-            Kind::PerBone { target, left, .. } => {
+            KindState::PerBone { target, left } => {
                 for (c, w) in n.weights.iter_mut().zip(weights) {
                     *c = *w;
                 }
@@ -412,7 +552,7 @@ impl AnimTreeInstance {
     /// axes, `RRO_Extract`), weighted by their `NodeTotalWeight`; sampled from the clip's root
     /// track as `dishonored_assets::fatality::load_root_motion` samples the paired moves.
     pub fn root_delta(&self) -> (Vec3, f32) {
-        self.root_motion
+        self.state.root_motion
     }
 
     /// Advance one tick of `dt` seconds. The nodes tick first, reading the continuous inputs
@@ -422,6 +562,17 @@ impl AnimTreeInstance {
     /// (the capture's second blink reads 0 on its first tick: CONFIRMED for the look-at
     /// component's blink, the same order assumed for the other requesters, LIKELY).
     pub fn update(&mut self, clips: &dyn Clips, inputs: &TreeInputs, dt: f32) {
+        self.state.update(&self.shape, clips, inputs, dt);
+    }
+
+    /// The local pose of every skeleton bone (the reference pose where nothing drives a bone).
+    pub fn pose(&self, clips: &dyn Clips) -> Pose {
+        self.state.pose(&self.shape, clips)
+    }
+}
+
+impl TreeState {
+    fn update(&mut self, shape: &TreeShape, clips: &dyn Clips, inputs: &TreeInputs, dt: f32) {
         self.root_motion = (Vec3::ZERO, 0.0);
         for n in self.nodes.iter_mut() {
             if let Some(s) = n.seq.as_mut() {
@@ -431,48 +582,48 @@ impl AnimTreeInstance {
         for n in self.nodes.iter_mut() {
             n.total = 0.0;
         }
-        if let Some(r) = self.root {
+        if let Some(r) = shape.root {
             self.nodes[r].total = 1.0;
         }
-        for k in 0..self.order.len() {
-            let i = self.order[k];
+        for &i in &shape.order {
             if self.nodes[i].total > ZERO_WEIGHT {
-                self.tick_node(i, clips, inputs, dt);
+                self.tick_node(shape, i, clips, inputs, dt);
             }
             let total = self.nodes[i].total;
-            let links: Vec<(usize, f32)> = self.nodes[i].children.iter().zip(&self.nodes[i].weights).filter_map(|(c, w)| c.map(|c| (c, *w))).collect();
-            for (c, w) in links {
+            let children = &shape.nodes[i].children;
+            for k in 0..children.len().min(self.nodes[i].weights.len()) {
+                let Some(c) = children[k] else { continue };
+                let w = self.nodes[i].weights[k];
                 let t = &mut self.nodes[c].total;
                 *t = (*t + total * w).min(1.0);
             }
         }
-        self.tick_groups(clips, dt);
-        self.collect_root_motion(clips);
-        self.apply_requests(inputs);
-        let blinking = self.node_index(BLINK_NODE).and_then(|b| self.nodes[b].children.get(1).copied().flatten()).and_then(|c| self.nodes[c].seq.as_ref()).is_some_and(|s| s.playing);
+        self.tick_groups(shape, clips, dt);
+        self.collect_root_motion(shape, clips);
+        self.apply_requests(shape, inputs);
+        let blinking = shape.blink_node.and_then(|b| shape.nodes[b].children.get(1).copied().flatten()).and_then(|c| self.nodes[c].seq.as_ref()).is_some_and(|s| s.playing);
         let rolled = self.blink.as_mut().and_then(|t| t.tick(dt, blinking));
         if let Some(rate) = inputs.blink.or(rolled) {
-            self.start_blink(rate);
+            self.start_blink(shape, rate);
         }
     }
 
-    /// The local pose of every skeleton bone (the reference pose where nothing drives a bone).
-    pub fn pose(&self, clips: &dyn Clips) -> Pose {
-        match self.root {
-            Some(r) => self.eval(r, clips, Fill::Bind),
-            None => self.bind.clone(),
+    fn pose(&self, shape: &TreeShape, clips: &dyn Clips) -> Pose {
+        match shape.root {
+            Some(r) => self.eval(shape, r, clips, Fill::Bind),
+            None => shape.bind.clone(),
         }
     }
 
     // ---- requests ----
 
-    fn apply_requests(&mut self, inputs: &TreeInputs) {
+    fn apply_requests(&mut self, shape: &TreeShape, inputs: &TreeInputs) {
         for r in inputs.slots {
-            let Some(i) = self.nodes.iter().position(|n| matches!(n.kind, Kind::Slot { .. }) && n.name.eq_ignore_ascii_case(&r.slot)) else { continue };
+            let Some(i) = shape.nodes.iter().position(|n| matches!(n.kind, Kind::Slot) && n.name.eq_ignore_ascii_case(&r.slot)) else { continue };
             match &r.action {
                 SlotAction::Play { sequence, rate, blend_in, blend_out, looping, start } => {
-                    let channel = self.free_channel(i);
-                    let Some(c) = channel.and_then(|ch| self.nodes[i].children[ch]) else { continue };
+                    let channel = self.free_channel(shape, i);
+                    let Some(c) = channel.and_then(|ch| shape.nodes[i].children[ch]) else { continue };
                     if let Some(s) = self.nodes[c].seq.as_mut() {
                         s.name = sequence.clone();
                         s.time = *start;
@@ -482,23 +633,23 @@ impl AnimTreeInstance {
                     }
                     let ch = channel.unwrap_or(0);
                     self.set_active(i, ch, *blend_in);
-                    if let Kind::Slot { active, blend_out: bo } = &mut self.nodes[i].kind {
+                    if let KindState::Slot { active, blend_out: bo } = &mut self.nodes[i].kind {
                         *active = ch;
                         *bo = *blend_out;
                     }
                 }
                 SlotAction::Stop { blend_out } => {
                     self.set_active(i, 0, *blend_out);
-                    if let Kind::Slot { active, .. } = &mut self.nodes[i].kind {
+                    if let KindState::Slot { active, .. } = &mut self.nodes[i].kind {
                         *active = 0;
                     }
                 }
             }
         }
         for f in inputs.filters {
-            let Some(i) = self.node_index(&f.node) else { continue };
+            let Some(i) = shape.node_index(&f.node) else { continue };
             let n = &mut self.nodes[i];
-            if let Kind::PerBone { target, left, .. } = &mut n.kind {
+            if let KindState::PerBone { target, left } = &mut n.kind {
                 *target = f.target;
                 *left = f.time.max(0.0);
                 if f.time <= 0.0 && n.weights.len() > 1 {
@@ -507,9 +658,9 @@ impl AnimTreeInstance {
             }
         }
         for s in inputs.stacks {
-            let Some(i) = self.nodes.iter().position(|n| matches!(n.kind, Kind::Stack) && n.name.eq_ignore_ascii_case(&s.stack)) else { continue };
+            let Some(i) = shape.nodes.iter().position(|n| matches!(n.kind, Kind::Stack) && n.name.eq_ignore_ascii_case(&s.stack)) else { continue };
             let k = s.channel + 1;
-            let Some(c) = self.nodes[i].children.get(k).copied().flatten() else { continue };
+            let Some(c) = shape.nodes[i].children.get(k).copied().flatten() else { continue };
             if let Some(q) = self.nodes[c].seq.as_mut() {
                 q.name = s.sequence.clone();
                 q.time = s.time;
@@ -521,15 +672,15 @@ impl AnimTreeInstance {
 
     /// `FindBestChildToPlayAnim`: the least weighted channel other than the active one, the
     /// first unused one at once (stock UE3, LIKELY).
-    fn free_channel(&self, slot: usize) -> Option<usize> {
-        let n = &self.nodes[slot];
+    fn free_channel(&self, shape: &TreeShape, slot: usize) -> Option<usize> {
+        let (children, n) = (&shape.nodes[slot].children, &self.nodes[slot]);
         let active = match n.kind {
-            Kind::Slot { active, .. } => active,
+            KindState::Slot { active, .. } => active,
             _ => 0,
         };
         let mut best: Option<(usize, f32)> = None;
-        for c in 1..n.children.len() {
-            if c == active || n.children[c].is_none() {
+        for c in 1..children.len() {
+            if c == active || children[c].is_none() {
                 continue;
             }
             let w = n.weights[c];
@@ -556,9 +707,9 @@ impl AnimTreeInstance {
         }
     }
 
-    fn start_blink(&mut self, rate: f32) {
-        let Some(b) = self.node_index(BLINK_NODE) else { return };
-        let Some(c) = self.nodes[b].children.get(1).copied().flatten() else { return };
+    fn start_blink(&mut self, shape: &TreeShape, rate: f32) {
+        let Some(b) = shape.blink_node else { return };
+        let Some(c) = shape.nodes[b].children.get(1).copied().flatten() else { return };
         // 0x00956660: the channel at full weight; the sequence restarts at the rolled rate.
         self.nodes[b].weights[1] = 1.0;
         if let Some(s) = self.nodes[c].seq.as_mut() {
@@ -571,48 +722,32 @@ impl AnimTreeInstance {
 
     // ---- tick ----
 
-    fn tick_node(&mut self, i: usize, clips: &dyn Clips, inputs: &TreeInputs, dt: f32) {
-        enum Tick {
-            Sequence,
-            Physics(Option<u8>),
-            List,
-            PerBone,
-            Slot,
-            Locomotion,
-            LookAt,
-            None,
-        }
-        let tick = match &self.nodes[i].kind {
-            Kind::Sequence => Tick::Sequence,
-            Kind::Physics { last } => Tick::Physics(*last),
-            Kind::List => Tick::List,
-            Kind::PerBone { .. } => Tick::PerBone,
-            Kind::Slot { .. } => Tick::Slot,
-            Kind::Locomotion(_) => Tick::Locomotion,
-            Kind::LookAt(_) => Tick::LookAt,
-            Kind::Additive | Kind::Stack | Kind::Pass => Tick::None,
-        };
-        match tick {
-            Tick::Sequence => {
-                let s = self.nodes[i].seq.as_ref();
-                if let Some(rate) = s.filter(|s| s.group.is_none()).map(|s| s.rate) {
-                    self.advance(i, rate * dt, clips);
+    fn tick_node(&mut self, shape: &TreeShape, i: usize, clips: &dyn Clips, inputs: &TreeInputs, dt: f32) {
+        match &shape.nodes[i].kind {
+            Kind::Sequence => {
+                let ungrouped = shape.nodes[i].seq.as_ref().is_some_and(|o| o.group.is_none());
+                if let Some(rate) = self.nodes[i].seq.as_ref().filter(|_| ungrouped).map(|s| s.rate) {
+                    self.advance(shape, i, rate * dt, clips);
                 }
             }
-            Tick::Physics(last) => {
+            Kind::Physics => {
+                let last = match self.nodes[i].kind {
+                    KindState::Physics { last } => last,
+                    _ => None,
+                };
                 if let Some(p) = inputs.physics.filter(|p| Some(*p) != last) {
-                    if (p as usize) < self.nodes[i].children.len() {
+                    if (p as usize) < shape.nodes[i].children.len() {
                         self.set_active(i, p as usize, PHYSICS_BLEND);
                     }
-                    self.nodes[i].kind = Kind::Physics { last: Some(p) };
+                    self.nodes[i].kind = KindState::Physics { last: Some(p) };
                 }
                 blend_weights(&mut self.nodes[i], dt);
             }
-            Tick::List => blend_weights(&mut self.nodes[i], dt),
-            Tick::PerBone => {
+            Kind::List => blend_weights(&mut self.nodes[i], dt),
+            Kind::PerBone { .. } => {
                 // `AnimNodeBlend::TickAnim`: `Child2Weight` moves linearly to its target.
                 let n = &mut self.nodes[i];
-                if let Kind::PerBone { target, left, .. } = &mut n.kind {
+                if let KindState::PerBone { target, left } = &mut n.kind {
                     if n.weights.len() > 1 && n.weights[1] != *target {
                         if *left < dt {
                             n.weights[1] = *target;
@@ -624,17 +759,17 @@ impl AnimTreeInstance {
                     }
                 }
             }
-            Tick::Slot => {
-                self.early_blend_out(i, clips);
+            Kind::Slot => {
+                self.early_blend_out(shape, i, clips);
                 blend_weights(&mut self.nodes[i], dt);
             }
-            Tick::Locomotion => {
+            Kind::Locomotion(params) => {
                 if let Some(input) = &inputs.locomotion {
-                    self.tick_locomotion(i, clips, input, dt);
+                    self.tick_locomotion(shape, i, params, clips, input, dt);
                 }
             }
-            Tick::LookAt => {
-                if let (Some(look), Kind::LookAt(l)) = (&inputs.look, &mut self.nodes[i].kind) {
+            Kind::LookAt => {
+                if let (Some(look), KindState::LookAt(l)) = (&inputs.look, &mut self.nodes[i].kind) {
                     // The mode's grids replace the cooked ones when it names them.
                     if look.mode.head.len() == 9 && look.mode.torso.len() == 9 && l.names.len() == 18 {
                         l.names[..9].clone_from_slice(&look.mode.head);
@@ -644,19 +779,19 @@ impl AnimTreeInstance {
                     l.weight = look.weight;
                 }
             }
-            Tick::None => {}
+            Kind::Additive | Kind::Stack | Kind::Pass => {}
         }
     }
 
     /// A slot's active channel blends back to the source so that the blend ends with the
     /// sequence: when the time left is within the pending blend-out time (`AnimNodeSlot::
     /// TickAnim`, with `bEarlyAnimEndNotify` the end notification fires then; stock UE3, LIKELY).
-    fn early_blend_out(&mut self, i: usize, clips: &dyn Clips) {
-        let Kind::Slot { active, blend_out: Some(bo) } = self.nodes[i].kind else { return };
+    fn early_blend_out(&mut self, shape: &TreeShape, i: usize, clips: &dyn Clips) {
+        let KindState::Slot { active, blend_out: Some(bo) } = self.nodes[i].kind else { return };
         if active == 0 {
             return;
         }
-        let Some(c) = self.nodes[i].children.get(active).copied().flatten() else { return };
+        let Some(c) = shape.nodes[i].children.get(active).copied().flatten() else { return };
         let Some(s) = self.nodes[c].seq.as_ref() else { return };
         if s.looping || !s.playing || s.rate == 0.0 {
             return;
@@ -665,14 +800,14 @@ impl AnimTreeInstance {
         let left = if s.rate > 0.0 { (len - s.time) / s.rate } else { s.time / -s.rate };
         if left <= bo {
             self.set_active(i, 0, left.max(0.0));
-            self.nodes[i].kind = Kind::Slot { active: 0, blend_out: Some(bo) };
+            self.nodes[i].kind = KindState::Slot { active: 0, blend_out: Some(bo) };
         }
     }
 
     /// `AnimNodeSequence::AdvanceBy`: loops wrap; a non-looping sequence stops at its end, and a
     /// slot playing it as its active channel blends back to its source (`OnChildAnimEnd` ->
     /// `StopCustomAnim(PendingBlendOutTime)`; held with no blend-out time).
-    fn advance(&mut self, i: usize, delta: f32, clips: &dyn Clips) {
+    fn advance(&mut self, shape: &TreeShape, i: usize, delta: f32, clips: &dyn Clips) {
         let Some(s) = self.nodes[i].seq.as_ref() else { return };
         if !s.playing || delta == 0.0 {
             return;
@@ -694,12 +829,12 @@ impl AnimTreeInstance {
         s.time = t;
         s.moved = Some((from, if s.looping { delta } else { t - from }));
         if ended {
-            for p in self.node_parents[i].clone() {
-                if let Kind::Slot { active, blend_out } = self.nodes[p].kind {
-                    if active != 0 && self.nodes[p].children.get(active).copied().flatten() == Some(i) {
+            for &p in &shape.node_parents[i] {
+                if let KindState::Slot { active, blend_out } = self.nodes[p].kind {
+                    if active != 0 && shape.nodes[p].children.get(active).copied().flatten() == Some(i) {
                         if let Some(bo) = blend_out {
                             self.set_active(p, 0, bo);
-                            self.nodes[p].kind = Kind::Slot { active: 0, blend_out };
+                            self.nodes[p].kind = KindState::Slot { active: 0, blend_out };
                         }
                     }
                 }
@@ -707,30 +842,31 @@ impl AnimTreeInstance {
         }
     }
 
-    fn tick_groups(&mut self, clips: &dyn Clips, dt: f32) {
-        for g in 0..self.groups.len() {
-            let members = self.groups[g].members.clone();
-            let scale = self.groups[g].rate_scale;
+    fn tick_groups(&mut self, shape: &TreeShape, clips: &dyn Clips, dt: f32) {
+        let synchronized = |m: usize| shape.nodes[m].seq.as_ref().is_some_and(|o| o.synchronize);
+        for (g, group) in shape.groups.iter().enumerate() {
+            let members = &group.members;
+            let scale = self.group_rates[g];
             let relevant = |me: &Self, m: usize| me.nodes[m].total > ZERO_WEIGHT && me.nodes[m].seq.as_ref().is_some_and(|s| s.playing && clips.find(&s.name).is_some());
             let mut master: Option<usize> = None;
-            for &m in &members {
+            for &m in members {
                 if !relevant(self, m) {
                     continue;
                 }
                 let s = self.nodes[m].seq.as_ref().unwrap();
-                if !s.synchronize {
+                if !synchronized(m) {
                     let rate = s.rate;
-                    self.advance(m, rate * scale * dt, clips);
+                    self.advance(shape, m, rate * scale * dt, clips);
                 } else if master.is_none_or(|x| self.nodes[m].total > self.nodes[x].total) {
                     master = Some(m);
                 }
             }
             let Some(master) = master else { continue };
             let rate = self.nodes[master].seq.as_ref().map_or(0.0, |s| s.rate);
-            self.advance(master, rate * scale * dt, clips);
+            self.advance(shape, master, rate * scale * dt, clips);
             let Some(pos) = self.group_position(master, clips) else { continue };
-            for &m in &members {
-                if m == master || !relevant(self, m) || !self.nodes[m].seq.as_ref().is_some_and(|s| s.synchronize) {
+            for &m in members {
+                if m == master || !relevant(self, m) || !synchronized(m) {
                     continue;
                 }
                 let s = self.nodes[m].seq.as_ref().unwrap();
@@ -772,12 +908,12 @@ impl AnimTreeInstance {
     /// `SpeedModeSlot` children is not decoded (U-973): the idle loop takes the cooked
     /// unsynchronized slot 0, the moving loops the synchronized slots after it, each with its
     /// rate sign and `bReverseSync` set from the loop's direction.
-    fn tick_locomotion(&mut self, i: usize, clips: &dyn Clips, input: &LocoInput, dt: f32) {
-        let Kind::Locomotion(st) = &self.nodes[i].kind else { return };
+    fn tick_locomotion(&mut self, shape: &TreeShape, i: usize, params: &LocoParams, clips: &dyn Clips, input: &LocoInput, dt: f32) {
+        let KindState::Locomotion(st) = &self.nodes[i].kind else { return };
         let mut st = st.as_ref().clone();
         let cfg = input.config;
         st.vel = Some(match st.vel {
-            Some(v) => locomotion::smooth_velocity(v, input.velocity, dt, &st.params),
+            Some(v) => locomotion::smooth_velocity(v, input.velocity, dt, params),
             None => input.velocity,
         });
         let vel = st.vel.unwrap_or_default();
@@ -798,17 +934,18 @@ impl AnimTreeInstance {
                     (e, w2)
                 }));
             }
-            let w = w - dt / st.params.modifier_blend.max(0.01);
+            let w = w - dt / params.modifier_blend.max(0.01);
             st.prev = (w > 0.0).then_some((pm, w));
         }
         let lengths: Vec<Option<f32>> = main.iter().map(|e| clips.find(&e.name).map(|r| r.clip.duration)).collect();
         let multiplier = cfg.modifiers.get(mi).map_or(1.0, |m| m.speed_multiplier);
         let rate_scale = locomotion::group_rate(&main, &lengths, speed, multiplier);
         // The "Specific anim" child (the last one).
-        let specific_child = self.nodes[i].children.len().saturating_sub(1);
+        let children = &shape.nodes[i].children;
+        let specific_child = children.len().saturating_sub(1);
         match (input.specific, st.specific.take()) {
             (Some((name, blend)), cur) if cur.as_ref().is_none_or(|c| c.0 != name || c.3) => {
-                if let Some(c) = self.nodes[i].children.get(specific_child).copied().flatten() {
+                if let Some(c) = children.get(specific_child).copied().flatten() {
                     if let Some(s) = self.nodes[c].seq.as_mut() {
                         s.name = name.to_string();
                         s.time = 0.0;
@@ -825,7 +962,7 @@ impl AnimTreeInstance {
         }
         let mut w_specific = 0.0;
         if let Some((name, w, blend, fading)) = st.specific.take() {
-            let ended = self.nodes[i].children.get(specific_child).copied().flatten().and_then(|c| self.nodes[c].seq.as_ref()).is_some_and(|s| !s.playing);
+            let ended = children.get(specific_child).copied().flatten().and_then(|c| self.nodes[c].seq.as_ref()).is_some_and(|s| !s.playing);
             let fading = fading || ended;
             let step = if blend > 0.0 { dt / blend } else { 1.0 };
             let w = if fading { w - step } else { (w + step).min(1.0) };
@@ -835,7 +972,7 @@ impl AnimTreeInstance {
             }
         }
         let n_slots = specific_child;
-        let mut weights = vec![0.0; self.nodes[i].children.len()];
+        let mut weights = vec![0.0; children.len()];
         let (mut idle_used, mut next) = (false, 1);
         for (e, w) in entries {
             let slot = if e.single && !idle_used && n_slots > 0 {
@@ -848,7 +985,7 @@ impl AnimTreeInstance {
                 continue;
             };
             weights[slot] = w * (1.0 - w_specific);
-            if let Some(c) = self.nodes[i].children.get(slot).copied().flatten() {
+            if let Some(c) = children.get(slot).copied().flatten() {
                 if let Some(s) = self.nodes[c].seq.as_mut() {
                     if !s.name.eq_ignore_ascii_case(&e.name) {
                         s.name = e.name.clone();
@@ -866,24 +1003,24 @@ impl AnimTreeInstance {
         }
         self.nodes[i].weights = weights;
         // `m_fMostRelevantRateScale` sent to the loops' group (0x0059BBE0).
-        let group = self.nodes[i].children.iter().flatten().find_map(|c| self.nodes[*c].seq.as_ref().and_then(|s| s.group));
+        let group = children.iter().flatten().find_map(|c| shape.nodes[*c].seq.as_ref().and_then(|o| o.group));
         if let Some(g) = group {
-            self.groups[g].rate_scale = rate_scale;
+            self.group_rates[g] = rate_scale;
         }
-        self.nodes[i].kind = Kind::Locomotion(Box::new(st));
+        self.nodes[i].kind = KindState::Locomotion(Box::new(st));
     }
 
-    fn collect_root_motion(&mut self, clips: &dyn Clips) {
+    fn collect_root_motion(&mut self, shape: &TreeShape, clips: &dyn Clips) {
         let mut travel = Vec3::ZERO;
         let mut yaw = 0.0;
-        for n in &self.nodes {
-            let Some(s) = n.seq.as_ref() else { continue };
+        for (n, o) in self.nodes.iter().zip(&shape.nodes) {
+            let (Some(s), Some(o)) = (n.seq.as_ref(), o.seq.as_ref()) else { continue };
             let Some((from, d)) = s.moved else { continue };
             if n.total <= ZERO_WEIGHT {
                 continue;
             }
-            let translate = s.root_bone.map(|o| o == RootBoneOption::Translate);
-            let extract = s.root_rotation.iter().any(|o| *o == RootRotationOption::Extract);
+            let translate = o.root_bone.map(|x| x == RootBoneOption::Translate);
+            let extract = o.root_rotation.iter().any(|x| *x == RootRotationOption::Extract);
             if !translate.iter().any(|t| *t) && !extract {
                 continue;
             }
@@ -896,11 +1033,11 @@ impl AnimTreeInstance {
                     dt[k] = 0.0;
                 }
             }
-            travel += self.mesh_rotation * dt * n.total;
+            travel += shape.mesh_rotation * dt * n.total;
             if extract {
                 // The root's turn seen in the pawn's frame: where it takes the pawn's forward
                 // axis (UE3 yaw: x forward, y right).
-                let f = self.mesh_rotation * (dq * (self.mesh_rotation.inverse() * Vec3::X));
+                let f = shape.mesh_rotation * (dq * (shape.mesh_rotation.inverse() * Vec3::X));
                 yaw += f.y.atan2(f.x).to_degrees() * n.total;
             }
         }
@@ -909,82 +1046,86 @@ impl AnimTreeInstance {
 
     // ---- pose ----
 
-    fn eval(&self, i: usize, clips: &dyn Clips, fill: Fill) -> Pose {
-        let n = &self.nodes[i];
-        match &n.kind {
-            Kind::Sequence => self.sample(i, clips, fill),
-            Kind::Physics { .. } | Kind::List | Kind::Slot { .. } | Kind::Locomotion(_) => self.blend_children(i, clips, fill),
-            Kind::PerBone { mask, local_space, .. } => {
-                let source = self.child_pose(i, 0, clips, fill);
+    fn eval(&self, shape: &TreeShape, i: usize, clips: &dyn Clips, fill: Fill) -> Pose {
+        let (o, n) = (&shape.nodes[i], &self.nodes[i]);
+        match &o.kind {
+            Kind::Sequence => self.sample(shape, i, clips, fill),
+            Kind::Physics | Kind::List | Kind::Slot | Kind::Locomotion(_) => self.blend_children(shape, i, clips, fill),
+            Kind::PerBone { mask, local_space } => {
+                let source = self.child_pose(shape, i, 0, clips, fill);
                 let w = n.weights.get(1).copied().unwrap_or(0.0);
                 if w <= ZERO_WEIGHT {
                     return source;
                 }
-                let target = self.child_pose(i, 1, clips, fill);
-                pose::blend_per_bone(&self.bones, &source, &target, mask, w, *local_space)
+                let target = self.child_pose(shape, i, 1, clips, fill);
+                pose::blend_per_bone(&shape.bones, &source, &target, mask, w, *local_space)
             }
             Kind::Additive => {
-                let mut base = self.child_pose(i, 0, clips, fill);
+                let mut base = self.child_pose(shape, i, 0, clips, fill);
                 let w = n.weights.get(1).copied().unwrap_or(0.0);
-                if w > ZERO_WEIGHT && n.children.len() > 1 {
-                    let delta = self.child_pose(i, 1, clips, Fill::Zero);
+                if w > ZERO_WEIGHT && o.children.len() > 1 {
+                    let delta = self.child_pose(shape, i, 1, clips, Fill::Zero);
                     pose::add_additive(&mut base, &delta, w);
                 }
                 base
             }
             Kind::Stack => {
-                let mut out = self.child_pose(i, 0, clips, fill);
-                for k in 1..n.children.len() {
+                let mut out = self.child_pose(shape, i, 0, clips, fill);
+                for k in 1..o.children.len() {
                     let w = n.weights[k];
-                    let Some(c) = n.children[k] else { continue };
+                    let Some(c) = o.children[k] else { continue };
                     if w <= ZERO_WEIGHT {
                         continue;
                     }
-                    let layer = self.eval(c, clips, Fill::Keep(&out));
+                    let layer = self.eval(shape, c, clips, Fill::Keep(&out));
                     let w = w.min(1.0);
                     out = out.iter().zip(&layer).map(|(a, b)| pose::mix(*a, *b, w)).collect();
                 }
                 out
             }
-            Kind::LookAt(l) => self.look_delta(l, clips, fill),
-            Kind::Pass => match n.children.iter().flatten().next() {
-                Some(c) => self.eval(*c, clips, fill),
-                None => self.fill_pose(fill),
+            Kind::LookAt => match &n.kind {
+                KindState::LookAt(l) => self.look_delta(shape, l, clips, fill),
+                _ => self.fill_pose(shape, fill),
+            },
+            Kind::Pass => match o.children.iter().flatten().next() {
+                Some(c) => self.eval(shape, *c, clips, fill),
+                None => self.fill_pose(shape, fill),
             },
         }
     }
 
-    fn fill_pose(&self, fill: Fill) -> Pose {
+    fn fill_pose(&self, shape: &TreeShape, fill: Fill) -> Pose {
         match fill {
-            Fill::Zero => pose::zero_pose(self.bind.len()),
-            Fill::Bind | Fill::Keep(_) => self.bind.clone(),
+            Fill::Zero => pose::zero_pose(shape.bind.len()),
+            Fill::Bind | Fill::Keep(_) => shape.bind.clone(),
         }
     }
 
-    fn child_pose(&self, i: usize, k: usize, clips: &dyn Clips, fill: Fill) -> Pose {
-        match self.nodes[i].children.get(k).copied().flatten() {
+    fn child_pose(&self, shape: &TreeShape, i: usize, k: usize, clips: &dyn Clips, fill: Fill) -> Pose {
+        let o = &shape.nodes[i];
+        match o.children.get(k).copied().flatten() {
             Some(c) => {
-                let fill = if self.nodes[i].additive.get(k).copied().unwrap_or(false) { Fill::Zero } else { fill };
-                self.eval(c, clips, fill)
+                let fill = if o.additive.get(k).copied().unwrap_or(false) { Fill::Zero } else { fill };
+                self.eval(shape, c, clips, fill)
             }
-            None => self.fill_pose(fill),
+            None => self.fill_pose(shape, fill),
         }
     }
 
-    fn blend_children(&self, i: usize, clips: &dyn Clips, fill: Fill) -> Pose {
+    fn blend_children(&self, shape: &TreeShape, i: usize, clips: &dyn Clips, fill: Fill) -> Pose {
         let n = &self.nodes[i];
         let live: Vec<(usize, f32)> = n.weights.iter().enumerate().filter(|(_, w)| **w > ZERO_WEIGHT).map(|(k, w)| (k, *w)).collect();
         // One child at full weight passes through.
         if live.len() == 1 && live[0].1 >= 1.0 - ZERO_WEIGHT {
-            return self.child_pose(i, live[0].0, clips, fill);
+            return self.child_pose(shape, i, live[0].0, clips, fill);
         }
-        let fallback = self.fill_pose(fill);
+        let fallback = self.fill_pose(shape, fill);
         if live.is_empty() {
             return fallback;
         }
-        let mut acc = Accumulator::new(self.bind.len());
+        let mut acc = Accumulator::new(shape.bind.len());
         for (k, w) in live {
-            acc.add(&self.child_pose(i, k, clips, fill), w);
+            acc.add(&self.child_pose(shape, i, k, clips, fill), w);
         }
         acc.finish(&fallback)
     }
@@ -992,12 +1133,13 @@ impl AnimTreeInstance {
     /// A sequence node's pose: the clip at the node's time over the reference pose (the pose
     /// below with `m_bDontUseRefPoseOnNonDefinedBones`, identity in an additive branch), the
     /// root options applied.
-    fn sample(&self, i: usize, clips: &dyn Clips, fill: Fill) -> Pose {
+    fn sample(&self, shape: &TreeShape, i: usize, clips: &dyn Clips, fill: Fill) -> Pose {
         let s = self.nodes[i].seq.as_ref().unwrap();
+        let o = shape.nodes[i].seq.as_ref().unwrap();
         let mut out = match fill {
-            Fill::Keep(p) if s.keep_undefined => p.to_vec(),
-            Fill::Zero => pose::zero_pose(self.bind.len()),
-            _ => self.bind.clone(),
+            Fill::Keep(p) if o.keep_undefined => p.to_vec(),
+            Fill::Zero => pose::zero_pose(shape.bind.len()),
+            _ => shape.bind.clone(),
         };
         let Some(c) = clips.find(&s.name) else { return out };
         for (j, b) in c.bones.iter().enumerate() {
@@ -1014,13 +1156,13 @@ impl AnimTreeInstance {
             }
         }
         if !matches!(fill, Fill::Zero) && !out.is_empty() {
-            let (rq, rt) = self.bind[0];
+            let (rq, rt) = shape.bind[0];
             for k in 0..3 {
-                if s.root_bone[k] != RootBoneOption::Default {
+                if o.root_bone[k] != RootBoneOption::Default {
                     out[0].1[k] = rt[k];
                 }
             }
-            out[0].0 = discard_rotation(out[0].0, rq, s.root_rotation);
+            out[0].0 = discard_rotation(out[0].0, rq, o.root_rotation);
         }
         out
     }
@@ -1028,9 +1170,9 @@ impl AnimTreeInstance {
     /// The look-at node's additive delta: each grid's cells combined by weight
     /// (`pose::accumulate_additive`), the torso grid then the head grid, each at the look-at's
     /// weight (`npc_anim`'s `apply_additive` per grid).
-    fn look_delta(&self, l: &LookState, clips: &dyn Clips, fill: Fill) -> Pose {
-        let n = self.bind.len();
-        let mut out = self.fill_pose(fill);
+    fn look_delta(&self, shape: &TreeShape, l: &LookState, clips: &dyn Clips, fill: Fill) -> Pose {
+        let n = shape.bind.len();
+        let mut out = self.fill_pose(shape, fill);
         if l.weight <= ZERO_WEIGHT {
             return out;
         }
@@ -1087,7 +1229,7 @@ fn raw_usize(raw: &[(String, String)], key: &str) -> Option<usize> {
 
 /// `AnimNodeBlendList::TickAnim`: each child weight moves `dt / BlendTimeToGo` of the way to its
 /// target (linear in time), all of it on the last step.
-fn blend_weights(n: &mut Node, dt: f32) {
+fn blend_weights(n: &mut NodeState, dt: f32) {
     if n.left <= 0.0 {
         return;
     }
@@ -1105,10 +1247,10 @@ fn blend_weights(n: &mut Node, dt: f32) {
 
 /// The tick order of UE3's `AnimTickArray`: the root, then, depth first, each child once the
 /// last of its parents has reached it.
-fn tick_order(nodes: &[Node], parents: &[Vec<usize>], root: Option<usize>) -> Vec<usize> {
+fn tick_order(nodes: &[NodeShape], parents: &[Vec<usize>], root: Option<usize>) -> Vec<usize> {
     let mut order = Vec::with_capacity(nodes.len());
     let mut seen = vec![0usize; nodes.len()];
-    fn walk(i: usize, nodes: &[Node], parents: &[Vec<usize>], seen: &mut [usize], order: &mut Vec<usize>) {
+    fn walk(i: usize, nodes: &[NodeShape], parents: &[Vec<usize>], seen: &mut [usize], order: &mut Vec<usize>) {
         let mut visited: Vec<usize> = Vec::new();
         for c in nodes[i].children.iter().flatten() {
             if visited.contains(c) {
