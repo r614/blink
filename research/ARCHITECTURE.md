@@ -90,9 +90,19 @@ and effect activate / finish tick, diffed continuously with a residual in ticks,
 counts (`oracle anim compare`). Jank is a continuity property; end-state comparison does not see
 it.
 
+**Animation done 2026-10-11** (LOG.md, ORACLE.md "Animation residuals"): every scenario that
+records `Bones` / `AnimState` is compared with its capture on every run. The runner samples the
+simulation's own NPC tree state per tick in the capture's numbering (node weights, sequences,
+times, children weights) and poses it for the bones the capture refreshes; the scorecard carries
+an `anim` column (body mean / max at lag 0, the best lag) and an "Animation residuals" table
+(per bone group, what plays on `FullBodySlot` on each side); specs check `AnimBoneMean` /
+`AnimBoneMax`, `AnimSeq`, `AnimSeqTime` and `AnimLag` (`dishonored_oracle::anim`). Effects stay
+as events (`Effect` / `EffectEnd` ticks); the player's tree (U-972) is not sampled.
+
 ## Migration order
 
-1. Measure first: `oracle anim info` / `anim compare`, then `effects/` the same way.
+1. Measure first: `oracle anim info` / `anim compare`, then `effects/` the same way. Animation in
+   the scenario runner's checks and scorecard: done 2026-10-11 ("The measuring instrument").
 2. `dishonored_fx` extracted from `present_rules.rs`; then its modules as an open list.
 3. The cooked AnimTree graph decoded into an open node IR; then the generic evaluator, verified
    against the current layered output and the captures on idle, walk and one attack.
