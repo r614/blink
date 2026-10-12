@@ -29,7 +29,7 @@
 //! The tutorial window's first-rune / first-bone-charm triggers and the crosshair's sleeper line
 //! follow dishonored-bevy's `interact.rs` / `crosshair.rs`. Adapted from dishonored-bevy by Eamon (github.com/Eamo5/dishonored-bevy), used with permission.
 
-use crate::gfx_stage::{Draw, Event, Fonts, ImageRef, MovieData, SlotImage, SlotText, Stage, StageTextures, StageView};
+use crate::gfx_stage::{Draw, Event, Fonts, ImageRef, MovieData, MovieSpace, SlotImage, SlotText, Stage, StageTextures, StageView};
 use crate::hud_popups::{PopupContent, PopupQueue};
 use crate::hud_widgets::{AwarenessMarker, HudFxWidgets, HudWidgets, MarkerInput, MarkerPlace, ObjState, TW_IMG_CHARM, TW_IMG_RUNE, TargetTexts, TaskLine, TutorialWindow, awareness};
 use crate::session::{Session, SessionView};
@@ -214,6 +214,8 @@ struct Native {
     markers: HashMap<u32, AwarenessMarker>,
     /// The detection stinger played (flag 0x20000 of the HUD, 0x00BAD960).
     stinger: bool,
+    /// `m_ViewportSizeX` / `m_ViewportSizeY`: the viewport the layout last ran for.
+    viewport: Option<Vec2>,
 }
 
 #[derive(Resource, Default)]
@@ -675,6 +677,20 @@ pub fn update_gfx_hud(
     let st = &mut m.stage;
     let w = &mut m.w;
     let n = &mut hud.native;
+
+    // A new viewport size (0x00BA5840): the movie space of both movies, then the layout
+    // (0x00B96250) and the damage directions' screen size (0x00B970F0 reads it per hit).
+    if let Some(win) = windows.iter().next().map(|w| Vec2::new(w.width(), w.height())) {
+        if n.viewport != Some(win) {
+            n.viewport = Some(win);
+            st.space = MovieSpace::new(win);
+            w.layout(st);
+            if let Some(fx) = hud.fx.as_mut() {
+                fx.stage.space = st.space;
+                fx.w.layout(&mut fx.stage);
+            }
+        }
+    }
 
     // A new match / mission: reset what was sent and the popup queue (game start delay).
     let game = Some((view.matchv.mode.clone(), view.matchv.match_number));
@@ -1180,7 +1196,7 @@ pub fn update_gfx_hud(
                 };
                 let intensity = (total / MAX_DAMAGE).clamp(0.0, 1.0) * 100.0;
                 if let Some(dd) = fw.damages.as_mut() {
-                    dd.take_damage(fst, angle, intensity, crate::gfx_stage::STAGE.x, crate::gfx_stage::STAGE.y);
+                    dd.take_damage(fst, angle, intensity, fst.space.size.x, fst.space.size.y);
                 }
             }
         }

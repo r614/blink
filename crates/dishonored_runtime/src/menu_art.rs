@@ -910,10 +910,9 @@ pub fn spawn_list_cached(commands: &mut Commands, root: Entity, list: &DisplayLi
     }
 }
 
-/// Stage -> window transform (uniform scale, centred).
+/// Stage -> window transform (uniform scale, centred: `gfx_stage::MovieSpace`).
 pub fn stage_xform(window: Vec2) -> (f32, Vec2) {
-    let s = (window.x / STAGE.x).min(window.y / STAGE.y);
-    (s, (window - STAGE * s) * 0.5)
+    crate::gfx_stage::stage_xform(window)
 }
 
 /// Window cursor -> stage coordinates.

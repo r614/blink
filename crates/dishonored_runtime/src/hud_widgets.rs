@@ -9,6 +9,7 @@
 
 use crate::gfx_stage::{AutoSize, Ease, Id, ImageRef, Prop, Stage};
 use dishonored_assets::swf::ColorTransform;
+use glam::Vec2;
 
 // --- callback keys ---------------------------------------------------------------------------
 
@@ -2435,25 +2436,27 @@ impl BlackStripes {
         Self::set_stripes_position(st, mc);
         Self { mc, opened: false, interval_id: None }
     }
-    /// `SetStripesPosition`: both bars as wide as the stage and `_stripeH + emptySpaceY` high,
-    /// the upper one at `GetMovieSpaceCoord(1).coordMin._y`, the lower one at
-    /// `_sceneH - _stripeH` (the 1280x720 stage at 16:9: no empty space).
+    /// `SetStripesPosition` (also the `Stage.onResize` listener's `OnScreenResize`): both bars
+    /// `Stage.width` wide and `_stripeH + emptySpaceY` high, the upper one at
+    /// `GetMovieSpaceCoord(1).coordMin._y` (the top of the visible extent), the lower one at
+    /// `_sceneH - _stripeH`, so it reaches the bottom of the visible extent. Their `_x` is the
+    /// HUD layout's (0x00B96250: `-emptySpaceX`, [`HudWidgets::layout`]).
     fn set_stripes_position(st: &mut Stage, mc: Id) {
-        let (min, _) = crate::hud_wheel::movie_space(1.0);
-        let stage = crate::gfx_stage::STAGE;
+        let space = st.space;
+        let (min, _) = space.coord(1.0);
+        let h = STRIPE_H + space.empty.y;
         if let Some(up) = st.child(mc, "_stripeUp_mc") {
             st.set(up, Prop::Y, min.y);
-            st.set_height(up, STRIPE_H);
-            st.set_width(up, stage.x);
+            st.set_height(up, h);
+            st.set_width(up, space.size.x);
         }
         if let Some(down) = st.child(mc, "_stripeDown_mc") {
-            st.set(down, Prop::Y, stage.y - STRIPE_H);
-            st.set_height(down, STRIPE_H);
-            st.set_width(down, stage.x);
+            st.set(down, Prop::Y, crate::gfx_stage::STAGE.y - STRIPE_H);
+            st.set_height(down, h);
+            st.set_width(down, space.size.x);
         }
     }
-    /// `SetBlackStripes(displayState, useTween)` (`_stripeH` 70; at 16:9 the stripes are not
-    /// widened by `emptySpaceY`).
+    /// `SetBlackStripes(displayState, useTween)` (`_stripeH` 70).
     pub fn set(&mut self, st: &mut Stage, show: bool, use_tween: bool) {
         if show == self.opened {
             return;
@@ -3352,11 +3355,8 @@ impl BlackShroud {
     pub fn new(st: &mut Stage, mc: Id) -> Self {
         st.set_visible(mc, false);
         st.set(mc, Prop::Alpha, 0.0);
-        // The HUD layout (0x00B96250, on every viewport change) sizes the clip to the stage's
-        // extent on screen (`_width` / `_height`): its 512 x 512 vignette (`HUDFX_I29`, black with
-        // the shroud in its alpha) covers the whole view; the stage shows all of 1280 x 720.
-        st.set_width(mc, crate::gfx_stage::STAGE.x);
-        st.set_height(mc, crate::gfx_stage::STAGE.y);
+        // Its size is the HUD layout's ([`HudFxWidgets::layout`]): the 512 x 512 vignette
+        // (`HUDFX_I29`, black with the shroud in its alpha) stretched over the visible extent.
         Self { mc, opened: false, interval_close: None, peeking: false }
     }
     /// A keyhole peek's black fade (0..1) over the screen (StatePlayerMasterHolePeeking,
@@ -3616,6 +3616,61 @@ impl HudFxWidgets {
         }
         Self { shroud, damages, keyhole, keyhole_up: false }
     }
+    /// The HUDFX half of the HUD layout (0x00B96250, run by the HUD player on every viewport
+    /// change with the clips it registered from this movie): the stealth shroud stretched over
+    /// the visible extent (`_width` / `_height` = `Stage.width` / `Stage.height`); the damage
+    /// vignette's edges (`_vignette_mc.U_mc` / `D_mc` at y -/+ (360 + emptySpaceY), `L_mc` /
+    /// `R_mc` at x -/+ (640 + emptySpaceX), the horizontal ones `max(Stage.width, 1280)` wide,
+    /// the vertical ones `max(Stage.height, 1280)` high); the keyhole's two black rectangles
+    /// over the empty space (left / right: at -emptySpaceX and 1280, emptySpaceX x 720; above /
+    /// below: at -emptySpaceY and 720, 1280 x emptySpaceY; none at 16:9: 1 x 1 at (-2, -2)).
+    pub fn layout(&mut self, st: &mut Stage) {
+        let space = st.space;
+        let (size, empty) = (space.size, space.empty);
+        let stage = crate::gfx_stage::STAGE;
+        if let Some(s) = &self.shroud {
+            st.set_width(s.mc, size.x);
+            st.set_height(s.mc, size.y);
+        }
+        if let Some(v) = self.damages.as_ref().and_then(|d| d.vignette) {
+            let place = |st: &mut Stage, n: &str, x: f32, y: f32| {
+                let c = st.child(v, n);
+                if let Some(c) = c {
+                    st.set(c, Prop::X, x);
+                    st.set(c, Prop::Y, y);
+                }
+                c
+            };
+            let half = stage * 0.5;
+            for (n, y) in [("U_mc", -half.y - empty.y), ("D_mc", half.y + empty.y)] {
+                if let Some(c) = place(st, n, 0.0, y) {
+                    st.set_width(c, size.x.max(stage.x));
+                }
+            }
+            for (n, x) in [("L_mc", -half.x - empty.x), ("R_mc", half.x + empty.x)] {
+                if let Some(c) = place(st, n, x, 0.0) {
+                    st.set_height(c, size.y.max(stage.x));
+                }
+            }
+        }
+        let root = st.root;
+        let rects = [st.child(root, "_black_rectangle0_mc"), st.child(root, "_black_rectangle1_mc")];
+        let (p0, p1, wh) = if empty.x != 0.0 {
+            (Vec2::new(-empty.x, 0.0), Vec2::new(stage.x, 0.0), Vec2::new(empty.x, stage.y))
+        } else if empty.y != 0.0 {
+            (Vec2::new(0.0, -empty.y), Vec2::new(0.0, stage.y), Vec2::new(stage.x, empty.y))
+        } else {
+            (Vec2::splat(-2.0), Vec2::splat(-2.0), Vec2::ONE)
+        };
+        for (r, p) in rects.into_iter().zip([p0, p1]) {
+            if let Some(r) = r {
+                st.set(r, Prop::X, p.x);
+                st.set(r, Prop::Y, p.y);
+                st.set_width(r, wh.x);
+                st.set_height(r, wh.y);
+            }
+        }
+    }
     /// The keyhole frame (the keyhole shape with a black rectangle on each side) over the view
     /// while the player peeks, and the peek's black fade over it (`fade` 0..1; None: not
     /// peeking). The frame comes up once the screen has gone black (the view switches there,
@@ -3678,6 +3733,35 @@ pub struct HudWidgets {
     pub interaction_gauge: Option<InteractionGauge>,
     pub crosshairs: Crosshairs,
     pub sounds: SoundQueue,
+    /// What the layout keeps from the authored movie.
+    pub layout_init: HudLayoutInit,
+}
+
+/// `DisTweaks_GFxMoviePlayerHUD.m_fSafeAreaRatio_PC` (its class default; `Twk_GFxMoviePlayerHUD`
+/// does not override it): the HUD layout's safe area. The movie is authored for 0.85 (the
+/// console ratio): at 16:9 the PC layout moves the corner widgets 32 px / 18 px outwards.
+pub const SAFE_AREA_RATIO_PC: f32 = 0.9;
+
+/// What the HUD's init (0x00B95650) measures on the authored movie for the layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HudLayoutInit {
+    /// `m_ContextInteractionsOffset`: `interactions_txt_mc` minus `masterHUD_mc`.
+    pub context_offset: Vec2,
+    /// `m_PickupLogOffset`: `pickupLog_mc` minus `objectives_mc`.
+    pub pickup_offset: Vec2,
+    /// `m_fLocationDiscoveryVerticalAlignment`: `location_mc._y` over the stage height.
+    pub location_align: f32,
+}
+
+impl HudLayoutInit {
+    pub fn measure(st: &Stage) -> Self {
+        let pos = |n: &str| st.child(st.root, n).map(|c| Vec2::new(st.get(c, Prop::X), st.get(c, Prop::Y))).unwrap_or_default();
+        Self {
+            context_offset: pos("interactions_txt_mc") - pos("masterHUD_mc"),
+            pickup_offset: pos("pickupLog_mc") - pos("objectives_mc"),
+            location_align: pos("location_mc").y / crate::gfx_stage::STAGE.y,
+        }
+    }
 }
 
 impl HudWidgets {
@@ -3711,7 +3795,69 @@ impl HudWidgets {
             }
         }
         let crosshairs = Crosshairs::new(st);
-        Self { objectives, target, pickup_log, gauges, crosshair_info, game_msg, interactions, interaction_window, interaction_icons, interaction_qte, subtitles, choice, state_icon, tutorial, tutorial_window, stripes, location, oxygen, interaction_gauge, crosshairs, sounds: SoundQueue::default() }
+        let layout_init = HudLayoutInit::measure(st);
+        Self { objectives, target, pickup_log, gauges, crosshair_info, game_msg, interactions, interaction_window, interaction_icons, interaction_qte, subtitles, choice, state_icon, tutorial, tutorial_window, stripes, location, oxygen, interaction_gauge, crosshairs, sounds: SoundQueue::default(), layout_init }
+    }
+
+    /// The HUD layout (0x00B96250, called by 0x00BA5840 when the viewport size changes): the
+    /// root clips are moved onto the safe area ([`SAFE_AREA_RATIO_PC`]) of the visible extent
+    /// (`st.space`), so at 21:9 the HUD reaches the screen's sides and at 5:4 its top and
+    /// bottom. With (left, top) - (right, bottom) the safe area's corners:
+    /// - `masterHUD_mc` (left, top), `playerStatesIcon_mc` (left, bottom), `interactions_ic_mc`
+    ///   (right, bottom), `objectives_mc` / `targetNotification_mc` (right, top),
+    ///   `tutorialWindow_mc` (left + 8, bottom);
+    /// - `interactions_txt_mc` at `m_ContextInteractionsOffset` from (left, top),
+    ///   `pickupLog_mc` at `m_PickupLogOffset` from (right - 54, top);
+    /// - `location_mc` at (640, `m_fLocationDiscoveryVerticalAlignment` x `Stage.height` -
+    ///   emptySpaceY) (its class puts `_y` back to its authored value on every `SetLocation`);
+    /// - on the bottom line `720 - blackStripes_mc._stripeH` (650): `gameMsg_mc`,
+    ///   `tutorialMsg_mc`, `subtitles_mc` at x 640, `skipCutScene_mc` at x left,
+    ///   `playerChoice_mc` (y only);
+    /// - the cinematic stripes' `_stripeUp_mc` / `_stripeDown_mc` at x -emptySpaceX (their
+    ///   width and height are their class's, `Stage.onResize`).
+    ///
+    /// The triple-screen branch (viewport aspect 3.65 or more, `m_bTripleScreenMode`: the HUD
+    /// on the middle third) is not reproduced.
+    pub fn layout(&mut self, st: &mut Stage) {
+        let (lt, rb) = st.space.safe_area(SAFE_AREA_RATIO_PC);
+        let space = st.space;
+        let init = self.layout_init;
+        let root = st.root;
+        let stripe_h = STRIPE_H;
+        let bottom_line = crate::gfx_stage::STAGE.y - stripe_h;
+        let place = |st: &mut Stage, n: &str, x: Option<f32>, y: Option<f32>| {
+            if let Some(c) = st.child(root, n) {
+                if let Some(x) = x {
+                    st.set(c, Prop::X, x);
+                }
+                if let Some(y) = y {
+                    st.set(c, Prop::Y, y);
+                }
+            }
+        };
+        let centre_x = crate::gfx_stage::STAGE.x * 0.5;
+        place(st, "masterHUD_mc", Some(lt.x), Some(lt.y));
+        place(st, "playerStatesIcon_mc", Some(lt.x), Some(rb.y));
+        place(st, "interactions_txt_mc", Some(init.context_offset.x + lt.x), Some(init.context_offset.y + lt.y));
+        place(st, "interactions_ic_mc", Some(rb.x), Some(rb.y));
+        place(st, "skipCutScene_mc", Some(lt.x), Some(bottom_line));
+        place(st, "pickupLog_mc", Some(init.pickup_offset.x + rb.x - 54.0), Some(init.pickup_offset.y + lt.y));
+        place(st, "gameMsg_mc", Some(centre_x), Some(bottom_line));
+        place(st, "tutorialMsg_mc", Some(centre_x), Some(bottom_line));
+        place(st, "tutorialWindow_mc", Some(lt.x + 8.0), Some(rb.y));
+        place(st, "location_mc", Some(centre_x), Some(init.location_align * space.size.y - space.empty.y));
+        place(st, "objectives_mc", Some(rb.x), Some(lt.y));
+        place(st, "targetNotification_mc", Some(rb.x), Some(lt.y));
+        if let Some(s) = &self.stripes {
+            for n in ["_stripeUp_mc", "_stripeDown_mc"] {
+                if let Some(c) = st.child(s.mc, n) {
+                    st.set(c, Prop::X, -space.empty.x);
+                }
+            }
+            BlackStripes::set_stripes_position(st, s.mc);
+        }
+        place(st, "subtitles_mc", Some(centre_x), Some(bottom_line));
+        place(st, "playerChoice_mc", None, Some(bottom_line));
     }
 
     /// Route a stage event to its widget.

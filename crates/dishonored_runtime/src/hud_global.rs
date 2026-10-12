@@ -118,8 +118,7 @@ impl SavingIcon {
             st.set(i, Prop::Y, -45.0);
         }
         self.init_icon(st);
-        let off = crate::gfx_stage::STAGE * (1.0 - 0.85) * 0.5;
-        let max = crate::gfx_stage::STAGE - off;
+        let (_, max) = st.space.coord(0.85);
         st.set(self.mc, Prop::X, max.x);
         st.set(self.mc, Prop::Y, max.y);
         self.shown = true;
@@ -296,9 +295,12 @@ pub fn setup_global_movie(mut commands: Commands, mut images: ResMut<Assets<Imag
 }
 
 /// The save UI (0x00BAA390 / 0x00BAA3D0 / 0x00BAA610) from the saves the game wrote.
-pub fn update_global_movie(mut g: ResMut<GlobalMovie>, saves: Option<Res<crate::saves::Saves>>, time: Res<Time>, mut hud: ResMut<crate::gfx_hud::GfxHud>) {
+pub fn update_global_movie(mut g: ResMut<GlobalMovie>, saves: Option<Res<crate::saves::Saves>>, time: Res<Time>, mut hud: ResMut<crate::gfx_hud::GfxHud>, windows: Query<&Window>) {
     let g = &mut *g;
     let (Some(st), Some(icon)) = (g.stage.as_mut(), g.icon.as_mut()) else { return };
+    if let Some(w) = windows.iter().next() {
+        st.space = crate::gfx_stage::MovieSpace::new(Vec2::new(w.width(), w.height()));
+    }
     let dt = time.delta_secs();
     let mut started = 0;
     hud.tests.retain(|t| {

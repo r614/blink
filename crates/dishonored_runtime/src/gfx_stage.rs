@@ -35,6 +35,71 @@ use ue3_package::properties::find;
 
 pub const STAGE: Vec2 = Vec2::new(1280.0, 720.0);
 
+/// Where a movie's stage sits on a viewport (`DisMovieSpaceInfo`, computed by 0x00B87860 and
+/// by the HUD's 0x00BA5840 on every viewport change): the 1280x720 stage is fitted whole and
+/// centred ("show all"); what the viewport shows beyond it is "empty space" on both sides of
+/// the narrow axis, still part of the movie (nothing is clipped). `Stage.width` /
+/// `Stage.height` read the visible extent in stage pixels, which is what
+/// `_utils.ScreenPosition.ComputeMovieSpaceInfo` derives the empty space from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MovieSpace {
+    /// Viewport in pixels.
+    pub viewport: Vec2,
+    /// Stage pixels per viewport pixel.
+    pub scale: f32,
+    /// The visible extent in stage pixels (`Stage.width`, `Stage.height`).
+    pub size: Vec2,
+    /// Stage pixels shown left of (and right of) the stage, above (and below) it
+    /// (`emptySpaceX`, `emptySpaceY`): one of them is 0.
+    pub empty: Vec2,
+}
+
+impl MovieSpace {
+    /// 0x00B87860: a viewport narrower than 16:9 (5:4, 4:3) keeps the stage's width and shows
+    /// empty space above and below; a wider one (21:9) keeps its height and shows it on the
+    /// sides.
+    pub fn new(viewport: Vec2) -> Self {
+        let vp = viewport.max(Vec2::ONE);
+        if vp.x / vp.y < STAGE.x / STAGE.y {
+            let scale = STAGE.x / vp.x;
+            let h = scale * vp.y;
+            Self { viewport: vp, scale, size: Vec2::new(STAGE.x, h), empty: Vec2::new(0.0, (h - STAGE.y) * 0.5) }
+        } else {
+            let scale = STAGE.y / vp.y;
+            let w = scale * vp.x;
+            Self { viewport: vp, scale, size: Vec2::new(w, STAGE.y), empty: Vec2::new((w - STAGE.x) * 0.5, 0.0) }
+        }
+    }
+
+    /// `_utils.ScreenPosition.GetMovieSpaceCoord(safeAreaRatio)`: (coordMin, coordMax). As the
+    /// class writes it, the margin is taken on the stage plus one side's empty space
+    /// (`(_sceneW + emptySpaceX) * (1 - ratio) * 0.5`); at ratio 1 the two points are the
+    /// visible extent's corners.
+    pub fn coord(&self, ratio: f32) -> (Vec2, Vec2) {
+        let m = (STAGE + self.empty) * (1.0 - ratio) * 0.5;
+        (m - self.empty, STAGE + self.empty - m)
+    }
+
+    /// The HUD layout's safe area (0x00B96250): the margin is `(1 - ratio) / 2` of the whole
+    /// visible extent on each side; (top-left, bottom-right) in stage pixels.
+    pub fn safe_area(&self, ratio: f32) -> (Vec2, Vec2) {
+        let m = self.size * (1.0 - ratio) * 0.5;
+        (m - self.empty, self.size - self.empty - m)
+    }
+
+    /// Stage -> viewport: (viewport pixels per stage pixel, the stage origin in the viewport).
+    pub fn xform(&self) -> (f32, Vec2) {
+        let s = 1.0 / self.scale;
+        (s, self.empty * s)
+    }
+}
+
+impl Default for MovieSpace {
+    fn default() -> Self {
+        Self::new(STAGE)
+    }
+}
+
 /// Node handle in a [`Stage`].
 pub type Id = usize;
 
@@ -326,6 +391,8 @@ pub struct Stage {
     events: VecDeque<Event>,
     /// Display lists per (movie, sprite, frame), cached.
     dl_cache: HashMap<(usize, u16, usize), Arc<Vec<Place>>>,
+    /// Where the stage sits on its viewport (`Stage.width` / `Stage.height`, the empty space).
+    pub space: MovieSpace,
 }
 
 fn decompose(m: &Matrix) -> (f32, f32, f32) {
@@ -376,7 +443,7 @@ impl Stage {
         let frame_dt = 1.0 / data.fps as f64;
         let mut movies = vec![data.clone()];
         movies.extend(libs);
-        let mut s = Self { data, movies, nodes: Vec::new(), root: 0, time: 0.0, next_frame: frame_dt, tweens: Vec::new(), timers: Vec::new(), next_timer: 1, events: VecDeque::new(), dl_cache: HashMap::new() };
+        let mut s = Self { data, movies, nodes: Vec::new(), root: 0, time: 0.0, next_frame: frame_dt, tweens: Vec::new(), timers: Vec::new(), next_timer: 1, events: VecDeque::new(), dl_cache: HashMap::new(), space: MovieSpace::default() };
         let root = s.alloc(StageNode {
             src: 0,
             character: 0,
@@ -1557,10 +1624,9 @@ fn spawn_slot(commands: &mut Commands, root: Entity) -> Slot {
     Slot { image, text }
 }
 
-/// Window geometry of the 1280x720 stage ("show all", centred).
+/// Window geometry of the 1280x720 stage ("show all", centred: [`MovieSpace`]).
 pub fn stage_xform(window: Vec2) -> (f32, Vec2) {
-    let s = (window.x / STAGE.x).min(window.y / STAGE.y);
-    (s, (window - STAGE * s) * 0.5)
+    MovieSpace::new(window).xform()
 }
 
 /// Write draw items into a view's slot pool (spawning slots as needed; the item order is the
@@ -1705,6 +1771,37 @@ mod tests {
     fn html_strip() {
         assert_eq!(strip_html("a<br/>b <font color='#fff'>c</font> &amp; d"), "a\nb c & d");
         assert_eq!(strip_html("<p>x</p>"), "x");
+    }
+
+    #[test]
+    fn movie_space() {
+        let close = |a: Vec2, b: Vec2| (a - b).abs().max_element() < 0.01;
+        // 16:9: the stage fills the viewport.
+        let s = MovieSpace::new(Vec2::new(1920.0, 1080.0));
+        assert!(close(s.size, STAGE) && s.empty == Vec2::ZERO);
+        let (lt, rb) = s.safe_area(0.9);
+        assert!(close(lt, Vec2::new(64.0, 36.0)) && close(rb, Vec2::new(1216.0, 684.0)), "{lt} {rb}");
+        assert!(close(s.coord(0.9).1, Vec2::new(1216.0, 684.0)));
+        // 21:9: 1706.7 x 720 visible, 213.3 on each side.
+        let s = MovieSpace::new(Vec2::new(2560.0, 1080.0));
+        assert!(close(s.size, Vec2::new(2560.0 / 1.5, 720.0)) && close(s.empty, Vec2::new(640.0 / 3.0, 0.0)));
+        let (min, max) = s.coord(1.0);
+        assert!(close(min, Vec2::new(-640.0 / 3.0, 0.0)) && close(max, Vec2::new(1280.0 + 640.0 / 3.0, 720.0)));
+        assert!(close(s.xform().1, Vec2::new(320.0, 0.0)));
+        // 5:4: 1280 x 1024 visible, 152 above and below.
+        let s = MovieSpace::new(Vec2::new(1280.0, 1024.0));
+        assert!(close(s.size, Vec2::new(1280.0, 1024.0)) && close(s.empty, Vec2::new(0.0, 152.0)));
+        let (lt, rb) = s.safe_area(0.9);
+        assert!(close(lt, Vec2::new(64.0, 51.2 - 152.0)) && close(rb, Vec2::new(1216.0, 1024.0 - 152.0 - 51.2)), "{lt} {rb}");
+        for (w, h) in [(2560.0, 1080.0), (1280.0, 1024.0), (1920.0, 1080.0)] {
+            let (a, b) = (stage_xform(Vec2::new(w, h)), s_xform(w, h));
+            assert!((a.0 - b.0).abs() < 1e-4 && close(a.1, b.1), "{a:?} {b:?}");
+        }
+    }
+
+    fn s_xform(w: f32, h: f32) -> (f32, Vec2) {
+        let s = (w / STAGE.x).min(h / STAGE.y);
+        (s, (Vec2::new(w, h) - STAGE * s) * 0.5)
     }
 
     #[test]

@@ -148,13 +148,6 @@ pub enum Callback {
     Closed,
 }
 
-/// Movie-space info of `_utils.ScreenPosition.GetMovieSpaceCoord(ratio)` on the 1280x720 stage
-/// (no empty space at 16:9): (coordMin, coordMax).
-pub(crate) fn movie_space(ratio: f32) -> (Vec2, Vec2) {
-    let off = crate::gfx_stage::STAGE * (1.0 - ratio) * 0.5;
-    (off, crate::gfx_stage::STAGE - off)
-}
-
 /// `Math.random` for the movie's `randRange` (xorshift, deterministic per session).
 struct Rng(u32);
 
@@ -687,13 +680,15 @@ const SLOT_OUT_SCALE: f32 = 100.0;
 const SLOT_OVER_SCALE: f32 = 110.0;
 
 impl PcShortcuts {
-    /// `PowerWheelBase` attaches `shPC_` at (Stage.width / 2, Stage.height); the
-    /// `ShortcutsHandler` constructor scales it to 90 % and runs the PC `Init`.
+    /// `PowerWheelBase` attaches `shPC_` at (Stage.width / 2, Stage.height) of the movie space
+    /// the movie starts on (not moved afterwards; at 21:9 that is right of the stage's centre
+    /// by `emptySpaceX`); the `ShortcutsHandler` constructor scales it to 90 % and runs the PC
+    /// `Init`.
     fn new(st: &mut Stage, root: Id) -> Option<Self> {
         let d = st.next_depth(root);
         let mc = st.attach(root, "shPC_", "shortcutsPC_mc", d)?;
-        st.set(mc, Prop::X, 0.5 * crate::gfx_stage::STAGE.x);
-        st.set(mc, Prop::Y, crate::gfx_stage::STAGE.y);
+        st.set(mc, Prop::X, 0.5 * st.space.size.x);
+        st.set(mc, Prop::Y, st.space.size.y);
         st.set(mc, Prop::XScale, 90.0);
         st.set(mc, Prop::YScale, 90.0);
         st.set_visible(mc, false);
@@ -794,7 +789,7 @@ impl PcShortcuts {
         self.opened = true;
         self.in_wheel = in_wheel;
         self.anim_offset_y = if in_wheel { 40.0 } else { 10.0 };
-        self.pos_y = movie_space(1.0).1.y;
+        self.pos_y = st.space.coord(1.0).1.y;
         st.clear_key(key(C_DOCK_CLOSED, 0));
         st.tween_end(self.mc, false);
         st.set(self.mc, Prop::Alpha, 0.0);
@@ -1023,7 +1018,7 @@ impl PcPotions {
 
     /// PC `SetPosition`: `GetMovieSpaceCoord(0.9).coordMax`.
     fn set_position(&mut self, st: &mut Stage) {
-        let (_, max) = movie_space(0.9);
+        let (_, max) = st.space.coord(0.9);
         st.set(self.mc, Prop::X, max.x);
         st.set(self.mc, Prop::Y, max.y);
     }
@@ -1694,7 +1689,7 @@ impl PowerWheel {
     }
 }
 
-pub fn setup_power_wheel(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut textures: ResMut<StageTextures>) {
+pub fn setup_power_wheel(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut textures: ResMut<StageTextures>, windows: Query<&Window>) {
     let mut pw = PowerWheel::default();
     let Ok(content) = dishonored_assets::Content::locate() else { return commands.insert_resource(pw) };
     let fonts = Fonts::load(&content);
@@ -1707,7 +1702,11 @@ pub fn setup_power_wheel(mut commands: Commands, mut images: ResMut<Assets<Image
     if let Some(l) = &lib {
         textures.load_movie(&content, "Startup", &l.movie, &mut images);
     }
-    let stage = Stage::new(Arc::new(main), lib.into_iter().map(Arc::new).collect());
+    let mut stage = Stage::new(Arc::new(main), lib.into_iter().map(Arc::new).collect());
+    // The movie space the classes' constructors read (`Stage.width` / `Stage.height`).
+    if let Some(w) = windows.iter().next() {
+        stage.space = crate::gfx_stage::MovieSpace::new(Vec2::new(w.width(), w.height()));
+    }
     pw.movie = Some(WheelMovie::new(stage));
     pw.texts = load_texts(&content);
     pw.view = Some(crate::gfx_stage::spawn_view(&mut commands, 2, 0));
@@ -1814,6 +1813,9 @@ pub fn update_power_wheel(
 ) {
     let pw = &mut *pw;
     let Some(m) = pw.movie.as_mut() else { return };
+    if let Some(w) = windows.iter().next() {
+        m.stage.space = crate::gfx_stage::MovieSpace::new(Vec2::new(w.width(), w.height()));
+    }
     let n = &mut pw.native;
     let dt = time.delta_secs();
     let me = view.me.as_ref();
