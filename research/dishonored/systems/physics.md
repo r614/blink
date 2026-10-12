@@ -239,6 +239,30 @@ Decoded during the port (static index, re-read):
   +0x694 (the NPC hit react, 0x00B733F0). No read of the 500 / 1000 / 3800 thresholds was found
   in the decompile (a scan for `+0x118` pointer reads at config offsets 0x90..0x9C finds none).
   Not ported.
+- **The knock-down (decoded 2026-10-12).** The reaction values are `eDisPawnHitReactionType`
+  {0 None, 1 PostDeath, 2 Knockdown, 3 Strong, 4 Weak, 5 Throw, 6 CustomDeath, 7 Projectile, 8
+  DLC06_SmokeGrenade, 9 DLC07_Cough}; the dispatch 0x00B5D209 calls the NPC pawn's slots 426, 423,
+  422, 421, 424, 425, 427, 428, 429 for 1..9 (vtable 0x011416E8). Knockdown (slot 423, 0x00B736E0)
+  builds a `StateNPCMasterThrown` request (0x00A86B00: ragdoll-at-once 0, the damage type's +0x58
+  bit 5, `m_ThrowDirection` = 0x00BBE6D0(pawn, HitLocation, Momentum): the cardinal sector of
+  `HitLocation - Momentum_2d / |Momentum_2d| x max(dist, 88888)`, momentum, hit location, 1000 and
+  0.8, group 0, flag 0x100) and requests it (pending to the pawn's next machine tick). The request
+  is copied into the state (0x00A81740) when its momentum is no smaller; the enter (0x00A86B90)
+  turns a zero momentum into the unit vector from the last hit's source (0x00B6E160 on pawn +0x8CC)
+  to the pawn, applies the minimum momentum, plays `PushToRagdoll` group 0
+  (`Generic_PushToRagdoll_{Front,Left,Right,Back}`, ragdoll notifies 0.296 / 0.298 / 0.332 /
+  0.297 s) and starts the flight (0x00A81860: yaw against the momentum plus the direction's turn,
+  velocity momentum / 2, `PHYS_Flying`); flag 0x100 skips the ragdoll body's setting from +0x90
+  (0x00589D90), and the ragdoll's impulse at the notify is 0x00BF0B50 at the hit location with
+  1000 and 0.8 (presentation, P-5). Damage types with Knockdown: `DishonoredDamageType_Bullet` (the
+  player's `Twk_Proj_Bullet.m_pDamageType`), `DisDamageType_Grenade`, `_BlinkKnockdown`,
+  `_CrushKnockdown`, `_ImpactHit`, `_ImpactHit_Adrenaline`, `_WolfhoundJumpAttack`; the sticky
+  grenade's types set none (Weak); `BulletMedium` Projectile, `BulletFar` Weak, `BulletBlast` Strong.
+  `combat/pistol_hit`'s capture: the hit at tick 8 (50 -> 5), `PHYS_Flying` from tick 9, 6.63 uu a
+  tick (400 x 0.995) from tick 10, `PHYS_RigidBody` at tick 26 (the 18th update of
+  `Generic_PushToRagdoll_Front`). CONFIRMED. Ported (`pawn_states::request_knockdown`); the bullet's
+  momentum magnitude (`m_fMass x m_fSpeed x m_fHitMomentumFactor` = 500, under the 800 minimum) and
+  the explosion's (the port's player rule) are LIKELY.
 - **The rest position (P-6).** The L1 trace weakens the pelvis model: after the impacts the
   guard's Location sits at z -210.00 for ticks 79..84 and settles at -210.18 (standing capsule
   centre -210.09), i.e. at the capsule-centre height, not at a lying pelvis. The +89 uu jump at
