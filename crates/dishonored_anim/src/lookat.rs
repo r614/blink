@@ -42,10 +42,14 @@ pub fn node_weights(mode: &LookatMode, head: [f32; 2], torso: [f32; 2]) -> [f32;
 
 /// The blink roll of the look-at component: a blink every `[MinDurationBetweenBlink,
 /// MaxDurationBetweenBlink]` seconds at a play rate in `[MinBlinkSpeed, MaxBlinkSpeed]`
-/// (`ArkComponentLookatConfig` class defaults 0.5-6 s, 1-2). Uniform rolls from a seeded xorshift
-/// like the runtime's (`PawnAnim::rand`); the original's roll was not traced (U-280), so a run
-/// is deterministic but not the original's sequence of blinks. Part of the instance's
-/// `tree::TreeState` (the countdown and the generator's state travel with it).
+/// (`ArkComponentLookatConfig` class defaults 0.5-6 s, 1-2). The roll (0x00952EC0 from the look-at
+/// tick 0x00955B40): the countdown (component +0x1D0) falls by `dt` every enabled tick, blinking
+/// or not; below 0 it is rolled again in the interval and the `Blink` sequence restarts at a rate
+/// rolled in its range (interval first). The countdown is never initialised natively, so the
+/// first enabled tick blinks (LIKELY). The original rolls the CRT's global `rand()`; the port rolls
+/// a seeded xorshift per pawn, so a run is deterministic but not the original's sequence of
+/// blinks. Part of the instance's `tree::TreeState` (the countdown and the generator's state
+/// travel with it).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlinkTimer {
     pub interval: [f32; 2],
@@ -56,9 +60,7 @@ pub struct BlinkTimer {
 
 impl BlinkTimer {
     pub fn new(interval: [f32; 2], rate: [f32; 2], seed: u32) -> Self {
-        let mut t = BlinkTimer { interval, rate, left: 0.0, rng: seed.wrapping_mul(2654435761) | 1 };
-        t.left = t.roll(interval);
-        t
+        BlinkTimer { interval, rate, left: 0.0, rng: seed.wrapping_mul(2654435761) | 1 }
     }
 
     fn rand(&mut self) -> f32 {
@@ -72,14 +74,11 @@ impl BlinkTimer {
         range[0] + self.rand() * (range[1] - range[0])
     }
 
-    /// Count down while no blink plays (the next interval starts when the blink ends, as in
-    /// the runtime); returns the play rate of a blink that starts this tick.
-    pub fn tick(&mut self, dt: f32, blinking: bool) -> Option<f32> {
-        if blinking {
-            return None;
-        }
+    /// Count down (blinking or not, 0x00952EC0); returns the play rate of a blink that starts
+    /// this tick.
+    pub fn tick(&mut self, dt: f32, _blinking: bool) -> Option<f32> {
         self.left -= dt;
-        if self.left > 0.0 {
+        if self.left >= 0.0 {
             return None;
         }
         self.left = self.roll(self.interval);

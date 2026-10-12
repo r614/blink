@@ -567,7 +567,9 @@ impl AnimTreeInstance {
     /// plays and stops, filter targets, stack channels, a blink) land after the advance, so a
     /// requested sequence reads time 0 on the tick it is asked for and advances from the next
     /// (the capture's second blink reads 0 on its first tick: CONFIRMED for the look-at
-    /// component's blink, the same order assumed for the other requesters, LIKELY).
+    /// component's blink, an Ark component ticked after the pose). A pawn state's slot request is
+    /// made inside the pawn's `Tick`, before its mesh's: it lands with [`TreeState::request`]
+    /// before the update (tick_order.md section 6, U-975).
     pub fn update(&mut self, clips: &dyn Clips, inputs: &TreeInputs, dt: f32) {
         self.state.update(&self.shape, clips, inputs, dt);
     }
@@ -579,6 +581,11 @@ impl AnimTreeInstance {
 }
 
 impl TreeState {
+    /// [`AnimTreeInstance::set_blink_timer`] on a state kept apart from its shape.
+    pub fn set_blink_timer(&mut self, timer: Option<BlinkTimer>) {
+        self.blink = timer;
+    }
+
     /// The last update's root motion ([`AnimTreeInstance::root_delta`]).
     pub fn root_delta(&self) -> (Vec3, f32) {
         self.root_motion
