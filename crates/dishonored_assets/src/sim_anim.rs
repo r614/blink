@@ -17,8 +17,15 @@ use std::collections::BTreeMap;
 use ue3_package::ObjRef;
 use ue3_package::properties::{Value, find};
 
-/// The player's sets in `Startup` (package path `<group>.<set>`).
+/// The player's sets in `Startup` (package path `<group>.<set>`): the actions' and the
+/// navigation's (`Nav_Default_Ready`, `Nav_Sprinting_Ready`, `Nav_Crouched`, the mantle, slide,
+/// climb and swim states, the left hand's `Ply_Nav_LeftHand_at`, the step-up's head).
 pub const PLAYER_SETS: &[&str] = &[
+    "Ply_Sword_Idle_as.Ply_Sword_Idle_as",
+    "Ply_Sword_Locomotion_as.Ply_Sword_Locomotion_as",
+    "Ply_Empty_Locomotion_as.Ply_Empty_Locomotion_as",
+    "Ply_Empty_Idle_as.Ply_Empty_Idle_as",
+    "Ply_Head_Locomotion_as.Ply_Head_Locomotion_as",
     "Ply_Sword_Attack_as.Ply_Sword_Attack_as",
     "Ply_Sword_Versus_as.Ply_Sword_Versus_as",
     "Ply_Sword_Hit_as.Ply_Sword_Hit_as",
@@ -45,13 +52,15 @@ pub const WEAPON_SETS: &[&str] = &["Crossbows_as.Crossbow_as"];
 pub const NPC_TWEAK: &str = "Twk_Pawn_Boyle_Party.Pwn_EliteGuard_MTall_2_Doorman";
 
 /// The elite guard's sets whose sequences the simulation plays: attacks, dodges, reactions,
-/// deaths (generic and sword), the pistol's aim chains (gun) and the empty-handed locomotion's
-/// start, stop and turn sequences (empty).
+/// deaths and the paired moves' slaves (generic and sword), the pistol's aim chains (gun), the
+/// empty-handed locomotion's start, stop and turn sequences and ambient idles (empty) and the
+/// carried bodies' slaves (`CorpseBeingCarried`, corpses).
 pub const NPC_SETS: &[&str] = &[
     "Npc_EliteGuard_Generic_as.Npc_EliteGuard_Generic_as",
     "Npc_EliteGuard_empty_as.Npc_EliteGuard_empty_as",
     "Npc_EliteGuard_Sword_as.Npc_EliteGuard_Sword_as",
     "Npc_EliteGuard_Gun_as.Npc_EliteGuard_Gun_as",
+    "Npc_EliteGuard_Corpses_as.Npc_EliteGuard_Corpses_as",
 ];
 
 /// A notify object's properties over its class defaults: numbers and bools into `payload`

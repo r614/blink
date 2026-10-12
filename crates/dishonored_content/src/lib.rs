@@ -111,7 +111,8 @@ pub fn load_sim_config(content: &Content) -> Result<SimConfig> {
     // v27: ai.panic.caught_reaction / beg_time.
     // v33: GameplayConfig.fatality (the sword's finisher kills).
     // v36: GameplayConfig.sequences / npc_anim (the sequences the simulation plays, its notifies).
-    let path = cache_dir().join("gameplay_config.v38-locomotion.json");
+    // v39: the player's navigation sets and the carried bodies' slaves in GameplayConfig.sequences.
+    let path = cache_dir().join("gameplay_config.v39-navigation.json");
     let anim: std::sync::Arc<dyn dishonored_sim::anim::AnimSource> = std::sync::Arc::new(InstallAnim::default());
     if let Ok(t) = std::fs::read_to_string(&path) {
         if let Ok(c) = SimConfig::from_json(&t) {
