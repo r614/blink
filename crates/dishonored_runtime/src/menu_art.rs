@@ -855,7 +855,7 @@ pub fn spawn_list_cached(commands: &mut Commands, root: Entity, list: &DisplayLi
         for ((e, _), p) in cache.kids.iter().zip(&list.prims) {
             match p {
                 Prim::Quad { tex, src, dst, color } => {
-                    commands.entity(*e).insert((ImageNode { image: tex.clone(), rect: Some(Rect::new(src[0], src[1], src[2], src[3])), color: Color::srgba(color[0], color[1], color[2], color[3]), ..default() }, StagePrim::Quad(*dst)));
+                    commands.entity(*e).insert((ImageNode { image: tex.clone(), rect: Some(Rect::new(src[0], src[1], src[2], src[3])), color: Color::srgba(color[0], color[1], color[2], color[3]), image_mode: NodeImageMode::Stretch, ..default() }, StagePrim::Quad(*dst)));
                 }
                 Prim::Text { rect, size, color, top, rot, .. } => {
                     commands.entity(*e).insert((TextColor(*color), StagePrim::Text { rect: *rect, size: *size, top: *top, rot: *rot }, UiTransform { rotation: Rot2::radians(*rot), ..default() }));
@@ -874,7 +874,7 @@ pub fn spawn_list_cached(commands: &mut Commands, root: Entity, list: &DisplayLi
         let e = match p {
             Prim::Quad { tex, src, dst, color } => commands
                 .spawn((
-                    ImageNode { image: tex.clone(), rect: Some(Rect::new(src[0], src[1], src[2], src[3])), color: Color::srgba(color[0], color[1], color[2], color[3]), ..default() },
+                    ImageNode { image: tex.clone(), rect: Some(Rect::new(src[0], src[1], src[2], src[3])), color: Color::srgba(color[0], color[1], color[2], color[3]), image_mode: NodeImageMode::Stretch, ..default() },
                     Node { position_type: PositionType::Absolute, ..default() },
                     UiTransform::default(),
                     StagePrim::Quad(*dst),

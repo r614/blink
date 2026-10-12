@@ -1536,7 +1536,7 @@ pub fn spawn_view(commands: &mut Commands, stage: usize, z: i32) -> Entity {
 
 fn spawn_slot(commands: &mut Commands, root: Entity) -> Slot {
     let image = commands
-        .spawn((ImageNode::default(), Node { position_type: PositionType::Absolute, ..default() }, UiTransform::default(), Visibility::Hidden, Pickable::IGNORE, SlotImage, ChildOf(root)))
+        .spawn((ImageNode { image_mode: NodeImageMode::Stretch, ..default() }, Node { position_type: PositionType::Absolute, ..default() }, UiTransform::default(), Visibility::Hidden, Pickable::IGNORE, SlotImage, ChildOf(root)))
         .id();
     let text = commands
         .spawn((
