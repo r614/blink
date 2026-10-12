@@ -174,7 +174,7 @@ pub fn load_npc_root_motion(data: &NpcTreeData, profile_sets: &[String], sequenc
         let (q0, p0) = at(0.0);
         let m = data.mesh_rotation;
         let n = (len * rate).ceil() as usize + 1;
-        let (mut keys, mut yaw) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        let (mut keys, mut yaw): (Vec<[f32; 2]>, Vec<f32>) = (Vec::with_capacity(n), Vec::with_capacity(n));
         let mut moves = false;
         for i in 0..n {
             let (q, p) = at(i as f32 / rate);
@@ -182,7 +182,11 @@ pub fn load_npc_root_motion(data: &NpcTreeData, profile_sets: &[String], sequenc
             // The root's turn since the first frame seen in the pawn's frame: where it takes the
             // pawn's forward axis (UE3 yaw: x forward, y right).
             let f = m * ((q * q0.inverse()) * (m.inverse() * glam::Vec3::X));
-            let y = f.y.atan2(f.x).to_degrees();
+            // Unwrapped across +-180 so that a half turn's curve is continuous.
+            let mut y = f.y.atan2(f.x).to_degrees();
+            if let Some(&last) = yaw.last() {
+                y = last + (y - last + 180.0f32).rem_euclid(360.0) - 180.0;
+            }
             moves |= d.truncate().length() > 1e-3 || y.abs() > 1e-3;
             keys.push([d.x, d.y]);
             yaw.push(y);
