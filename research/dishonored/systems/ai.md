@@ -420,7 +420,9 @@ alert) is UNVERIFIED.
 | stimulus queue delay | 0x00b16eb0, DefaultAI.ini | `escalate` + `AiConfig::reaction_delay` 0.18-0.30 | match (scenario `ai/investigate_noise`: 10 ticks, one-tick slack) |
 | magic reaction delay 0.2-0.3 | DefaultAI.ini | none | port missing |
 | patrol route adoption | 0x00c41590, 0x00a4bc70 | `Crowd::set_routes`, `adopt_route` | match for crowd guards; **not applied to original-spawner guards** (F2) |
-| patrol / run speed | EliteGuardLocomotionConfig | player walk 250 / sprint 540 | divergence (F3), capture requested |
+| patrol / run speed | EliteGuardLocomotionConfig | `Brain::loco_speed` as the pawn's locomotion request (`pawn_states::Request::loco_speed`) | match (F3: 116.3 uu/s measured) |
+| combat moves (attacks, side / back steps, GenericActions) | the item contexts' start (0x00C18230) into `TryRequestState` (0x00A74FA0): `StateNPCMasterActionMelee` / `PlayAnim` play the context's chain | `Brain::request` (`context`, `start`, `variant`, `play_anim`) into `dishonored_sim::pawn_states` | match in structure (2026-10-11: the chain carries the guard, no travel; the context gate slot 95) |
+| locomotion start / stop / turn | `ArkComponentLocomotion` from the path (0x00946F60, 0x00947300, 0x0094B9D0) | `Brain::request.path` into `dishonored_sim::npc_loco`; the brain's walk arrives on `PlayerState::loco_arrived` | match for the decoded rules; static turn without a path, corner turn and rotation speed not ported (U-981) |
 | search constants | tweak + ini | `AiConfig::search` | match; StareAtUnreachable, x0.8 speed missing |
 | attack cadence (flurry, stamina) | 0x00b47880 | `Brain::combat` flurry / stamina_timer | match in structure: scenario shows swing groups of 2-3 about 5 s apart |
 | aggression-scaled cooldown | 0x00b3deb0, 0x00b3e070 | none | port missing (F5) |
@@ -546,7 +548,8 @@ guard list; head tracking stays the port's `look`), the behaviours not listed ab
 - **F3 ported, patrol speed measured (116.3 uu/s, EmptyPatrol, see below).** `Brain::loco_speed`: forward loop speed of the speed mode (Walk 1,
   Jog 2) of the stance modifier x `m_fSpeedMultiplier`, from `AiConfig::locomotion` (every
   `ArkComponentLocomotionConfig` of the Boyle script packages); the sim takes it through
-  `PlayerInput::npc_speed` (`movement::speed_modifier`, no sword factor). The pawn's config comes
+  the pawn's request (`pawn_states::Request::loco_speed` -> `PlayerState::loco_speed`,
+  `movement::speed_modifier`, no sword factor; `PlayerInput::npc_speed` retired 2026-10-11). The pawn's config comes
   from its tweak's anim profile (`Brain::loco`), else EliteGuardLocomotionConfig. Acceleration
   (540-1100) and the 0.5 s modifier blend are not ported.
 - **F4 ported.** The Search decision after Investigate (0x00afeb00): StareAtUnreachable when the

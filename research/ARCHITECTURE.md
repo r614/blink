@@ -112,10 +112,32 @@ it.
    `NPC_Dead_at`, the `TreeState` split from a shared `TreeShape`). Stays: the choke, carry and
    reload stages count time against the table's exits (their sequences are not played, or play
    for their notifies only); the Windblast warmup and the mantle keep their decoded config values;
-   the NPC tree's root motion is published, not applied (U-977); one NPC profile (the doorman's)
+   the NPC tree's root motion is published, not applied (U-977, applied by step 6); one NPC profile (the doorman's)
    for every NPC and timed swings for the special classes (U-978); the runtime's pickers still
    draw (step 7).
 6. Pawn states and item contexts as one subsystem; the AI requests through them.
+   **Done 2026-10-11** (LOG.md): `dishonored_sim::pawn_states` and `dishonored_sim::npc_loco`.
+   Moved: the brain's requests (`pawn_states::Request`: the item context with its start and
+   variation, the GenericAction chain and serial, the locomotion config, stance, speed and path),
+   handed to the step in `WorldState::requests` (`Crowd::requests`); the NPC master state machine
+   (`Master`: Walk, ActionMelee, ActionParry, PlayAnim, Thrown, Dead_Limp; `WorldState::pawn_states`)
+   with the cooked transition logic (`NpcFsm`, 201 rows) and the next-tick application; the anim
+   player's full-body chains (the group pick avoiding the last, the step's rate roll and blend-in,
+   the next step, the stop at the group's blend-out) ending the states that play them; the context
+   gate (slot 95); the elite guard's attacks as ActionMelee of the context's chain (no travel),
+   the side and back steps and the behaviours' GenericActions as PlayAnim, the parried attacker's
+   `Parry` lose step, deaths through Dead; the chains' root motion in the decoded modes (U-977:
+   `RMM_Translate` at the barrier, `RMM_Velocity` / `RMM_Accel` as the next tick's velocity); the
+   locomotion component's start, stop and turn sequences from the path, root-motion driven while
+   fully in (U-280), fed to the simulation's tree. `PlayerInput::npc_speed` retired (the speed is
+   the locomotion's request); `npc_move` is no longer sent (the step publishes the running context
+   into `last_input` for the runtime's picker); `MatchView::npc_actions` comes from the pawn states.
+   Stays: the special classes' contexts start timed swings with the travel stand-in (U-978); the
+   strong hit reaction, stun, choke, assassination, aim, minigame and surprise are not states yet
+   (their timers stay in the sim modules; decoded, LOG); `Call` rows of the transition logic allow
+   (the states' `CanTransitionTo` not decoded, LIKELY); the component's undecoded parts (U-981) and
+   its LOD flag (U-980); the runtime still draws its own picks and its speed-threshold start / stop
+   (step 7).
 7. The runtime's pickers deleted as the generic path covers each case.
 
 Two cautions: take the tick order from the exe, not from design (done for pawns, controllers and

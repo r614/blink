@@ -414,11 +414,12 @@ Consequences:
   5. Mode 0 (`RMM_Translate`) with the previous mode (`+0x385`) also 0: **the owner is moved by
      the delta, with the new rotation, right now** (`0x0064CCD0`, LIKELY `UWorld::MoveActor`), the
      accumulated delta is zeroed, and a pawn owner gets slot 232 with `(Rotation, 0, 0, -1, 1)`
-     (LIKELY `SetDesiredRotation`) so that its `physicsRotation` keeps the turn. A switch from 0 to
-     2 applies the rotation once with a zero move.
+     (LIKELY `SetDesiredRotation`) so that its `physicsRotation` keeps the turn; the NPC pawn's
+     slot 232 (`0x00B6E960`) returns 1 and does nothing. A switch from 0 to 2 applies the rotation
+     once with a zero move.
   6. Mode 4 (`RMM_Relative`): the same move made relative to the owner's `Base` (`SetBase(None)`,
      move, `SetBase(old base, ...)`).
-  7. Other modes (1, 3, 5) leave the delta in `+0x340` for the movement code.
+  7. The other modes (1, 3) leave the delta in `+0x340` for the movement code.
 - **When it moves the pawn:**
 
 | Mode | Applied by | Tick |
@@ -427,13 +428,18 @@ Consequences:
 | 4 `RMM_Relative` | same, around a `SetBase` | same tick N |
 | 1 / 3 | `physFalling` `0x006BF0E0` reads and zeroes `Mesh+0x340` (mode 3 as `Velocity = delta / dt`) | next tick N+1 (physics runs before the components) |
 | NPC locomotion, off a path | Ark list 0 `0x0094BEC0`: `Velocity` = accumulated root motion / `dt`, `Mesh+0x340` zeroed; NPC `physWalking` integrates it | velocity set at the end of tick N's PreAsync group (after the barrier), position moves in tick N+1 |
-| NPC locomotion, on a path | same function: `Velocity` from the path step; the mesh's root motion is discarded | as above |
+| NPC locomotion, on a path | same function: `Velocity` from the path step; the mesh's root motion is discarded, except while the component's start / stop / turn sequence is fully in (states 4, 8, 13, 14: the off-path branch's displacement; `dishonored_sim::npc_loco`) | as above |
 
-  The rows are CONFIRMED as code; the mode numbers' UE3 names are LIKELY (`ERootMotionMode`: 0
-  Translate, 1 Velocity, 2 Ignore, 3 Interpolate, 4 Relative, 5 Accel). In the pawn physics only
-  `physFalling` reads the mesh's mode (1 and 3); `physWalking` and `CalcVelocity` do not, so while
-  walking a pawn's root motion moves it only through mode 0 (same tick) or, for NPCs, through the
-  Ark locomotion's velocity (next tick). The consumer of mode 5 was not found.
+  The rows are CONFIRMED as code; the mode names are the cooked enum's (`ERootMotionMode`: 0
+  `RMM_Translate`, 1 `RMM_Velocity`, 2 `RMM_Ignore`, 3 `RMM_Accel`, 4 `RMM_Relative`, 5 `RMM_MAX`: there
+  is no `RMM_Interpolate` and no mode 5; 2026-10-11, U-977). In the pawn physics only `physFalling`
+  reads the mesh's mode (1 and 3); `physWalking` and `CalcVelocity` do not, so while walking a
+  pawn's root motion moves it only through mode 0 (same tick) or, for NPCs, through the Ark
+  locomotion's velocity (next tick). The modes an NPC's chains set (`m_RootMotionMode` /
+  `m_RootRotationMode` through pawn slot 469 `0x00B6E680`; restored to (1, `RMRM_RotateActor`) by slot
+  470 `0x00B71280`) and the NPC's spawn modes (`Default__DishonoredNPCPawn.AnimMesh`: `RMM_Velocity`,
+  `RMRM_Ignore`) are applied by `dishonored_sim::pawn_states`; the cooked
+  `Engine.Default__SkeletalMeshComponent` ticks in `TG_PreAsyncWork` (section 7).
 
 ---
 
@@ -542,12 +548,18 @@ What the simulation's step order must be to match (no implementation here):
   `World.TickGroup` is `TG_DuringAsyncWork`. Read
   `TickGroup` (`+0x50`) of the cooked `Default__SkeletalMeshComponent`, of the NPC and player
   archetypes' `Mesh`, and of `DishonoredInventoryItemPostUpdateTickComponent`; read the actors'
-  `TickGroup` (`+0x109`) of the controllers and the player pawn.
+  `TickGroup` (`+0x109`) of the controllers and the player pawn. Partly read (2026-10-11, the
+  cooked packages): `Engine.Default__SkeletalMeshComponent` has `TickGroup` `TG_PreAsyncWork`,
+  `bTickAnimNodesWhenNotRendered` and `bUpdateSkelWhenNotRendered` true, and
+  `Default__DishonoredNPCPawn.AnimMesh` overrides no `TickGroup`: the NPC mesh ticks in its pawn's
+  group, the order above. The player archetype's mesh, the controllers and the player pawn are
+  still to read.
 - **Spawn order of controllers vs pawns** (UnrealScript): decides whether the brain and the player
   input act in the same tick. A capture recording the `TickableActors` order (or the order of
   `Tick` calls) settles it.
-- `RootBoneOption` / `RootRotationOption` handling in the evaluation; the consumer of root-motion
-  mode 5; the exact class of the two Ark components (`0x0093D4F0`, `0x0094AC70`).
+- `RootBoneOption` / `RootRotationOption` handling in the evaluation (and whether the locomotion
+  node's specific-anim child extracts root motion); the exact class of the two Ark components
+  (`0x0093D4F0`, `0x0094AC70`). There is no mode 5 (section 5).
 - `0x007DD010` (between DuringAsync and PostAsync) and `0x006555A0` (end of tick) were not decoded.
 - The tick-frequency throttle (WorldInfo `+0x2B8` bit 10) and which actors carry a frequency.
 

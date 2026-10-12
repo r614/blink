@@ -155,11 +155,51 @@ turn sequences. The pawn's velocity relative to its facing is smoothed with the 
 parameters; directions blend linearly between the two neighbouring loops with the 0.98 snap; the
 diagonal ratio scales the speed used for the bracket and the rate; S and W play backwards; all
 loops share one normalized phase advanced at the sync-group rate; modifier changes crossfade over
-0.5 s and transitions wait for the speed to drop below `m_fVelocityToStopMoving`. Start and stop
-sequences play when the pawn's speed crosses `m_fVelocityToStartToMove` (60) upward or
-`m_fVelocityToStopMoving` downward (the stop foot from the loop phase), with the root
-translation discarded since the simulation moves the pawn (SPECULATIVE trigger, U-280). Turns
-in place are not played (the simulation turns the pawn; U-280).
+0.5 s and transitions wait for the speed to drop below `m_fVelocityToStopMoving`. The runtime's
+renderer still starts and stops on the pawn's speed crossing `m_fVelocityToStartToMove` (60)
+upward or `m_fVelocityToStopMoving` downward (SPECULATIVE, until it skins the simulation's state,
+ARCHITECTURE.md step 7).
+
+The locomotion component's requests (2026-10-11, static decode; `dishonored_sim::npc_loco`, the
+simulation's tree through `LocoInput::specific`). The component (+0x218 state: 0 none, 1-5 turn,
+6-9 start, 10-14 stop) runs in the per-tick 0x0094BEC0, after the pose barrier: the turn machine
+0x0094B9D0 with its triggers, the start rule 0x00946F60, the stop rule 0x00947300, in that order,
+on the path of the brain's request (the point `P[k]`, the segment, the destination, the accurate
+flag of the request record +0x24):
+
+- **Start** (CONFIRMED): speed below `m_fVelocityToStopMoving` (20, not the start speed), the yaw
+  within 22.5 deg of the segment, the point ahead and farther than the start prop's
+  `m_fStraightDist` (70), not arrived, nothing playing: `m_StartAnimProps[0]` (only the first).
+- **Stop** (CONFIRMED): a non-accurate request, the idle mode with stop props, the yaw within 22.5
+  deg of the segment; within `m_fUnaccuracyRadius` (120) of the destination the window opens;
+  when the move loops' sync position crosses a stop prop's `m_fMoveAnimIn` (StopLeft 0.488,
+  StopRight 0.0: the foot is the phase; `m_bFootOnGround` is not read) the stop is asked unless
+  `|r - s| <= |r|` with `r = d - m_fStraightDist` and `s` the walk loop's length times its speed
+  over the stop count (the next foot lands nearer). The request arrives only after the stop
+  (0x00944390: within 120 and below 20 in states 0 / 5); an accurate one never stop-animates and
+  arrives within 0.1 uu.
+- **Turn** (CONFIRMED): static (below `m_fMaxSpeedForStaticTurn` 40, on a moving path more than
+  `m_fMaxDistToPathEndToTurn` from its end, the path `m_fMaxDistToFirstPathTurn` ahead within 90
+  deg) or moving (40 or more, the segment off the yaw), both over 15 deg; `RequestTurn`
+  (0x0094AF40) takes the speed mode bracketing the speed, the prop by 45-degree buckets (left
+  even, right odd; half-width 22.5, 45 with two props), the `TurnToWalk` variant (+8) on a moving
+  path whose point is farther than its `m_fStraightDist`, played to `m_fCutIfMoving` of its length;
+  `RootRotationScale` = angle / nominal (180, 135, 90, 45); the mesh goes to (`RMM_Accel`,
+  `RMRM_RotateActor`) and is not restored by the component.
+- **Node side** (0x0090BDB0, 0x00917440): the request plays from the next update at the
+  modifier's times the node's `m_fSpeedMultiplier`, blends in by `max(0.01, t x Rate / Blend)` and
+  out over the last blend time before its effective end (start / stop 0.1, turn fast 0.15 / slow
+  0.155 from `NPC_Human_at` over the class defaults: `NpcAnimConfig::loco_node`); "fully in" is
+  the move loops' weight at 0.
+- **Movement** (CONFIRMED): root-motion driven only while fully in (and in states 4, 8, 13, 14):
+  the sequence's root translation over `dt` times the modifier's multiplier, as the chains'.
+  Otherwise the path following's speed per state (turn 1-3 the turn's mode speed, 0 for an idle
+  mode; start 6-8 and stop 13 zero; stop 10-12 the walk mode's forward speed) and yaw (turn 1-3
+  the from-yaw, 4-5 the to-yaw; stop held; otherwise toward the point).
+- Not decoded (U-981): the static turn without a path, the corner turn, the rotation step,
+  braking toward the stop, the loops' re-seat at a blend-out; who applies the turn's root yaw
+  (the port turns the pawn by it while fully in, LIKELY). Every NPC counts as full LOD (the
+  component's +0x1AC bit 0 is the AI LOD flag, U-980).
 
 Footsteps: the NPC loops carry no `DishonoredNotify_Footfall` (e.g. `Empty_WalkN` has no
 notifies at all). The node instead keeps `m_bFootOnGround` per `m_Feet` entry (0x009114A0): a
@@ -265,7 +305,9 @@ Relaxed, Patrol, Search, Combat, Panic, Cower, Notice) and `MatchView::anim_prof
 | walking / running | locomotion modifier and speed modes | §3; modifier: guards `SwordPatrol` when relaxed, `SearchSword` searching, `Sword` in combat or noticing, `PanicSword`; civilians `Empty`, `SearchEmpty`, `PanicEmpty`; players `Sword` armed (`Aim` aiming a gun), `Empty` unarmed (Contracts disguise) |
 | modifier change | `m_Transitions` | same sequences (`Sword_SwordToPatrol` ...) |
 | standing still / patrolling | `AmbientIdle` subprocess of the behaviour | §4: patrol stance 30-60 s upper body, search stance 2-6 s full body, relaxed none |
-| melee swing (`SwordSwing`) | `AttackShort/Medium/Long` chains from the AI attack pattern | `AttackShort`, random group, the `Small` step (the swing: it carries `DishonoredNotify_AttackZone`) |
+| melee swing (`SwordSwing`) | `AttackShort/Medium/Long` chains from the AI attack pattern | the simulation's `StateNPCMasterActionMelee` (`dishonored_sim::pawn_states`): the context's chain (`AttackShort`, `AttackStepBack`, `AttackMedium`, `AttackLong`, `JumpAttack`), random group, played whole with its root motion; the runtime's picker draws `AttackShort` until step 7 |
+| side / back step, GenericActions | `DisItemContext_NPCSideStep` / `BackStep`, the behaviours' `PlayAnim` requests | `StateNPCMasterPlayAnim` in the simulation (`SideStep` group by side, `JumpBack`; the behaviour's chain); `MatchView::npc_actions` from the pawn states |
+| start / stop / turn in place | `ArkComponentLocomotion` from the path (section 3) | the simulation's `npc_loco` (rules decoded); the runtime's renderer starts and stops on speed thresholds until step 7 |
 | blocking | `Parry_AwaitingImpact` | same, held while blocking |
 | parry (`SwordParried`) | `Parry` groups | defender: `Parry` group 0 |
 | stagger | `Stun` | `Stun` group 0, loop held while staggered |
@@ -282,7 +324,7 @@ Relaxed, Patrol, Search, Combat, Panic, Cower, Notice) and `MatchView::anim_prof
 | talking | the blurb's FaceFX animation on the face and head (§12); body gestures only from soiree matinees (U-142, resolved: blurbs carry no animation, `DisBehaviorBlockingDialog` only faces the listener, no `eDisNPCAnimations` chain is a gesture, and the FaceFX actors pose `head_jnt` and the face bones only) | FaceFX lip sync and head motion (§12); body: the soiree matinee's AI-group anim tracks (CUTSCENES.md) |
 | crouched armed player | no crouch locomotion in the NPC sets | `Sword_Cover_Loop` held |
 | thrown (Windblast, push) | `StateNPCMasterThrown`: `PushToRagdoll` group 1 by direction, ragdoll at its notify; at rest `StateNPCMasterStunned` (`eStunEnterAnim_RagdollFront`) | §13 |
-| special classes (`npc_move` 20-28) | the item contexts' `m_MainAttack.m_Animation`, the minigame groups, the Tallboy aim sub-states, the music box's walk upper body | §13 |
+| special classes (item contexts 20-28, published as `last_input.npc_move`) | the item contexts' `m_MainAttack.m_Animation`, the minigame groups, the Tallboy aim sub-states, the music box's walk upper body | §13 |
 | plague / rat death | `DeathPlague` / `DeathSwarmAttack` (by name, U-890) | same |
 
 Directional steps (U-143): the step index is a direction enum's value. Groups of 4 follow
@@ -754,7 +796,7 @@ records the same per-tick line from the original's `SpaceBases` and tree state f
 detect, guard attack, Windblast throw, Tallboy, Overseer, weeper, Boyle intro, clock and krust
 cases, so poses can be diffed bone by bone.
 
-Not done: turning in place (the turn sequences exist for every class; the locomotion component's
-request rule is not decoded, U-280), foot placement (U-280), the additive small hit reactions,
+Not done: the renderer's start / stop / turn from the simulation's component (`npc_loco`, the
+skinner of step 7; the rules are decoded, section 3), foot placement (U-280), the additive small hit reactions,
 the weeper / hound idle behaviours and the Tallboy's stilts mesh (U-896), the distraction
 matinees (U-895).
