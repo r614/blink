@@ -632,7 +632,26 @@ sends `To<ID>` / `From<ID>` to the level's Kismet; the camera stays on the main 
 the idle trailer after `m_fTrailerTimer` 30 s (U-955); the drop-down list of the resolution
 line (left / right step through the modes instead); the help bar's hover underline; the
 mouse-hold repeat of the widget arrows; text layout uses Bevy's shaping with the game fonts
-(no Scaleform kerning, U-956); masks only clip whole items (the pause list).
+(no Scaleform kerning, U-956); timeline masks (`clipDepth`) crop the masked quads to the mask's
+bounds (exact for rectangles; text is not cropped); `setMask` masks scripted by the classes are
+only kept from being drawn (clips named `*mask*`).
+
+## Screen aspect
+
+The menu movies are fitted whole and centred like the HUD (`gfx_stage::MovieSpace`, HUD.md
+"Screen layout and aspect ratios"). The players with `m_bDrawBlackStripesWhileActive` (main
+menu, pause, journal, mission statistics) show the Global movie's black stripes over the empty
+space while they are up: black bars left and right of the stage at 21:9, above and below it at
+5:4, none at 16:9 (`menu_art::black_stripes`; LIKELY, U-989). The classes' layouts that read
+`Stage.width` (`MainMenuButtonBar`, `NewGameMenu`) keep their 16:9 values in the port (U-991).
+
+The menus' quads are Bevy UI image nodes stretched to their stage parallelogram
+(`NodeImageMode::Stretch`): in the default mode an image node keeps its texture's aspect ratio, so
+a quad drawn at another aspect (a solid fill on the 1 x 1 white image, a 512 x 512 vignette over
+the screen) came out as a square in the middle of its box. That was the light square on the
+confirmation box (the box's mask, `boxPart2_mc` depth 2, a solid 1088 x 132 shape) and the pale
+square of the stealth shroud; the box's backdrop (`_bkgdBlack_mc` / `_bkgdWhite_mc`, 1280 x 720
+solids) also covered only a 720 x 720 square.
 
 ## Parity automation
 

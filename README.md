@@ -91,16 +91,17 @@ Not yet ported, or ported only in part:
 
 ### Known issues
 
-Reported from play testing, not yet fixed:
+Reported from play testing and seen in the HUD / menu captures, not yet fixed:
 
 - **Input**: conversation choices only respond to the gamepad (the prompt shows the A button).
 - **Window**: the mouse cursor appears and the game loses focus when a match starts from the
   menu, when going back to it, and when opening or closing the pause menu. The window also minimizes on the way back to the main menu.
 - **Settings**: the resolution cannot be changed.
 - **HUD and menus**:
-  - the crouch (stealth) overlay draws a large square in the middle of the screen;
-  - a stray square texture shows on the menu's message box ("All unsaved progress...");
-  - the letterbox bars do not reach the screen's edges on ultrawide displays.
+  - the "restore settings" question names no category ("...of the current category ()?");
+  - on ultrawide displays the quick-access dock (number keys) sits right of the screen's centre,
+    where the movie's own code attaches it (half of `Stage.width`); whether the original does
+    the same is open (research/UNKNOWNS.md U-988).
 - **Rendering**: the Playground pool's water (the Boyle river material
   `boyle_ext_MS.Water_boyle_ext_INST03`) renders as an opaque green surface with dark stripes.
 - **Effects**:

@@ -49,6 +49,92 @@ Drawn through a pool of Bevy UI nodes (image + text per slot), "show all" scalin
 1280x720 stage. The movie clip table of the HUD is indexed `(offset - 8) / 16`
 (`EDisHUDMovieClip`).
 
+## Screen layout and aspect ratios (0x00BA5840, 0x00B96250)
+
+The movie space (`DisMovieSpaceInfo`, `m_MovieSpaceInfoOnLastPreRender` at +0x1D8; computed by
+0x00B87860 for the other players and inline by the HUD's 0x00BA5840 when the viewport size
+changes, `m_ViewportSizeX/Y` at +0x204): the 1280x720 stage is fitted whole and centred. A
+viewport wider than 16:9 keeps the stage height (720) and shows `emptySpaceX = (720 x w / h -
+1280) / 2` stage pixels on each side (21:9, 2560x1080: 213.3); a narrower one keeps the width
+and shows `emptySpaceY` above and below (5:4, 1280x1024: 152). The empty space is part of the
+movie (not clipped). `Stage.width` / `Stage.height` read the visible extent (1706.7 x 720 at
+21:9, 1280 x 1024 at 5:4): `_utils.ScreenPosition.ComputeMovieSpaceInfo` derives the empty
+space from them and `GetMovieSpaceCoord(ratio)` returns the safe area as `coordMin = -empty +
+(scene + empty) x (1 - ratio) / 2`, `coordMax = scene + empty - (same)` (the class takes the
+margin on the stage plus one side's empty space; LIKELY that `Stage.width` is the visible
+extent: the native layout and the classes are only consistent with it, U-988). A viewport of
+aspect 3.65 or more (`m_bTripleScreenMode`, +0x1FC bit 21) gives the HUD the middle third and
+computes the full-screen values separately for the HUDFX clips; not reproduced.
+
+The clip table (0x00B95650: `_root.<name>` of the HUD movie, `blackShroud_mc`,
+`directionalDamages_mc[._vignette_mc.U/D/L/R_mc]`, `keyHole_mc` and the two
+`_black_rectangle*_mc` of the HUDFX movie) maps to `EDisHUDMovieClip` (DishonoredGame.upk):
+0 `_dot_mc`, 1 (the aspect slot), 2 `crosshairInfosTxt_mc`, 3 `masterHUD_mc`, 4
+`playerStatesIcon_mc`, 5 `blackShroud_mc`, 6 `interactions_window_mc`, 7 `interactions_txt_mc`,
+8 `interactions_ic_mc`, 9 `interactions_icQTE_mc`, 10 `oxygenGauge_mc`, 11
+`interactionGauge_mc`, 12 `grenadeCooking_mc`, 13 `pickupLog_mc`, 14 `gameMsg_mc`, 15
+`tutorialMsg_mc`, 16 `tutorialWindow_mc`, 17 `location_mc`, 18 `objectives_mc`, 19
+`targetNotification_mc`, 20 `directionalDamages_mc`, 21..24 its vignette's U / D / L / R, 25
+`keyHole_mc`, 26 / 27 the black rectangles, 28 `blackStripes_mc`, 29 `subtitles_mc`, 30
+`playerChoice_mc`, 31 `skipCutScene_mc`. The init also keeps `m_ContextInteractionsOffset`
+(`interactions_txt_mc` - `masterHUD_mc`), `m_PickupLogOffset` (`pickupLog_mc` - `objectives_mc`)
+and `m_fLocationDiscoveryVerticalAlignment` (`location_mc._y / 720`), all on the authored
+movie.
+
+The layout 0x00B96250 (every viewport change), with the safe area `m_fSafeAreaRatio_PC` 0.9
+(tweaks offset 0xBC, the class default of `DisTweaks_GFxMoviePlayerHUD`; the console value is
+0.85) on the whole visible extent: `left = -emptySpaceX + W x 0.05`, `top = -emptySpaceY + H x
+0.05`, `right = W - emptySpaceX - W x 0.05`, `bottom = H - emptySpaceY - H x 0.05` (W, H the
+visible extent):
+
+| Clip | Position / size |
+|---|---|
+| `masterHUD_mc` | (left, top) |
+| `playerStatesIcon_mc` | (left, bottom) |
+| `interactions_txt_mc` | (left, top) + `m_ContextInteractionsOffset` |
+| `interactions_ic_mc` | (right, bottom) |
+| `skipCutScene_mc` | (left, 720 - `_stripeH`) |
+| `pickupLog_mc` | (right - 54, top) + `m_PickupLogOffset` |
+| `gameMsg_mc`, `tutorialMsg_mc`, `subtitles_mc` | (640, 720 - `_stripeH`) |
+| `playerChoice_mc` | y 720 - `_stripeH` |
+| `tutorialWindow_mc` | (left + 8, bottom) |
+| `location_mc` | (640, alignment x H - emptySpaceY) (`Location` puts `_y` back to its authored value on each `SetLocation`) |
+| `objectives_mc`, `targetNotification_mc` | (right, top) |
+| `blackShroud_mc` (HUDFX) | `_width` W, `_height` H |
+| vignette `U_mc` / `D_mc` | (0, -/+ (360 + emptySpaceY)), `_width` max(W, 1280) |
+| vignette `L_mc` / `R_mc` | (-/+ (640 + emptySpaceX), 0), `_height` max(H, 1280) |
+| `_black_rectangle0/1_mc` | sides: (-emptySpaceX, 0) / (1280, 0), emptySpaceX x 720; top / bottom: (0, -emptySpaceY) / (0, 720), 1280 x emptySpaceY; 16:9: (-2, -2), 1 x 1 |
+| `blackStripes_mc._stripeUp_mc` / `_stripeDown_mc` | x -emptySpaceX |
+
+`_stripeH` is read from the movie (70). The stripes' class (`BlackStripes.SetStripesPosition`,
+also its `Stage.onResize` listener) makes both bars `Stage.width` wide and `70 +
+emptySpaceY` high, the upper one at the top of the visible extent, the lower one at 650: the
+cinematic bars are the HUD movie's own clips, drawn by the movie over the whole screen width
+(not native letterboxing). The movie is authored for the console safe area (0.85: the gauges at
+(95.5, 54), the objectives at (1184, 54)); at 16:9 the PC layout puts them at (64, 36) and
+(1216, 36), and the bottom-centre texts at 650 instead of 665. `DirectionalDamages.TakeDamage`
+gets W and H as its screen size (0x00B970F0), so the hits reach the screen's edges.
+
+Other movies: the wheel's PC dock is attached at (`Stage.width / 2`, `Stage.height`) when the
+movie starts (right of the stage centre by `emptySpaceX` at 21:9; its `_y` is set again on
+every `Open` to `GetMovieSpaceCoord(1).coordMax._y`), its elixir counters at
+`GetMovieSpaceCoord(0.9).coordMax`, the saving icon in game at `GetMovieSpaceCoord(0.85).coordMax`
+(in a menu at the same point of the bare stage). The menu players with
+`m_bDrawBlackStripesWhileActive` (class defaults: main menu, pause menu, journal, mission
+statistics, note, store) show the Global movie's `g_BlackStripes` (`SetStripes`, on
+`Stage.onResize`; switched by the Global player's tick 0x00BAA610): black fills drawn by script
+over the empty space, `emptySpaceX x Stage.height` at `coordMin._x` and 1280 on a wide screen,
+`Stage.width x emptySpaceY` at `coordMin._y` and 720 on a narrow one, none at 16:9; the menus
+are pillarboxed / letterboxed. Which flag of the Global player (+0x1B8 bit 0) the menus set is
+not traced (LIKELY the flag above, U-989).
+
+Port: `gfx_stage::MovieSpace` (each stage's `space`, from the window), `HudWidgets::layout` /
+`HudFxWidgets::layout` run by `gfx_hud::update_gfx_hud` on a window size change, the stripes'
+`set_stripes_position`, the wheel's and the saving icon's `GetMovieSpaceCoord`, and
+`menu_art::black_stripes` over the layers marked `DrawsBlackStripes` (launcher, pause menu,
+journal, mission statistics). The task / awareness markers' area (`m_fMarkerAreaRatio_PC` 0.9)
+is still taken on the stage, not the visible extent (U-990).
+
 ## Popups and the native queue (`objectives_mc`, `targetNotification_mc`)
 
 `ObjectivesNotification` (hud_objW): `Open()` brings the backdrop in from alpha 0, x + 250,
