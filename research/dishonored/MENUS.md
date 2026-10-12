@@ -642,8 +642,8 @@ The menu movies are fitted whole and centred like the HUD (`gfx_stage::MovieSpac
 "Screen layout and aspect ratios"). The players with `m_bDrawBlackStripesWhileActive` (main
 menu, pause, journal, mission statistics) show the Global movie's black stripes over the empty
 space while they are up: black bars left and right of the stage at 21:9, above and below it at
-5:4, none at 16:9 (`menu_art::black_stripes`; LIKELY, U-989). The classes' layouts that read
-`Stage.width` (`MainMenuButtonBar`, `NewGameMenu`) keep their 16:9 values in the port (U-991).
+5:4, none at 16:9 (`menu_art::black_stripes`; LIKELY, U-994). The classes' layouts that read
+`Stage.width` (`MainMenuButtonBar`, `NewGameMenu`) keep their 16:9 values in the port (U-996).
 
 The menus' quads are Bevy UI image nodes stretched to their stage parallelogram
 (`NodeImageMode::Stretch`): in the default mode an image node keeps its texture's aspect ratio, so

@@ -101,7 +101,7 @@ Reported from play testing and seen in the HUD / menu captures, not yet fixed:
   - the "restore settings" question names no category ("...of the current category ()?");
   - on ultrawide displays the quick-access dock (number keys) sits right of the screen's centre,
     where the movie's own code attaches it (half of `Stage.width`); whether the original does
-    the same is open (research/UNKNOWNS.md U-988).
+    the same is open (research/UNKNOWNS.md U-993).
 - **Rendering**: the Playground pool's water (the Boyle river material
   `boyle_ext_MS.Water_boyle_ext_INST03`) renders as an opaque green surface with dark stripes.
 - **Effects**:

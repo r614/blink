@@ -62,7 +62,7 @@ movie (not clipped). `Stage.width` / `Stage.height` read the visible extent (170
 space from them and `GetMovieSpaceCoord(ratio)` returns the safe area as `coordMin = -empty +
 (scene + empty) x (1 - ratio) / 2`, `coordMax = scene + empty - (same)` (the class takes the
 margin on the stage plus one side's empty space; LIKELY that `Stage.width` is the visible
-extent: the native layout and the classes are only consistent with it, U-988). A viewport of
+extent: the native layout and the classes are only consistent with it, U-993). A viewport of
 aspect 3.65 or more (`m_bTripleScreenMode`, +0x1FC bit 21) gives the HUD the middle third and
 computes the full-screen values separately for the HUDFX clips; not reproduced.
 
@@ -126,14 +126,14 @@ statistics, note, store) show the Global movie's `g_BlackStripes` (`SetStripes`,
 over the empty space, `emptySpaceX x Stage.height` at `coordMin._x` and 1280 on a wide screen,
 `Stage.width x emptySpaceY` at `coordMin._y` and 720 on a narrow one, none at 16:9; the menus
 are pillarboxed / letterboxed. Which flag of the Global player (+0x1B8 bit 0) the menus set is
-not traced (LIKELY the flag above, U-989).
+not traced (LIKELY the flag above, U-994).
 
 Port: `gfx_stage::MovieSpace` (each stage's `space`, from the window), `HudWidgets::layout` /
 `HudFxWidgets::layout` run by `gfx_hud::update_gfx_hud` on a window size change, the stripes'
 `set_stripes_position`, the wheel's and the saving icon's `GetMovieSpaceCoord`, and
 `menu_art::black_stripes` over the layers marked `DrawsBlackStripes` (launcher, pause menu,
 journal, mission statistics). The task / awareness markers' area (`m_fMarkerAreaRatio_PC` 0.9)
-is still taken on the stage, not the visible extent (U-990).
+is still taken on the stage, not the visible extent (U-995).
 
 ## Popups and the native queue (`objectives_mc`, `targetNotification_mc`)
 
