@@ -889,6 +889,8 @@ fn step_tree(state: &mut WorldState, i: usize, dt: f32, cfg: &SimConfig) {
     let p = state.players[i];
     let dead = !p.alive;
     let Some(assets) = cfg.anim_source.npc_tree(dead) else { return };
+    // The locomotion component's start, stop or turn sequence in the node's "Specific anim" child.
+    let specific = crate::npc_loco::tree_request(state, p.id, cfg);
     let Some(a) = state.anim.get_mut(&p.id) else { return };
     let want = dead as u8;
     if a.tree.as_ref().is_none_or(|t| t.tree != want) {
@@ -919,7 +921,7 @@ fn step_tree(state: &mut WorldState, i: usize, dt: f32, cfg: &SimConfig) {
     let v = p.velocity.truncate();
     let velocity = (v.dot(right).atan2(v.dot(fwd)).to_degrees(), v.length());
     let m = modifier(&p);
-    let locomotion = (!dead).then(|| LocoInput { config: &assets.loco, modifier: m, velocity, specific: None });
+    let locomotion = (!dead).then(|| LocoInput { config: &assets.loco, modifier: m, velocity, specific });
     let inputs = TreeInputs { physics: Some(physics(&p)), slots: &slots, locomotion, ..Default::default() };
     tree.state.update(&assets.shape, assets.clips.as_ref(), &inputs, dt);
     tree.root = tree.state.root_delta();

@@ -411,6 +411,15 @@ pub struct PlayerState {
     /// physics integrates it in place of the input's.
     #[serde(default)]
     pub root_velocity: Option<Vec3>,
+    /// The NPC locomotion component's arrival (+0x1AC bit 7, 0x00944390) of a non-accurate request
+    /// whose idle mode has stop sequences: within `m_fUnaccuracyRadius` and below
+    /// `m_fVelocityToStopMoving` after its stop (`crate::npc_loco`); the brain's walk is over.
+    #[serde(default)]
+    pub loco_arrived: bool,
+    /// The component is stopping with a sequence (its stop window or its stop, states 10-14): the
+    /// request has not arrived yet, whatever the brain's own radius says.
+    #[serde(default)]
+    pub loco_stopping: bool,
     /// Helmet of an NPC (`m_PotentialNPCArmor`, `DisTweaks_Armor` protecting the head), until hits
     /// knock it off. The armour damage filter (0x00B78610) zeroes hits of `m_DamageTypesToAbsorb`
     /// types on the protected region and side, but the shipped helmets (elite, city, thug) absorb
@@ -809,6 +818,8 @@ impl PlayerState {
             nav_end: None,
             loco_speed: 0.0,
             root_velocity: None,
+            loco_arrived: false,
+            loco_stopping: false,
             helmet: false,
             plague: false,
             rat_attack: RatAttackState::default(),

@@ -22,6 +22,7 @@ pub mod inventory;
 pub mod left_hand;
 pub mod movement;
 pub mod noise;
+pub mod npc_loco;
 pub mod pawn_states;
 pub mod player_stats;
 pub mod powers;
@@ -247,6 +248,21 @@ pub fn step_world(
             p.last_input = input;
             continue;
         }
+        // An NPC's locomotion component (its start, stop and turn sequences, `npc_loco`): the
+        // yaw and speed its state asks of the path following, or the sequence's root motion.
+        let drive = if pawn_states::has_states(&p0) { npc_loco::pre_move(state, i, cfg) } else { npc_loco::Drive::default() };
+        let mut input = input;
+        if let Some(yaw) = drive.yaw {
+            input.yaw = yaw;
+        }
+        match drive.speed {
+            Some(s) if s <= 0.0 => {
+                input.forward = 0;
+                input.right = 0;
+            }
+            Some(s) => state.players[i].loco_speed = s,
+            None => {}
+        }
 
         // Takedowns, bodies, pickups (Use), elixirs: aimed with this tick's view.
         state.players[i].yaw = input.yaw;
@@ -299,7 +315,7 @@ pub fn step_world(
         let left_input = if inventory::owns(&state.players[i], inventory::left_hand_bit(left_input.left_hand)) { left_input } else { PlayerInput { left_hand: input::LeftHand::Empty, ..left_input } };
         let p = &mut state.players[i];
         let choke_lock = p.choke.phase != state::ChokePhase::None;
-        let locked = combat::sword_locks_movement(p) || p.mode == MoveMode::Blinking || choke_lock || p.action_lock > 0.0 || p.carry_anim > 0.0 || loco_off;
+        let locked = combat::sword_locks_movement(p) || p.mode == MoveMode::Blinking || choke_lock || p.action_lock > 0.0 || p.carry_anim > 0.0 || loco_off || drive.anim;
         let sword_out = movement::sword_in_right_hand(p);
         movement::step_movement(p, &input, sword_out, !locked, &ctx, &mut out.events);
         noise::track_fall(&p0, p);
@@ -351,6 +367,9 @@ pub fn step_world(
     // physics and states, the notifies firing inside the advance). No handler reads another
     // pawn's physics, so advancing after the whole group equals the per-pawn interleaving.
     {
+        // The NPC trees' locomotion nodes (their move loops' sync position and the component's
+        // specific anim) in the same update.
+        npc_loco::advance(state, cfg);
         let mut ao = anim::StepOut::default();
         anim::step(state, cfg, world, &mut ao);
         out.events.extend(ao.events);
@@ -365,6 +384,7 @@ pub fn step_world(
     pawn_states::barrier(state, world, cfg);
     pawn_states::chain_tick(state, cfg);
     pawn_states::locomotion(state, cfg);
+    npc_loco::locomotion(state, cfg);
     // Rat attack groups.
     let rat_dt = DT * powers::world_time_scale(state, g, false);
     if rat_dt > 0.0 && state.players.iter().any(|p| p.kind == state::PawnKind::Rat) {

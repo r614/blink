@@ -216,6 +216,9 @@ pub struct PawnStates {
     pub ragdoll: bool,
     /// Chains played so far (wrapping): the layer token of the next one.
     pub serial: u32,
+    /// The locomotion component's start, stop and turn sequences (`crate::npc_loco`).
+    #[serde(default)]
+    pub loco: crate::npc_loco::NpcLoco,
 }
 
 /// `ERootMotionMode` values.

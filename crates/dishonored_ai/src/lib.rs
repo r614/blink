@@ -2873,11 +2873,14 @@ impl Brain {
     /// Arrival of a walk: an accurate stop arrives within 0.1 uu of the path's end (0x00944390,
     /// 0.01 squared); the pawn's last step lands on it (`PlayerState::nav_end`). Port fallbacks:
     /// a pawn held by collision 60 uu from its goal for a second, a go-to without a navmesh
-    /// path, and the routine walks arrive within 60 uu.
+    /// path, and the routine walks arrive within 60 uu. A non-accurate walk whose stance stops
+    /// with a sequence arrives when its locomotion says so, after the stop, and not by the radius
+    /// while the stop is pending (`PlayerState::loco_arrived` / `loco_stopping`,
+    /// `dishonored_sim::npc_loco`; 0x00944390).
     fn arrived(&self, me: &PlayerState, goal: Vec3) -> bool {
         match self.accurate_stop() {
             Some(end) => Self::reached(me, end, 0.1) || (self.stuck > 1.0 && Self::reached(me, goal, 60.0)),
-            None => Self::reached(me, goal, 60.0),
+            None => me.loco_arrived || (!me.loco_stopping && Self::reached(me, goal, 60.0)),
         }
     }
 
