@@ -36,8 +36,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let t = std::time::Instant::now();
+    // `--system SUBSTR`: the gameplay systems (`GAMEPLAY_PARTICLES`) are imported with the map
+    // and every decoded system whose path contains SUBSTR is listed emitter by emitter.
+    let system = args.iter().position(|a| a == "--system").map(|n| args[n + 1].clone());
     let opts = ImportOptions {
         load_textures: !args.iter().any(|a| a == "--no-textures"),
+        extra_particles: if system.is_some() { dishonored_assets::particle_material::GAMEPLAY_PARTICLES.iter().map(|s| s.to_string()).collect() } else { Vec::new() },
         ..Default::default()
     };
     let (m, stats) = import_level(&content, map, &pkgs, &opts)?;
@@ -67,6 +71,10 @@ fn main() -> Result<()> {
     }
     println!("instance origin bounds {lo} .. {hi}");
     println!("spawns: {:?}", m.spawn_candidates.iter().take(5).collect::<Vec<_>>());
+    if let Some(sub) = &system {
+        dump_systems(&m, sub, args.iter().any(|a| a == "--full"));
+        return Ok(());
+    }
     if let Some(n) = args.iter().position(|a| a == "--inst") {
         for i in m.instances.iter().take(args[n + 1].parse()?) {
             println!("{} mesh={} hidden={} m={:?}", i.source, m.meshes[i.mesh].source, i.hidden, i.transform.to_cols_array_2d());
@@ -258,6 +266,58 @@ pub fn dump_materials(content: &Content, pkg_name: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `map_dump <map> --system SUBSTR`: every decoded particle system whose path contains SUBSTR,
+/// emitter by emitter: kind, blend, sort mode, screen alignment, SubUV, the material with its
+/// base, switches, constants and decoded sprite shading, the sprite texture (size, mean colour,
+/// alpha range), the start / over-life distributions (their first values; every value with `--full`)
+/// and the modules the port does not simulate.
+pub fn dump_systems(m: &dishonored_ir::DishonoredMap, sub: &str, full: bool) {
+    use dishonored_assets::texture::decode_rgba8;
+    let low = sub.to_ascii_lowercase();
+    let cut = if full { usize::MAX } else { 8 };
+    let first = |d: Option<&dishonored_ir::particles::Dist>| d.map(|d| format!("{:?}{}", &d.table[..d.table.len().min(cut)], if d.table.len() > cut { format!(" ..{} values", d.table.len()) } else { String::new() }));
+    for s in m.particle_systems.iter().filter(|s| s.source.to_ascii_lowercase().contains(&low)) {
+        println!("== {} ({} emitters)", s.source, s.emitters.len());
+        for (k, e) in s.emitters.iter().enumerate() {
+            let kind = if e.mesh.is_some() { "mesh" } else if e.trail.is_some() { "trail" } else if e.beam.is_some() { "beam" } else if e.decal.is_some() { "decal" } else { "sprite" };
+            println!(
+                "  [{k}] {} {kind} blend {:?} sort {} align {} sub {}x{} (method {}) local {} duration {} loops {} delay {} bursts {:?} rate {:?} mesh {:?}",
+                e.name, e.blend, e.sort_mode, e.screen_align, e.sub_h, e.sub_v, e.sub_method, e.local_space, e.duration, e.loops, e.delay, e.bursts, first(e.rate.as_ref()), e.mesh
+            );
+            println!("      lifetime {:?} size {:?} size_life {:?} color {:?} alpha {:?}", first(e.lifetime()), first(e.size()), first(e.size_over_life().map(|x| x.0)), first(e.color()), first(e.alpha()));
+            println!("      color_life {:?} alpha_life {:?} scale_life {:?}", first(e.color_over_life()), first(e.alpha_over_life()), e.color_scale_over_life().map(|(c, a, _)| (first(c), first(a))));
+            let unsupported: Vec<&str> = e.unsupported().collect();
+            if !unsupported.is_empty() {
+                println!("      unsupported {unsupported:?}");
+            }
+            let Some(id) = e.material else {
+                println!("      material none");
+                continue;
+            };
+            let ma = &m.materials[id];
+            println!("      material {} hint {:?} textures {:?}", ma.source, ma.blend, ma.texture_params.iter().map(|(n, t)| format!("{n}={}", m.textures[*t].source)).collect::<Vec<_>>());
+            if let Some(p) = m.material_params.get(id) {
+                let on: Vec<&str> = p.static_switches.iter().filter(|s| s.1).map(|s| s.0.as_str()).collect();
+                println!("      base {:?} blend {:?} known {} unlit {} switches on {on:?} masks {:?}", p.base_material, p.blend, p.blend_known, p.unlit, p.mask_channels);
+                println!("      vectors {:?} scalars {:?}", p.vectors, p.scalars);
+                println!("      particle {:?} opacity {:?} emissive {:?} ue3 map {:?}", p.particle, p.opacity.map(|t| &m.textures[t].source), p.emissive.map(|t| &m.textures[t].source), p.ue3.as_ref().map(|u| u.map));
+            }
+            if let Some(t) = ma.diffuse {
+                let tex = &m.textures[t];
+                let stats = decode_rgba8(tex, 0).map(|(_, _, px)| {
+                    let n = px.len().max(1) as f32;
+                    let mean = |c: usize| px.iter().map(|p| p[c] as f32).sum::<f32>() / n / 255.0;
+                    let (lo, hi) = px.iter().fold((255u8, 0u8), |(a, b), p| (a.min(p[3]), b.max(p[3])));
+                    format!("mean rgba ({:.3}, {:.3}, {:.3}, {:.3}) alpha {lo}..{hi}", mean(0), mean(1), mean(2), mean(3))
+                });
+                println!("      sprite {} {:?} {}x{} {}", tex.source, tex.format, tex.width, tex.height, stats.unwrap_or_default());
+            } else {
+                println!("      sprite none");
+            }
+        }
+    }
 }
 
 /// Meshes whose sections end up with no material at all (render as fallback grey).
