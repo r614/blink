@@ -272,6 +272,8 @@ impl NetClient {
             .into_iter()
             .filter(|e| match e {
                 SimEvent::Jumped { id } | SimEvent::BlinkStart { id, .. } | SimEvent::SwordSwing { id } | SimEvent::Fired { id, .. } | SimEvent::Landed { id, .. } => *id == me,
+                // The local player's animation notifies (its first-person sounds and effects).
+                SimEvent::AnimNotify { pawn, .. } => *pawn == me,
                 _ => false,
             })
             .collect();
