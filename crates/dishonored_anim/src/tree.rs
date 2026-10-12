@@ -392,6 +392,13 @@ impl TreeShape {
         self.initial.clone()
     }
 
+    /// Whether a state reads against this shape: made from the same tree (the same nodes and
+    /// sync groups), whatever the skeleton (the renderer poses the simulation's state with a
+    /// shape of its own per mesh).
+    pub fn fits(&self, state: &TreeState) -> bool {
+        state.nodes.len() == self.nodes.len() && state.group_rates.len() == self.groups.len() && state.nodes.iter().zip(&self.initial.nodes).all(|(a, b)| a.weights.len() == b.weights.len() && a.seq.is_some() == b.seq.is_some())
+    }
+
     /// The node named `name` (`NodeName`, else the export's name).
     pub fn node_index(&self, name: &str) -> Option<usize> {
         self.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))
@@ -634,6 +641,89 @@ impl TreeState {
         }
     }
 
+    // ---- the presentation's reads ----
+
+    /// The sequences the state names: every sequence node's `AnimSeqName` and the look-at node's
+    /// grid cells, what a [`Clips`] must resolve to pose it (a renderer decodes them first).
+    pub fn sequence_names(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        for n in &self.nodes {
+            if let Some(s) = n.seq.as_ref().filter(|s| !s.name.is_empty()) {
+                out.push(s.name.as_str());
+            }
+            if let KindState::LookAt(l) = &n.kind {
+                out.extend(l.names.iter().map(String::as_str));
+            }
+        }
+        out
+    }
+
+    /// The presentation's own inputs on a copy of a state the simulation stepped: the look-at
+    /// node's aims (set as its tick sets them) and the matinee's stack channels (set as the
+    /// requests set them). Neither advances a sequence or a blend, so the copy still poses the
+    /// simulation's tick.
+    pub fn present(&mut self, shape: &TreeShape, look: Option<&LookInput>, stacks: &[StackChannel]) {
+        if let Some(look) = look {
+            for (o, n) in shape.nodes.iter().zip(self.nodes.iter_mut()) {
+                if let (Kind::LookAt, KindState::LookAt(l)) = (&o.kind, &mut n.kind) {
+                    set_look(l, look);
+                }
+            }
+        }
+        self.apply_stacks(shape, stacks);
+    }
+
+    /// A slot node's (`NodeName`) heaviest channel other than its source: its sequence, time and
+    /// channel weight; `None` while the source alone plays.
+    pub fn slot(&self, shape: &TreeShape, name: &str) -> Option<(&str, f32, f32)> {
+        let i = shape.nodes.iter().position(|n| matches!(n.kind, Kind::Slot) && n.name.eq_ignore_ascii_case(name))?;
+        let mut best: Option<(&str, f32, f32)> = None;
+        for (k, c) in shape.nodes[i].children.iter().enumerate().skip(1) {
+            let (Some(c), Some(w)) = (c, self.nodes[i].weights.get(k).copied()) else { continue };
+            let Some(s) = self.nodes[*c].seq.as_ref() else { continue };
+            if w > ZERO_WEIGHT && best.is_none_or(|b| w > b.2) {
+                best = Some((s.name.as_str(), s.time, w));
+            }
+        }
+        best
+    }
+
+    /// The locomotion node's requested modifier and smoothed velocity (angle from facing in
+    /// degrees, speed); `None` before it ticked.
+    pub fn locomotion(&self, shape: &TreeShape) -> Option<(&str, (f32, f32))> {
+        shape.nodes.iter().zip(&self.nodes).find_map(|(o, n)| match (&o.kind, &n.kind) {
+            (Kind::Locomotion(_), KindState::Locomotion(st)) => Some((st.modifier.as_deref()?, st.vel?)),
+            _ => None,
+        })
+    }
+
+    /// The locomotion node's `m_bFootOnGround` per `m_Feet` entry (0x009114A0), an output of the
+    /// tree: a foot is planted while the circular distance between the `LocoGroup` sync position
+    /// (its master's relative position, reversed with `bReverseSync`) and the foot's
+    /// `m_fOnGroundPct` is at most half the weighted `m_fFootOnGroundPct` of the moving speed modes
+    /// of the requested modifier at the smoothed velocity (`locomotion::foot_half`). `cfg` is the
+    /// config the node ticked with; `None` before the node ticked.
+    pub fn feet_on_ground(&self, shape: &TreeShape, clips: &dyn Clips, cfg: &LocoConfig) -> Option<[bool; 2]> {
+        let (i, st) = shape.nodes.iter().zip(&self.nodes).enumerate().find_map(|(i, (o, n))| match (&o.kind, &n.kind) {
+            (Kind::Locomotion(_), KindState::Locomotion(st)) => Some((i, st)),
+            _ => None,
+        })?;
+        let (modifier, vel) = (st.modifier.as_deref()?, st.vel?);
+        let half = locomotion::foot_half(&locomotion::loco_entries(cfg, cfg.modifier(modifier)?, vel).0);
+        // The group master as `tick_groups` picks it: the heaviest relevant synchronized member.
+        let group = shape.nodes[i].children.iter().flatten().find_map(|c| shape.nodes[*c].seq.as_ref().and_then(|o| o.group));
+        let mut master: Option<usize> = None;
+        for &m in group.map(|g| shape.groups[g].members.as_slice()).unwrap_or_default() {
+            let synchronized = shape.nodes[m].seq.as_ref().is_some_and(|o| o.synchronize);
+            let relevant = self.nodes[m].total > ZERO_WEIGHT && self.nodes[m].seq.as_ref().is_some_and(|s| s.playing && clips.find(&s.name).is_some());
+            if synchronized && relevant && master.is_none_or(|x| self.nodes[m].total > self.nodes[x].total) {
+                master = Some(m);
+            }
+        }
+        let phase = master.and_then(|m| self.group_position(m, clips));
+        Some(phase.map_or([false; 2], |p| locomotion::feet_on_ground(&cfg.feet, p, half)))
+    }
+
     // ---- requests ----
 
     fn apply_requests(&mut self, shape: &TreeShape, inputs: &TreeInputs) {
@@ -676,7 +766,13 @@ impl TreeState {
                 }
             }
         }
-        for s in inputs.stacks {
+        self.apply_stacks(shape, inputs.stacks);
+    }
+
+    /// Stack channels set from outside (the matinee's): each channel's sequence, position and
+    /// weight, nothing advanced.
+    fn apply_stacks(&mut self, shape: &TreeShape, stacks: &[StackChannel]) {
+        for s in stacks {
             let Some(i) = shape.nodes.iter().position(|n| matches!(n.kind, Kind::Stack) && n.name.eq_ignore_ascii_case(&s.stack)) else { continue };
             let k = s.channel + 1;
             let Some(c) = shape.nodes[i].children.get(k).copied().flatten() else { continue };
@@ -789,13 +885,7 @@ impl TreeState {
             }
             Kind::LookAt => {
                 if let (Some(look), KindState::LookAt(l)) = (&inputs.look, &mut self.nodes[i].kind) {
-                    // The mode's grids replace the cooked ones when it names them.
-                    if look.mode.head.len() == 9 && look.mode.torso.len() == 9 && l.names.len() == 18 {
-                        l.names[..9].clone_from_slice(&look.mode.head);
-                        l.names[9..].clone_from_slice(&look.mode.torso);
-                    }
-                    l.cells = lookat::node_weights(look.mode, look.head, look.torso).to_vec();
-                    l.weight = look.weight;
+                    set_look(l, look);
                 }
             }
             Kind::Additive | Kind::Stack | Kind::Pass => {}
@@ -1234,6 +1324,17 @@ enum Fill<'a> {
     Zero,
     /// The pose below a stack channel (for sequences with `m_bDontUseRefPoseOnNonDefinedBones`).
     Keep(&'a Pose),
+}
+
+/// The look-at node's cells and weight for an aim, as its tick sets them; the mode's grids
+/// replace the cooked ones when it names them.
+fn set_look(l: &mut LookState, look: &LookInput) {
+    if look.mode.head.len() == 9 && look.mode.torso.len() == 9 && l.names.len() == 18 {
+        l.names[..9].clone_from_slice(&look.mode.head);
+        l.names[9..].clone_from_slice(&look.mode.torso);
+    }
+    l.cells = lookat::node_weights(look.mode, look.head, look.torso).to_vec();
+    l.weight = look.weight;
 }
 
 /// A cooked scalar from a node's raw properties (`CurrentTime`, `Child2Weight`, ...).

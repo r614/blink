@@ -8,7 +8,10 @@
 //! name order), with ARCHITECTURE.md rule 2's shape: state + assets + inputs -> outputs. The
 //! instance is a [`TreeShape`] shared through an `Arc` (what the tree, the skeleton and the mesh
 //! rotation fix) and a serializable [`TreeState`] (what a tick changes), so the simulation keeps
-//! one state per pawn in its snapshots.
+//! one state per pawn in its snapshots. The renderer poses the simulation's state with its own
+//! shape per mesh (the state does not depend on the skeleton), after setting its presentation
+//! inputs on a copy (`TreeState::present`: the look-at aims, the matinee's stack channels) and
+//! reads the tree's outputs (`slot`, `locomotion`, `feet_on_ground`).
 //!
 //! Node classes and confidence (research/dishonored/ANIMATION.md sections 2, 3, 6, 9;
 //! research/dishonored/animation/ANIMTREE_NPC_HUMAN.md), measured against the oracle capture of
