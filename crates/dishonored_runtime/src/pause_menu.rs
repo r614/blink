@@ -108,7 +108,7 @@ const ITEM_GAP: f32 = 5.0;
 
 pub fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let root = menu_art::spawn_layer(&mut commands, 50);
-    commands.entity(root).insert(Visibility::Hidden);
+    commands.entity(root).insert((Visibility::Hidden, menu_art::DrawsBlackStripes));
     commands.insert_resource(menu_ui::load_menu_art(&["pause", "options", "gamma", "common", "global", "load", "journal", "stats"], &mut images));
     commands.insert_resource(MenuTexts::load());
     commands.insert_resource(PauseMenu { root: Some(root), from_launcher: std::env::args().any(|a| a == "--from-launcher"), anim: Anim::new(0xa5e), ..default() });

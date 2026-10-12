@@ -266,7 +266,7 @@ pub struct MissionStatsScreen {
 
 pub fn setup(mut commands: Commands) {
     let root = menu_art::spawn_layer(&mut commands, 49);
-    commands.entity(root).insert(Visibility::Hidden);
+    commands.entity(root).insert((Visibility::Hidden, menu_art::DrawsBlackStripes));
     commands.insert_resource(MissionStatsScreen { root: Some(root), anim: Anim::new(0x57a7), ..default() });
 }
 

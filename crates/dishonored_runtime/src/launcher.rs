@@ -630,6 +630,7 @@ pub fn run() -> AppExit {
                 rebuild,
                 crate::loading_screen::update_loading_screen,
                 menu_art::layout_prims,
+                menu_art::black_stripes,
                 crate::settings::apply_window,
                 crate::settings::apply_camera,
                 exit_after,
@@ -649,7 +650,9 @@ fn exit_after(time: Res<Time>, e: Option<Res<ExitAfter>>, mut exit: MessageWrite
 fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut l: ResMut<Launcher>) {
     launcher_bg::spawn_camera(&mut commands);
     commands.insert_resource(menu_ui::load_menu_art(&["main", "options", "gamma", "common", "global", "load"], &mut images));
-    l.root = Some(menu_art::spawn_layer(&mut commands, 10));
+    let root = menu_art::spawn_layer(&mut commands, 10);
+    commands.entity(root).insert(menu_art::DrawsBlackStripes);
+    l.root = Some(root);
     // Mission card pictures (`UI_Mission_Large.MissionsScreen_<image>_Large`).
     if let Ok(content) = dishonored_assets::Content::locate() {
         let names: Vec<String> = l.maps.iter().filter_map(|m| m.image.clone()).collect();

@@ -1050,3 +1050,49 @@ pub fn layout_prims(windows: Query<&Window, With<bevy::window::PrimaryWindow>>, 
 pub fn spawn_layer(commands: &mut Commands, z: i32) -> Entity {
     commands.spawn((Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() }, GlobalZIndex(z), Pickable::IGNORE, MenuLayer { z })).id()
 }
+
+/// A layer whose movie player has `m_bDrawBlackStripesWhileActive` (class defaults: the main
+/// menu, the pause menu, the journal, the mission statistics): while it is shown the Global
+/// movie's black stripes cover the empty space around the stage ([`black_stripes`]).
+#[derive(Component)]
+pub struct DrawsBlackStripes;
+
+/// One of the Global movie's two stripes (`blackStripes_mc._s0_mc` / `_s1_mc`).
+#[derive(Component)]
+pub struct BlackStripe(u8);
+
+/// The Global movie's stripes (`g_BlackStripes.SetStripes`, also on `Stage.onResize`; turned on
+/// by the Global player's tick 0x00BAA610 while a striped menu is up): black fills drawn by
+/// script over the empty space of the movie space (`GetMovieSpaceCoord(1)`): left and right of
+/// the stage (`emptySpaceX` x `Stage.height`, at `coordMin._x` and `_sceneW`) when the screen is
+/// wider than 16:9, above and below it (`Stage.width` x `emptySpaceY`, at `coordMin._y` and
+/// `_sceneH`) when it is narrower; none at 16:9. They are drawn over the menus (the Global
+/// movie is the top one), under the loading screen.
+pub fn black_stripes(mut commands: Commands, windows: Query<&Window, With<bevy::window::PrimaryWindow>>, layers: Query<&Visibility, With<DrawsBlackStripes>>, mut stripes: Query<(&BlackStripe, &mut Node, &mut Visibility), Without<DrawsBlackStripes>>) {
+    if stripes.is_empty() {
+        for i in 0..2 {
+            commands.spawn((Node { position_type: PositionType::Absolute, ..default() }, BackgroundColor(Color::BLACK), GlobalZIndex(95), Pickable::IGNORE, Visibility::Hidden, BlackStripe(i)));
+        }
+        return;
+    }
+    let Some(window) = windows.iter().next() else { return };
+    let win = Vec2::new(window.width(), window.height());
+    let space = crate::gfx_stage::MovieSpace::new(win);
+    let (s, off) = space.xform();
+    let on = layers.iter().any(|v| *v != Visibility::Hidden) && space.empty != Vec2::ZERO;
+    for (b, mut node, mut vis) in &mut stripes {
+        let want = if on { Visibility::Inherited } else { Visibility::Hidden };
+        vis.set_if_neq(want);
+        if !on {
+            continue;
+        }
+        let (min, size) = if space.empty.x > 0.0 {
+            let x = if b.0 == 0 { 0.0 } else { off.x + STAGE.x * s };
+            (Vec2::new(x, 0.0), Vec2::new(off.x, win.y))
+        } else {
+            let y = if b.0 == 0 { 0.0 } else { off.y + STAGE.y * s };
+            (Vec2::new(0.0, y), Vec2::new(win.x, off.y))
+        };
+        crate::gfx_hud::place(&mut node, px(min.x), px(min.y), Some(px(size.x)), Some(px(size.y)));
+    }
+}

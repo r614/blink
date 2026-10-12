@@ -402,7 +402,7 @@ impl Journal {
 
 pub fn setup(mut commands: Commands) {
     let root = menu_art::spawn_layer(&mut commands, 48);
-    commands.entity(root).insert(Visibility::Hidden);
+    commands.entity(root).insert((Visibility::Hidden, menu_art::DrawsBlackStripes));
     commands.insert_resource(Journal { root: Some(root), anim: Anim::new(0x10a7), ..default() });
 }
 
