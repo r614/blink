@@ -169,3 +169,83 @@ fn a_death_plays_its_chain_and_moves_until_the_ragdoll() {
     assert!(moved > 10.0, "the death's root motion moved the body {moved} uu");
     assert!((r.guard().position - at_ragdoll.unwrap()).truncate().length() < 3.0, "no root motion after the ragdoll");
 }
+
+/// A thrown NPC at rest gets up through `StateNPCMasterStunned`: the `Stun` chain's group 1
+/// (`Generic_RagdollToFront`, cut in), its loop left on the next tick (`m_fStunDuration` 0), the
+/// recovery the rest test rolled, then Walk.
+#[test]
+fn a_thrown_npc_gets_up_through_the_stun_chain() {
+    let mut r = Run::new(600.0);
+    dishonored_sim::pawn_states::enter_thrown(&mut r.state, GUARD);
+    r.state.player_mut(GUARD).unwrap().thrown.getup = 2;
+    r.step(None);
+    assert_eq!(r.master(), Master::Stunned);
+    assert!(r.chain_seq().unwrap().ends_with("Generic_RagdollToFront"));
+    let l = r.state.anim[&GUARD].layers[layer::FULL_BODY].as_ref().unwrap();
+    assert_eq!(l.blend_in, 0.0);
+    let mut seqs = vec![r.chain_seq().unwrap()];
+    for _ in 0..400 {
+        r.step(None);
+        if let Some(k) = r.chain_seq() {
+            if seqs.last() != Some(&k) {
+                seqs.push(k);
+            }
+        }
+    }
+    assert_eq!(r.master(), Master::Walk);
+    assert!(seqs.iter().any(|k| k.ends_with("Sword_Stun_Loop")), "{seqs:?}");
+    assert!(seqs.last().unwrap().ends_with("Sword_RecoveryB"), "the rolled recovery: {seqs:?}");
+}
+
+/// The brain's ambient idle is a full-body PlayAnim of its `AmbientIdle` step, taken once per
+/// serial, from how long ago it began; dropping it exits the state.
+#[test]
+fn an_ambient_idle_plays_through_the_pawn_states() {
+    let mut r = Run::new(600.0);
+    r.state.player_mut(GUARD).unwrap().ai_awareness = awareness::UNAWARE;
+    let req = Request { ambient: Some((0, 3, 1, 0.1)), ..Default::default() };
+    r.step(Some(req));
+    assert_eq!(r.master(), Master::PlayAnim);
+    assert!(r.chain_seq().unwrap().ends_with("Empty_Idle_04"));
+    let l = r.state.anim[&GUARD].layers[layer::FULL_BODY].as_ref().unwrap();
+    assert!((l.time - (0.1 + DT)).abs() < 2e-3, "from 0.1 s in: {}", l.time);
+    r.step(Some(req));
+    assert_eq!(r.state.pawn_states[&GUARD].ambient_serial, 1);
+    r.step(None);
+    r.step(None);
+    assert_eq!(r.master(), Master::Walk);
+}
+/// A choke: the victim's `StateNPCMasterBeingChoked` plays the `Choke` group of the choker's state,
+/// In first, the Loop after the victim's own In (0x00A74720), the Win at the won choke; the Win's
+/// end puts the body down.
+#[test]
+fn a_choked_guard_plays_the_choke_slaves() {
+    let mut r = Run::new(60.0);
+    r.state.player_mut(GUARD).unwrap().ai_awareness = awareness::UNAWARE;
+    let (ai, vi) = (r.state.players.iter().position(|p| p.id == 1).unwrap(), r.state.players.iter().position(|p| p.id == GUARD).unwrap());
+    let g = r.cfg.gameplay.clone();
+    dishonored_sim::takedown::start_choke(&mut r.state, ai, vi, &g, &mut Vec::new());
+    // The choke button held through the choke.
+    let hold = |r: &mut Run| {
+        let t = r.state.tick;
+        r.state.requests.clear();
+        let ins = [(1, PlayerInput { tick: t, buttons: dishonored_sim::input::buttons::BLOCK, ..Default::default() }), (GUARD, PlayerInput { tick: t, yaw: 180.0, ..Default::default() })];
+        step_world(&mut r.state, &ins, &r.world, &r.cfg);
+    };
+    hold(&mut r);
+    assert_eq!(r.master(), Master::BeingChoked);
+    assert!(r.chain_seq().unwrap().ends_with("Generic_Choke_In_Slave"), "{:?}", r.chain_seq());
+    let mut seen = vec![r.chain_seq().unwrap()];
+    for _ in 0..900 {
+        hold(&mut r);
+        if let Some(k) = r.chain_seq() {
+            if seen.last() != Some(&k) {
+                seen.push(k);
+            }
+        }
+    }
+    assert!(seen.iter().any(|k| k.ends_with("Generic_Choke_Loop_Slave")), "{seen:?}");
+    assert!(seen.iter().any(|k| k.ends_with("Generic_Choke_Win_Slave")), "{seen:?}");
+    assert_eq!(r.master(), Master::Dead);
+    assert!(r.state.pawn_states[&GUARD].ragdoll);
+}

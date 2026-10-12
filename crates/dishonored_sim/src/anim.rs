@@ -11,7 +11,11 @@
 //!   [`SeqPlay`] per layer (the full-body, upper-body and left-arm pickers of `Ply_Player_at` as
 //!   `viewmodel.rs` documents them from `Twk_Pawn_Corvo`'s state tweaks, without the picker tree,
 //!   whose `DishonoredAnimNodeStatePicker` semantics are not decoded: U-972), plus the held
-//!   crossbow's own mesh; an NPC plays its action chains on the full body (`FullBodySlot`).
+//!   crossbow's own mesh and an additive over the whole pose (the step-up's head); the player's
+//!   states' sequences are `crate::player_anim`'s. An NPC plays its action chains on the full body
+//!   (`FullBodySlot`), the upper body (`UpperBodySlot`) and the additive reactions
+//!   (`AdditiveReactSlot`); a human player's third-person body plays its own chains
+//!   (`crate::player_anim::Body`) on its tree.
 //! - **Order** (tick_order.md section 4 and "Consequences" 2-3): a pawn's states run after its
 //!   physics; the requests they make play in the same tick's advance (the first step of a new
 //!   sequence is `[0, RateScale x Rate x dt)`); the advance is `DT x` the pawn's time scale; every
@@ -41,7 +45,7 @@ use crate::input::LeftHand;
 use crate::left_hand::LeftAction;
 use crate::state::{LeftPhase, PawnKind, PlayerId, PlayerState, ProjectileKind, SwordPhase, WorldState};
 use crate::{DT, SimConfig};
-use dishonored_anim::tree::{LocoInput, SlotAction, SlotRequest, TreeInputs, TreeShape, TreeState};
+use dishonored_anim::tree::{FilterTarget, LocoInput, SlotAction, SlotRequest, TreeInputs, TreeShape, TreeState};
 use dishonored_anim::Clips;
 use dishonored_ir::gameplay::{GameplayConfig, NotifyInfo, SequenceInfo, sequence_key};
 use dishonored_ir::npc_anim::{LocoConfig, NpcAnim};
@@ -120,8 +124,15 @@ pub mod layer {
     /// The held crossbow's own mesh (`Crossbows_as.Crossbow_as`), which carries the shot's
     /// `DishonoredNotify_FireProjectile`.
     pub const WEAPON: usize = 3;
-    pub const COUNT: usize = 4;
+    /// An additive over the whole first-person pose (`StepUpMantle`'s `ADD_Head_Mantle_Low`,
+    /// `DisAnimNodeBlendByStepUpMantle`).
+    pub const ADDITIVE: usize = 4;
+    pub const COUNT: usize = 5;
 }
+
+/// The sequence id of the reference pose (an empty child of a blend: the player's climb at rest,
+/// `Ply_Player_Climb_at`): no table entry, nothing advances but the play time.
+pub const REF_POSE: SeqId = SeqId::MAX;
 
 /// What a layer's sequence plays for (the gameplay state instance that requested it): its kind
 /// in the high byte, an instance number below.
@@ -144,7 +155,30 @@ pub mod token {
     pub const CHAIN: u32 = 8 << 24;
     /// A parried NPC attacker's `Parry` chain (`StateNPCActionParry`).
     pub const PARRY: u32 = 9 << 24;
+    /// A player state's sequence that continues while the state asks for it (navigation, the
+    /// mantle, choke and carry masters, the stun, slide, climb, swim, the casts' aims): its sync
+    /// group ([`super::sync`]) at bit 16 and the sequence id below, so that asking again for the
+    /// same sequence keeps it playing.
+    pub const NAV: u32 = 10 << 24;
+    /// A player state's one-shot (equips, switches, the jump and crouch reactions, the gunshot
+    /// reaction, the block's out, the won parry, the step-up's head), with the pawn's shot serial
+    /// below: each request restarts.
+    pub const ACTION: u32 = 11 << 24;
+    /// A human player's third-person body chain (`crate::player_anim::Body`), with its serial
+    /// below.
+    pub const BODY: u32 = 12 << 24;
     pub const KIND: u32 = 0xFF << 24;
+}
+
+/// The sync groups of the player's navigation loops (`Ply_Nav_LeftHand_at`'s `MasterIdleSync`,
+/// `MasterRunSync`, `MasterSprintSync` with the full body's idle, run and sprint): a left-hand
+/// loop in the full body's group takes its relative position after every advance (the full
+/// body's walk is in `WalkCycles`, which the left hand does not join).
+pub mod sync {
+    pub const NONE: u32 = 0;
+    pub const IDLE: u32 = 1;
+    pub const RUN: u32 = 2;
+    pub const SPRINT: u32 = 3;
 }
 
 /// The left-hand actions a layer plays (the low bits of [`token::LEFT`]).
@@ -229,12 +263,26 @@ pub struct SeqPlay {
     /// blend in (and, in the renderer, out). Read by the presentation only.
     #[serde(default)]
     pub blend: f32,
+    /// The play time ([`Self::elapsed`]) at which the state let go of the layer: it blends out
+    /// over [`Self::blend`] from there and is removed once out (`AnimNodeBlendBase::
+    /// SetActiveChild` toward the source; [`PawnAnim::release`]).
+    #[serde(default)]
+    pub out: Option<f32>,
+    /// `bNoNotifies` (the left hand's navigation loops, `Ply_Nav_LeftHand_at`): the advance fires
+    /// no notify.
+    #[serde(default)]
+    pub quiet: bool,
 }
 
 impl SeqPlay {
     /// The state is done with its sequence: its `AnimStateExit` crossed, or the sequence ended.
     pub fn done(&self) -> bool {
         self.exited || !self.playing
+    }
+
+    /// The sequence's play time left to its end (sequence time over `RateScale x Rate`).
+    pub fn time_left(&self, info: &SequenceInfo) -> f32 {
+        (info.duration - self.time).max(0.0) / (info.rate_scale_or_one() * self.rate).abs().max(1e-6)
     }
 }
 
@@ -262,11 +310,56 @@ pub struct PawnAnim {
     pub rng: u32,
     #[serde(default)]
     pub tree: Option<NpcTree>,
+    /// The player's state as the last tick left it (its states' transitions start one-shots:
+    /// `crate::player_anim`); `None` for an NPC.
+    #[serde(default)]
+    pub prev: Option<crate::player_anim::PlayerPrev>,
+    /// One-shots played so far (wrapping): the next [`token::ACTION`]'s serial.
+    #[serde(default)]
+    pub shots: u32,
+    /// A human player's third-person body (`NPC_Human_at` driven by the player's states:
+    /// `crate::player_anim::body_requests`); `None` for an NPC, whose tree takes its layers.
+    #[serde(default)]
+    pub body: Option<crate::player_anim::Body>,
+    /// The player's navigation state the full body last showed (0 `Nav_Default_Ready`, 1
+    /// `Nav_Crouched`, 2 `Nav_Sprinting_Ready`): a change of state blends over the state's time.
+    #[serde(default)]
+    pub nav_tree: Option<u8>,
 }
 
 impl PawnAnim {
     pub fn new(id: PlayerId) -> Self {
         Self { rng: id.wrapping_mul(0x85EB_CA6B) ^ 0x2545_F491 | 1, ..Default::default() }
+    }
+
+    /// Play `seq` on `layer` for a player state with its own blend time and notifies (`quiet`:
+    /// `bNoNotifies`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn play_state(&mut self, layer: usize, seq: SeqId, token: u32, rate: f32, looping: bool, yaw: f32, blend: f32, quiet: bool) {
+        self.play(layer, seq, token, rate, looping, yaw);
+        if let Some(l) = self.layers[layer].as_mut() {
+            l.blend = blend;
+            l.quiet = quiet;
+        }
+    }
+
+    /// The next one-shot token ([`token::ACTION`]).
+    pub fn next_shot(&mut self) -> u32 {
+        self.shots = self.shots.wrapping_add(1);
+        token::ACTION | (self.shots & 0x00FF_FFFF)
+    }
+
+    /// The state lets go of the layer: it blends out over its blend time from now (at once
+    /// without one), then is removed by the advance.
+    pub fn release(&mut self, layer: usize) {
+        match self.layers[layer].as_mut() {
+            Some(l) if l.blend > 0.0 => {
+                if l.out.is_none() {
+                    l.out = Some(l.elapsed);
+                }
+            }
+            _ => self.layers[layer] = None,
+        }
     }
 
     /// Next roll in [0, 1) of the chain-pick stream.
@@ -282,16 +375,16 @@ impl PawnAnim {
     /// Play `seq` on `layer` from its start (`AnimNodeSlot::PlayCustomAnim`), blending in over
     /// the requesting state's blend time.
     pub fn play(&mut self, layer: usize, seq: SeqId, token: u32, rate: f32, looping: bool, yaw: f32) {
-        self.layers[layer] = Some(SeqPlay { seq, token, time: 0.0, prev: 0.0, rate, looping, playing: true, yaw, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0, blend: state_blend(layer, token) });
+        self.layers[layer] = Some(SeqPlay { seq, token, time: 0.0, prev: 0.0, rate, looping, playing: true, yaw, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0, blend: state_blend(layer, token), out: None, quiet: false });
     }
 
     pub fn stop(&mut self, layer: usize) {
         self.layers[layer] = None;
     }
 
-    /// The layer's sequence, when it plays for `token`.
+    /// The layer's sequence, when it plays for `token` (and its state still holds it).
     pub fn with(&self, layer: usize, token: u32) -> Option<&SeqPlay> {
-        self.layers[layer].as_ref().filter(|s| s.token == token)
+        self.layers[layer].as_ref().filter(|s| s.token == token && s.out.is_none())
     }
 
     /// Whether a window of a notify of `class` is open on the layer.
@@ -402,8 +495,11 @@ fn left_requests(p: &PlayerState, cfg: &SimConfig, a: &mut PawnAnim) {
     let token = |k: u32| token::LEFT | k;
     match want {
         Some((l, set, seq, kind)) if start => {
+            // `FireReloadFastCrossbow`'s `m_fPlayRateOverride` on the arms (the crossbow mesh's
+            // own clip keeps rate 1: its tree was not decoded).
+            let rate = if seq == "Crossbow_Fire_FastReload" && cfg.tuning.crossbow_fast_fire_rate > 0.0 { cfg.tuning.crossbow_fast_fire_rate } else { 1.0 };
             if let Some(id) = t.id_of(set, seq) {
-                a.play(l, id, token(kind), 1.0, false, p.yaw);
+                a.play(l, id, token(kind), rate, false, p.yaw);
             }
             // The crossbow mesh plays its own fire clip with the arms.
             if kind == left_kind::FIRE && item.is_crossbow() {
@@ -430,7 +526,23 @@ fn left_requests(p: &PlayerState, cfg: &SimConfig, a: &mut PawnAnim) {
             if let Some((seq, kind)) = req {
                 if a.with(layer::LEFT_ARM, token(kind)).is_none() {
                     if let Some(id) = t.id_of(set, &seq) {
-                        a.play(layer::LEFT_ARM, id, token(kind), 1.0, false, p.yaw);
+                        // The crossbow's reload actions at `m_fPlayRateOverride` 1.3
+                        // (`Twk_Inv_CrossbowCorvo`, as `ReloadTiming::crossbow` times them); a
+                        // fast reload stretched over its stage, cut in (`m_fBlendTime` 0) (the
+                        // stretch is the former picker's, LIKELY: the fast reload actions' rate
+                        // is not loaded).
+                        let len = t.info(id).map_or(0.0, |i| i.play_length());
+                        let (rate, blend) = if g.fast > 0.0 {
+                            (if g.end > 0.0 && len > 0.0 { (len / g.end).clamp(0.25, 4.0) } else { 1.0 }, 0.0)
+                        } else if item.is_crossbow() {
+                            (crate::tuning::CROSSBOW_RELOAD_RATE, state_blend(layer::LEFT_ARM, token(kind)))
+                        } else {
+                            (1.0, state_blend(layer::LEFT_ARM, token(kind)))
+                        };
+                        a.play(layer::LEFT_ARM, id, token(kind), rate, false, p.yaw);
+                        if let Some(l) = a.layers[layer::LEFT_ARM].as_mut() {
+                            l.blend = blend;
+                        }
                     }
                 }
             }
@@ -446,8 +558,9 @@ fn left_requests(p: &PlayerState, cfg: &SimConfig, a: &mut PawnAnim) {
 }
 
 /// The requests of a player's states this tick, made after its states ran and before its advance
-/// (a request made here plays in this tick's advance): the swing, the block and the left hand.
-/// The NPCs' chains are their pawn states' (`crate::pawn_states`).
+/// (a request made here plays in this tick's advance): the swing, the left hand's actions, then
+/// the rest of its states (`crate::player_anim`). The NPCs' chains are their pawn states'
+/// (`crate::pawn_states`).
 pub fn sync_requests(state: &mut WorldState, i: usize, cfg: &SimConfig) {
     let p = state.players[i];
     if p.kind != PawnKind::Human {
@@ -473,17 +586,11 @@ pub fn sync_requests(state: &mut WorldState, i: usize, cfg: &SimConfig) {
     if swinging.is_some_and(|l| cut || (s.phase == SwordPhase::Idle && l.token == swing_token && !l.interruptible && !l.done())) {
         a.stop(swing_layer);
     }
-    // The block (`AnimMeleeBlock`: `Sword_Ready_ParryIdle_In`, `Sword_Sneak_ParryIdle_In`
-    // crouched), whose `DisNotify_BlockParryZone` is the parry window.
-    if s.phase == SwordPhase::Blocking && a.with(layer::UPPER_BODY, token::BLOCK).is_none() {
-        let seq = t.id_of(SWORD_VERSUS_SET, if p.crouched { "Sword_Sneak_ParryIdle_In" } else { "Sword_Ready_ParryIdle_In" });
-        if let Some(seq) = seq {
-            a.play(layer::UPPER_BODY, seq, token::BLOCK, 1.0, false, p.yaw);
-        }
-    } else if s.phase != SwordPhase::Blocking && a.with(layer::UPPER_BODY, token::BLOCK).is_some() {
-        a.stop(layer::UPPER_BODY);
-    }
     left_requests(&p, cfg, a);
+    // The rest of the player's states: the navigation and its full-body states, the block (whose
+    // in's `DisNotify_BlockParryZone` is the parry window), the transitions' one-shots, the left
+    // hand's aims and navigation (`crate::player_anim`).
+    crate::player_anim::requests(&p, cfg, a);
     if let Some(seq) = swing_seq {
         state.players[i].sword.swing_seq = seq;
     }
@@ -541,6 +648,30 @@ pub fn after_group(state: &mut WorldState, cfg: &SimConfig, events: &[SimEvent],
         }
     }
     let slaves: Vec<PlayerId> = state.players.iter().filter(|p| p.sword.phase == SwordPhase::Assassinating).filter_map(|p| p.sword.assassination_target).collect();
+    // The paired moves' victims play their slaves (`StateNPCMasterBeingAssassinated`): the
+    // assassinations' `Assassination` step by direction (front, left, right, back), the drop
+    // assassinations' `AssassinationDrop`, the synced short fatalities' forehand / backhand
+    // group, a finisher's state's slave chain and variant (`SimEvent::Fatality`).
+    let masters: Vec<(PlayerId, u8)> = state.players.iter().filter(|p| p.sword.phase == SwordPhase::Assassinating).filter_map(|p| p.sword.assassination_target.map(|v| (v, p.sword.assassination_move))).collect();
+    for (victim, m) in masters {
+        let slave = match m {
+            0..4 => Some((NpcAnim::Assassination, -1, m)),
+            4..8 => Some((NpcAnim::AssassinationDrop, -1, m - 4)),
+            8..10 => Some((NpcAnim::ShortFatalityForehand, (m - 8) as i8, 0)),
+            10..12 => Some((NpcAnim::ShortFatalityBackhand, (m - 10) as i8, 0)),
+            _ => None,
+        };
+        if let Some((anim, group, step)) = slave {
+            start_slave(state, victim, anim, group, step, cfg, world, out);
+        }
+    }
+    for e in events {
+        if let SimEvent::Fatality { victim, variant, slave, .. } = *e {
+            if let Some(anim) = NpcAnim::fatality_slave(slave) {
+                start_slave(state, victim, anim, variant as i8, 0, cfg, world, out);
+            }
+        }
+    }
     for e in events {
         let SimEvent::Death { victim, killer, cause } = *e else { continue };
         let Some(vi) = state.players.iter().position(|p| p.id == victim) else { continue };
@@ -556,9 +687,93 @@ pub fn after_group(state: &mut WorldState, cfg: &SimConfig, events: &[SimEvent],
             d.dot(right).atan2(d.dot(fwd)).to_degrees()
         });
         state.anim.entry(victim).or_insert_with(|| PawnAnim::new(victim));
-        let (chain, step) = if cause == crate::events::DamageCause::Rats { (NpcAnim::DeathSwarmAttack, 0) } else { (NpcAnim::Death, eight_way(angle) as u8) };
+        // The death chains named after their damage (`DisNPCAnim_DeathSwarmAttack`,
+        // `DisNPCAnim_DeathPlague`: by name, LIKELY, U-890), else the directional `Death`.
+        let (chain, step) = match cause {
+            crate::events::DamageCause::Rats | crate::events::DamageCause::RatBite => (NpcAnim::DeathSwarmAttack, 0),
+            crate::events::DamageCause::Plague if cfg.gameplay.npc_anim.defs.chain(NpcAnim::DeathPlague).is_some() => (NpcAnim::DeathPlague, 0),
+            _ => (NpcAnim::Death, eight_way(angle) as u8),
+        };
         crate::pawn_states::request_death(state, victim, chain, step, cfg);
     }
+    hit_reactions(state, cfg, events);
+    // The human players' third-person bodies.
+    crate::player_anim::body_requests(state, cfg, events);
+}
+
+/// The NPCs' reactions to this tick's damage (the damage path 0x00B5CCD0 -> 0x00B57E60 /
+/// 0x00B57F00: the damage type's `m_ExpectedHitReaction`, else Weak, Strong when the pawn's
+/// `m_bDisableWeakHitReaction`, false for every cooked combat tweak; dispatched at 0x00B5D209),
+/// pending until the pawn's next machine tick:
+/// - Weak (the player's sword, `DisDamageType_FastHit_*`; the Windblast's): slot 421 (0x00B733F0)
+///   plays `HitReactSmall_Additive` on the anim player's `AdditiveReactSlot` (no pawn state), the
+///   step the hit's eight-way direction (0x00BBE900), cut in and out;
+/// - Projectile (the crossbow's `DisDamageType_Arrow`): slot 427 (0x00B73F60): a hit from the front
+///   (or on a leg) plays `StateNPCMasterProjectileHitReact` with the hit region (head for a
+///   headshot, else the torso: the hit bone is not in the event), else StrongHitReact;
+/// - Strong (`DisDamageType_Slide`): slot 422 (0x00B73630 -> 0x00A78920): StrongHitReact, the step
+///   `m_Direction` (0x00A6D5F0's cardinal sectors).
+///
+/// The pistol bullet's Knockdown (`DishonoredDamageType_Bullet`: slot 423 -> a Thrown request
+/// 0x00A86B00 with the momentum) is not modelled (the sim's throw is the Windblast's).
+fn hit_reactions(state: &mut WorldState, cfg: &SimConfig, events: &[SimEvent]) {
+    use crate::events::DamageCause as C;
+    use crate::pawn_states::{Master, StateRequest, context};
+    for e in events {
+        let SimEvent::Damage { victim, attacker, cause, .. } = *e else { continue };
+        let Some(v) = state.player(victim).copied() else { continue };
+        if !crate::pawn_states::has_states(&v) || !v.alive || v.incapacitated() || v.thrown.active || v.thrown.ragdoll {
+            continue;
+        }
+        let from = attacker.and_then(|k| state.player(k)).map(|k| k.position);
+        let local = from.map_or(glam::Vec2::new(1.0, 0.0), |f| {
+            let d = (f - v.position).truncate();
+            glam::Vec2::new(d.dot(crate::movement::forward_vector(v.yaw).truncate()), d.dot(crate::movement::right_vector(v.yaw).truncate()))
+        });
+        let angle = local.y.atan2(local.x).to_degrees();
+        match cause {
+            C::Sword | C::SwordCounter | C::Windblast => {
+                let Some(a) = state.anim.get_mut(&victim) else { continue };
+                let r = a.roll();
+                if let Some(seq) = chain_step(cfg, NpcAnim::HitReactSmallAdditive, 0, eight_way(angle), r, v.kind == PawnKind::Guard) {
+                    let tok = a.next_shot();
+                    a.play(layer::ADDITIVE, seq, tok, 1.0, false, v.yaw);
+                    if let Some(l) = a.layers[layer::ADDITIVE].as_mut() {
+                        l.blend_in = 0.0;
+                        l.blend_out = 0.0;
+                    }
+                }
+            }
+            C::Crossbow | C::CrossbowHeadshot => {
+                let region = if cause == C::CrossbowHeadshot { 1 } else { 2 };
+                let req = if local.x > 0.0 {
+                    StateRequest::new(Master::ProjectileHitReact, NpcAnim::HitReactProjectile as u8, 0, region, context::NONE)
+                } else {
+                    StateRequest::new(Master::StrongHitReact, NpcAnim::HitReactStrong as u8, -1, crate::pawn_states::cardinal_step(local.x, local.y), context::NONE)
+                };
+                crate::pawn_states::try_request(state, victim, req, cfg);
+            }
+            C::Slide => {
+                let req = StateRequest::new(Master::StrongHitReact, NpcAnim::HitReactStrong as u8, -1, crate::pawn_states::cardinal_step(local.x, local.y), context::NONE);
+                crate::pawn_states::try_request(state, victim, req, cfg);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A paired move's slave entered on its victim (`crate::pawn_states::start_slave`), its first
+/// step advanced in this tick with its master's.
+#[allow(clippy::too_many_arguments)]
+fn start_slave(state: &mut WorldState, victim: PlayerId, anim: NpcAnim, group: i8, step: u8, cfg: &SimConfig, world: &dyn WorldQuery, out: &mut StepOut) {
+    let mut ao = StepOut::default();
+    if crate::pawn_states::start_slave(state, victim, anim, group, step, cfg, &mut ao) {
+        if let Some(vi) = state.players.iter().position(|p| p.id == victim) {
+            let ts = state.players[vi].time_scale;
+            advance_pawn(state, vi, &[layer::FULL_BODY], DT * ts, cfg, world, out);
+        }
+    }
+    out.events.extend(ao.events);
 }
 
 /// `eDis8WayDirection` / `eDisDeathDirection` of an angle from the pawn's facing (degrees, +90
@@ -592,6 +807,13 @@ pub fn play_throw(state: &mut WorldState, id: PlayerId, direction: usize, first_
     let r = a.roll();
     let Some(seq) = chain_step(cfg, NpcAnim::PushToRagdoll, 1, direction, r, false) else { return };
     a.play(layer::FULL_BODY, seq, token::THROWN, 1.0, false, yaw);
+    // The step's blend-in and the group's blend-out (0: the throw plays at full weight to its
+    // ragdoll notify and on).
+    let grp = cfg.gameplay.npc_anim.defs.chain(NpcAnim::PushToRagdoll).and_then(|c| c.groups.get(1));
+    if let (Some(l), Some(g)) = (a.layers[layer::FULL_BODY].as_mut(), grp) {
+        l.blend_in = g.steps.get(direction).or(g.steps.first()).map_or(0.2, |s| s.blend_in);
+        l.blend_out = g.blend_out;
+    }
     state.players[i].thrown.by_notify = true;
     advance_pawn(state, i, &[layer::FULL_BODY], first_dt, cfg, world, out);
 }
@@ -703,6 +925,12 @@ fn advance_layer(s: &mut SeqPlay, info: &SequenceInfo, dt: f32, fired: &mut Vec<
     s.prev = t0;
 }
 
+/// Advance a sequence player by `dt` without firing its notifies (its flags are raised).
+pub fn advance_quiet(s: &mut SeqPlay, info: &SequenceInfo, dt: f32) {
+    let mut none = Vec::new();
+    advance_layer(s, info, dt, &mut none);
+}
+
 /// Advance the given layers of pawn `i` by `dt` and run the handlers of what they crossed.
 fn advance_pawn(state: &mut WorldState, i: usize, layers: &[usize], dt: f32, cfg: &SimConfig, world: &dyn WorldQuery, out: &mut StepOut) {
     let id = state.players[i].id;
@@ -710,9 +938,27 @@ fn advance_pawn(state: &mut WorldState, i: usize, layers: &[usize], dt: f32, cfg
     if let Some(a) = state.anim.get_mut(&id) {
         for &l in layers {
             let Some(s) = a.layers[l].as_mut() else { continue };
-            let Some(info) = cfg.anim.info(s.seq) else { continue };
-            advance_layer(s, info, dt, &mut fired);
+            // A layer the state let go of is removed once blended out.
+            if s.out.is_some_and(|o| s.elapsed - o >= s.blend) {
+                a.layers[l] = None;
+                continue;
+            }
+            let Some(info) = cfg.anim.info(s.seq) else {
+                // The reference pose: only its play time moves (the blend's clock).
+                if s.seq == REF_POSE {
+                    s.elapsed += dt;
+                }
+                continue;
+            };
+            let was_playing = s.playing;
+            let mut quiet = Vec::new();
+            advance_layer(s, info, dt, if s.quiet { &mut quiet } else { &mut fired });
+            // A sequence that had ended keeps its release's clock running.
+            if !was_playing && s.out.is_some() {
+                s.elapsed += dt;
+            }
         }
+        crate::player_anim::sync_groups(a, &cfg.anim);
     }
     for f in fired {
         if matches!(f.phase, Phase::Start) {
@@ -735,10 +981,15 @@ pub fn step(state: &mut WorldState, cfg: &SimConfig, world: &dyn WorldQuery, out
         }
         state.anim.entry(p.id).or_insert_with(|| PawnAnim::new(p.id));
         let dt = DT * p.time_scale;
-        advance_pawn(state, i, &[layer::FULL_BODY, layer::UPPER_BODY, layer::LEFT_ARM, layer::WEAPON], dt, cfg, world, out);
-        if p.kind != PawnKind::Human {
-            step_tree(state, i, dt, cfg);
+        advance_pawn(state, i, &[layer::FULL_BODY, layer::UPPER_BODY, layer::LEFT_ARM, layer::WEAPON, layer::ADDITIVE], dt, cfg, world, out);
+        if p.kind == PawnKind::Human {
+            // The player's third-person body (`crate::player_anim::Body`) on its own tree.
+            let p = state.players[i];
+            if let Some(a) = state.anim.get_mut(&p.id) {
+                crate::player_anim::body_advance(a, &p, cfg, dt);
+            }
         }
+        step_tree(state, i, dt, cfg);
     }
 }
 
@@ -902,6 +1153,12 @@ fn physics(p: &PlayerState) -> u8 {
 /// rule: the elite guard's sword stances, the civilians' empty ones; U-892).
 fn modifier(p: &PlayerState) -> &'static str {
     use crate::state::awareness as aw;
+    // A human player's body: `Sword` armed (`Aim` while aiming a gun), `Empty` unarmed (the
+    // former third-person picker's rule through the NPC profile's config).
+    if p.kind == PawnKind::Human {
+        let gun_aim = p.left.phase == LeftPhase::Aiming && matches!(p.left.item, LeftHand::Pistol | LeftHand::Crossbow);
+        return if !crate::player_anim::body_armed(p) { "Empty" } else if gun_aim { "Aim" } else { "Sword" };
+    }
     let guard = p.kind == PawnKind::Guard;
     match p.ai_awareness {
         aw::IN_COMBAT => if guard { "Sword" } else { "Empty" },
@@ -913,37 +1170,76 @@ fn modifier(p: &PlayerState) -> &'static str {
 
 /// Tick an NPC's tree (with the install): the slot requests of its layers' new sequences
 /// (`FullBodySlot` / `UpperBodySlot`, blended in and out over the chain step's and group's times),
-/// the owner's physics, the locomotion from
-/// its velocity relative to its facing and its stance modifier. The tree's own requests land
-/// after its advance (the evaluator's order, U-975), so its slots run a tick behind the layers.
+/// the owner's physics, the locomotion from its velocity relative to its facing and its stance
+/// modifier. The slot requests land before the advance, so a slot plays its layer's sequence at
+/// the layer's time.
 fn step_tree(state: &mut WorldState, i: usize, dt: f32, cfg: &SimConfig) {
+    const FACE_FILTER_BLEND: f32 = 0.1;
     let p = state.players[i];
     let dead = !p.alive;
     let Some(assets) = cfg.anim_source.npc_tree(dead) else { return };
     // The locomotion component's start, stop or turn sequence in the node's "Specific anim" child.
     let specific = crate::npc_loco::tree_request(state, p.id, cfg);
+    let state_chain = state.pawn_states.get(&p.id).and_then(|s| s.chain);
     let Some(a) = state.anim.get_mut(&p.id) else { return };
     let want = dead as u8;
     if a.tree.as_ref().is_none_or(|t| t.tree != want) {
-        a.tree = Some(NpcTree { tree: want, state: assets.shape.initial_state(), requested: [0; layer::COUNT], root: (Vec3::ZERO, 0.0), blend_out: [0.0; layer::COUNT] });
+        let mut st = assets.shape.initial_state();
+        if want == 0 {
+            // The look-at component's blinks on `NPC_Human_at`'s `BlinkBlender` (0x00952EC0 with
+            // the config's class defaults: every 0.5-6 s at a rate of 1-2), rolled per pawn.
+            st.set_blink_timer(Some(dishonored_anim::lookat::BlinkTimer::new(BLINK_INTERVAL, BLINK_RATE, p.id)));
+        }
+        a.tree = Some(NpcTree { tree: want, state: st, requested: [0; layer::COUNT], root: (Vec3::ZERO, 0.0), blend_out: [0.0; layer::COUNT] });
     }
     let mut slots = Vec::new();
+    let mut filters = Vec::new();
+    let human = p.kind == PawnKind::Human;
+    let chain_face = |l: usize| -> Option<&str> {
+        // The chain step's `m_FaceAnimName` (`crate::pawn_states`' full-body record; a human
+        // player's body chain).
+        let (anim, group, step) = if human {
+            let c = a.body.as_ref()?.chain?;
+            (c.anim, c.group, c.step)
+        } else if l == layer::FULL_BODY {
+            let c = state_chain?;
+            (c.anim, c.group, c.step)
+        } else {
+            return None;
+        };
+        let f = cfg.gameplay.npc_anim.defs.chains.get(anim as usize)?.groups.get(group as usize)?.steps.get(step as usize)?.face.as_str();
+        (!f.is_empty() && f != "None").then_some(f)
+    };
     let tree = a.tree.as_mut().unwrap();
-    for (l, slot) in [(layer::FULL_BODY, "FullBodySlot"), (layer::UPPER_BODY, "UpperBodySlot")] {
-        let cur = a.layers[l].as_ref().map_or(0, |s| s.token);
+    for (l, slot) in [(layer::FULL_BODY, "FullBodySlot"), (layer::UPPER_BODY, "UpperBodySlot"), (layer::ADDITIVE, "AdditiveReactSlot")] {
+        // An NPC's layers; a human player's body chain (its layers are its first-person rig's).
+        let src = if human { a.body.as_ref().and_then(|b| b.layer.as_ref()).filter(|_| l == layer::FULL_BODY) } else { a.layers[l].as_ref() };
+        let cur = src.map_or(0, |s| s.token);
         if cur == tree.requested[l] {
             continue;
         }
         tree.requested[l] = cur;
-        // The chain step's `m_fBlendInTime` and its group's `m_fBlendOutTime` (`crate::pawn_states`);
-        // 0.2 s for a sequence played without them.
-        let or = |x: f32| if x > 0.0 { x } else { 0.2 };
-        let action = match a.layers[l].as_ref().and_then(|s| cfg.anim.name(s.seq).map(|n| (n, s))) {
+        // The anim player's `PlayCustomAnim` (0x00C52E00 -> 0x005B7860): the chain step's
+        // `m_fBlendInTime`, blend-out 0 (`PendingBlendOutTime` -1 for a looping step: held), from
+        // where the layer's step started; its stop (0x00C48CF0) blends out over the group's
+        // `m_fBlendOutTime`. A death or a throw thus plays at full weight past its ragdoll notify.
+        let action = match src.and_then(|s| cfg.anim.name(s.seq).map(|n| (n, s))) {
             Some((name, s)) => {
-                tree.blend_out[l] = or(s.blend_out);
-                SlotAction::Play { sequence: name.to_string(), rate: s.rate, blend_in: or(s.blend_in), blend_out: Some(or(s.blend_out)), looping: s.looping, start: 0.0 }
+                tree.blend_out[l] = s.blend_out.max(0.0);
+                let blend_out = if s.looping || s.blend_out < 0.0 { None } else { Some(0.0) };
+                let start = s.prev;
+                // Every step start on a slot also plays its face on `FaceSlot` (the step's
+                // `m_FaceAnimName`, else `<sequence>_Face`) at the body's rate and blend-in, and
+                // sets `FaceFilter` to 1 when one played, else 0, over 0.1 s (0x00C52E00: U-974).
+                let face = chain_face(l).map(str::to_string).unwrap_or_else(|| format!("{name}_Face"));
+                let has_face = assets.clips.find(&face).is_some();
+                if has_face {
+                    slots.push(SlotRequest { slot: "FaceSlot".to_string(), action: SlotAction::Play { sequence: face, rate: s.rate, blend_in: s.blend_in.max(0.0), blend_out: if s.looping { None } else { Some(0.0) }, looping: s.looping, start } });
+                }
+                filters.push(FilterTarget { node: "FaceFilter".to_string(), target: if has_face { 1.0 } else { 0.0 }, time: FACE_FILTER_BLEND });
+                SlotAction::Play { sequence: name.to_string(), rate: s.rate, blend_in: s.blend_in.max(0.0), blend_out, looping: s.looping, start }
             }
-            None => SlotAction::Stop { blend_out: or(tree.blend_out[l]) },
+            None => SlotAction::Stop { blend_out: tree.blend_out[l] },
         };
         slots.push(SlotRequest { slot: slot.to_string(), action });
     }
@@ -952,11 +1248,24 @@ fn step_tree(state: &mut WorldState, i: usize, dt: f32, cfg: &SimConfig) {
     let v = p.velocity.truncate();
     let velocity = (v.dot(right).atan2(v.dot(fwd)).to_degrees(), v.length());
     let m = modifier(&p);
+    // The profile's config may lack the modifier a human player's body asks for (`Aim`).
+    let m = if assets.loco.modifier(m).is_none() && human { "Sword" } else { m };
     let locomotion = (!dead).then(|| LocoInput { config: &assets.loco, modifier: m, velocity, specific });
-    let inputs = TreeInputs { physics: Some(physics(&p)), slots: &slots, locomotion, ..Default::default() };
+    // The states' slot requests land before the tree's advance (tick_order.md section 6: the
+    // state machine ticks inside the pawn's `Tick`, its skeletal component after it, so a slot
+    // played in the tick is advanced in that tick's `TickAnimNodes`; U-975): the slot's channel
+    // reads the layer's time.
+    tree.state.request(&assets.shape, &TreeInputs { slots: &slots, filters: &filters, ..Default::default() });
+    let inputs = TreeInputs { physics: Some(physics(&p)), locomotion, ..Default::default() };
     tree.state.update(&assets.shape, assets.clips.as_ref(), &inputs, dt);
     tree.root = tree.state.root_delta();
 }
+
+/// `ArkComponentLookatConfig`'s class defaults `MinDurationBetweenBlink` /
+/// `MaxDurationBetweenBlink` (s) and `MinBlinkSpeed` / `MaxBlinkSpeed` (ANIMATION.md section 9: no
+/// Boyle config overrides them).
+const BLINK_INTERVAL: [f32; 2] = [0.5, 6.0];
+const BLINK_RATE: [f32; 2] = [1.0, 2.0];
 
 /// The derived timing of a sequence the rules read when no layer plays it (a config value read
 /// from the table): its `AnimStateExit` play time, else its length.
@@ -974,7 +1283,7 @@ mod tests {
     }
 
     fn run(info: &SequenceInfo, looping: bool, steps: usize, dt: f32) -> Vec<(usize, Fired)> {
-        let mut s = SeqPlay { seq: 0, token: 0, time: 0.0, prev: 0.0, rate: 1.0, looping, playing: true, yaw: 0.0, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0, blend: 0.0 };
+        let mut s = SeqPlay { seq: 0, token: 0, time: 0.0, prev: 0.0, rate: 1.0, looping, playing: true, yaw: 0.0, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0, blend: 0.0, out: None, quiet: false };
         let mut out = Vec::new();
         for k in 0..steps {
             let mut f = Vec::new();
@@ -1026,7 +1335,7 @@ mod tests {
     #[test]
     fn flags_and_end() {
         let info = seq(0.3, vec![(0.1, 0.0, "DishonoredNotify_AttackInterruptable"), (0.2, 0.0, "DishonoredNotify_AnimStateExit")]);
-        let mut s = SeqPlay { seq: 0, token: 0, time: 0.0, prev: 0.0, rate: 1.0, looping: false, playing: true, yaw: 0.0, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0, blend: 0.0 };
+        let mut s = SeqPlay { seq: 0, token: 0, time: 0.0, prev: 0.0, rate: 1.0, looping: false, playing: true, yaw: 0.0, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0, blend: 0.0, out: None, quiet: false };
         let mut f = Vec::new();
         advance_layer(&mut s, &info, 0.15, &mut f);
         assert!(s.interruptible && !s.exited && s.playing);

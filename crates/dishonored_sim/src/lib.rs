@@ -24,6 +24,7 @@ pub mod movement;
 pub mod noise;
 pub mod npc_loco;
 pub mod pawn_states;
+pub mod player_anim;
 pub mod player_stats;
 pub mod powers;
 pub mod rats;

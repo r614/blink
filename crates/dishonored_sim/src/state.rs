@@ -1149,7 +1149,7 @@ pub struct WorldExtras {
 impl WorldState {
     pub fn extras(&self) -> WorldExtras {
         WorldExtras {
-            anim: self.anim.iter().map(|(id, a)| (*id, crate::anim::PawnAnim { layers: a.layers.clone(), rng: a.rng, tree: None })).collect(),
+            anim: self.anim.iter().map(|(id, a)| (*id, crate::anim::PawnAnim { layers: a.layers.clone(), rng: a.rng, tree: None, prev: a.prev, shots: a.shots, body: a.body.clone(), nav_tree: a.nav_tree })).collect(),
             pawn_states: self.pawn_states.clone(),
             movables: self.movables.clone(),
             pickups: self.pickups.clone(),
@@ -1320,6 +1320,10 @@ pub struct ThrownState {
     /// `m_ThrowDirection` (`movement::throw_direction`): the throw sequence's step.
     #[serde(default)]
     pub direction: u8,
+    /// At rest, the get-up's recovery alternative rolled (1-based; 0 none): the pawn's states play
+    /// the `Stun` chain's get-up with it (`crate::pawn_states`, `StateNPCMasterStunned`).
+    #[serde(default)]
+    pub getup: u8,
 }
 
 /// A Windblast: the cast animation's notify after the cast, the origin and direction are taken from

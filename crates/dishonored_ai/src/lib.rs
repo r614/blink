@@ -150,6 +150,7 @@ pub const NPC_ANIM_TAUNT: u8 = 32;
 pub const NPC_ANIM_TRIGGER_ALARM: u8 = 35;
 pub const NPC_ANIM_CORPSE_CHECK: u8 = 36;
 pub const NPC_ANIM_SEARCH_LOST_TARGET: u8 = 37;
+pub const NPC_ANIM_REACT_TO_NOTICING: u8 = 38;
 
 /// What a crowd reports to its host after a tick.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -560,6 +561,9 @@ pub struct Brain {
     /// serial changes ([`AnimRequest`]).
     #[serde(default)]
     pub anim_request: AnimRequest,
+    /// The Notice behaviour's GenericAction was asked for since the behaviour began.
+    #[serde(default)]
+    pub notice_anim: bool,
     /// What the brain asks of its pawn this tick (`dishonored_sim::pawn_states::Request`): the
     /// item context it runs, its GenericAction chain, the speed it asks of the locomotion.
     /// Rebuilt every tick; the host hands it to the step ([`Crowd::requests`]).
@@ -1956,6 +1960,7 @@ impl Brain {
             tether_last: None,
             dialog_look: None,
             anim_request: AnimRequest::default(),
+            notice_anim: false,
             request: Request::default(),
             track_pause: false,
             track_pause_yaw: 0.0,
@@ -2173,6 +2178,7 @@ impl Brain {
     pub fn start_ambient(&mut self, ai: &AiConfig, seq: &str, age: f32) {
         self.ambient_pin = Some(seq.to_string());
         self.head.ambient = Some(head::Ambient { seq: seq.to_string(), age });
+        self.head.amb_serial = self.head.amb_serial.wrapping_add(1).max(1);
         // The timer is rolled when the animation starts (0x00B39620): the tweak's minimum.
         self.head.amb_timer = ai.ambient_anim_freq[0];
     }
@@ -3217,12 +3223,21 @@ impl Brain {
         // [distraction] A distraction that a higher behaviour put aside is given up.
         self.drop_distraction(ctx);
         let cur = self.current_slot();
+        if cur != slot::NOTICE {
+            self.notice_anim = false;
+        }
         if cur != slot::IDLE {
             self.state = self.project();
             return match cur {
                 slot::DISTRACTION => self.act_distraction(me, nav, ctx, ai, dt),
                 // `DisBehaviorNotice`: turn to face the stimulus.
                 slot::NOTICE => {
+                    // Its GenericAction sub-state (`DisTweaks_AISubState_GenericAction_13`:
+                    // `DisNPCAnim_ReactToNoticing`, `m_fChanceToPlayAnim` 1, built by 0x00B33460) plays once.
+                    if !self.notice_anim {
+                        self.notice_anim = true;
+                        self.anim_request.ask(NPC_ANIM_REACT_TO_NOTICING);
+                    }
                     let p = self.att_target.and_then(|w| self.attn.iter().find(|a| a.who == w)).map(|a| a.proxy).or(self.threat_pos).or(look);
                     p.map(face).unwrap_or(idle)
                 }
@@ -4477,6 +4492,13 @@ impl Brain {
         }
         if self.anim_request.serial != 0 {
             self.request.play_anim = Some((self.anim_request.anim, self.anim_request.serial));
+        }
+        // The ambient subprocess's pick plays through the pawn's states (0x00B39620 builds a
+        // `StateNPCMasterPlayAnim` request): the chain step of the sequence the head picked.
+        if let Some(a) = &self.head.ambient {
+            if let Some((g, s)) = head::ambient_step(&a.seq) {
+                self.request.ambient = Some((g, s, self.head.amb_serial, a.age));
+            }
         }
         if input.forward == 0 && input.right == 0 {
             self.request.loco_speed = 0.0;

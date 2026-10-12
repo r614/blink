@@ -168,7 +168,7 @@ pub fn parries(s: &crate::state::SwordState, t: &CombatTuning, zone: bool) -> bo
 /// NPCs: their block sets are not in the table) takes the player's window by its block time
 /// (`CombatTuning::parry_zone`, read from the table: an approximation, U-600).
 pub fn parry_zone(v: &PlayerState, anim: Option<&PawnAnim>, table: &SeqTable, t: &CombatTuning) -> bool {
-    match anim.and_then(|a| a.with(layer::UPPER_BODY, token::BLOCK)) {
+    match anim.and_then(|a| a.layers[layer::UPPER_BODY].as_ref()).filter(|l| l.token & token::KIND == token::BLOCK && l.out.is_none()) {
         Some(_) => anim.is_some_and(|a| a.window_open(layer::UPPER_BODY, table, "DisNotify_BlockParryZone")),
         None => v.sword.block_time >= t.parry_zone[0] && v.sword.block_time <= t.parry_zone[0] + t.parry_zone[1],
     }

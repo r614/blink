@@ -308,6 +308,18 @@ pub struct Head {
     /// seed 1 of an unseeded CRT).
     #[serde(default)]
     pub amb_rng: u32,
+    /// Ambient idles started so far (wrapping, from 1): the pawn's request serial
+    /// (`dishonored_sim::pawn_states::Request::ambient`).
+    #[serde(default)]
+    pub amb_serial: u32,
+}
+
+/// The `AmbientIdle` chain's group and step of an ambient idle sequence (`Empty_Idle_NN` is group
+/// 0's step NN-1, `Sword_Patrol_Idle_NN` group 1's: the cooked `DisNPCAnimDefinitions` groups).
+pub fn ambient_step(seq: &str) -> Option<(u8, u8)> {
+    let (group, n) = if let Some(n) = seq.strip_prefix("Empty_Idle_") { (0, n) } else { (1, seq.strip_prefix("Sword_Patrol_Idle_")?) };
+    let k: u8 = n.parse().ok()?;
+    Some((group, k.checked_sub(1)?))
 }
 
 /// The ambient idle sequence playing and how long it has played. While it plays the look-at is
@@ -518,6 +530,7 @@ impl Head {
             };
             if find_loop(&ai.head_poses, archetype, &seq).is_some() {
                 self.ambient = Some(Ambient { seq, age: 0.0 });
+                self.amb_serial = self.amb_serial.wrapping_add(1).max(1);
                 let [lo, hi] = ai.ambient_anim_freq;
                 self.amb_timer = crt_rand(&mut self.amb_rng) as f32 * (hi - lo) * 3.051851e-5 + lo;
             }

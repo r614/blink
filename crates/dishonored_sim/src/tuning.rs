@@ -31,7 +31,7 @@ pub struct ReloadTiming {
 /// yet (U-501).
 const PISTOL_RELOAD_TIME: f32 = 0.75;
 const CROSSBOW_RELOAD_TIME: f32 = 1.0;
-const CROSSBOW_RELOAD_RATE: f32 = 1.3;
+pub const CROSSBOW_RELOAD_RATE: f32 = 1.3;
 
 impl ReloadTiming {
     /// `Pistol_Reload_In` / `Pistol_Reload_Out` `AnimStateExit` (`Ply_Pistol_as`) around the
@@ -361,6 +361,9 @@ pub struct CombatTuning {
     /// `m_fPlayRateOverride` 1.5): with `Attribute_FastReload`, a shot that leaves a bolt to load
     /// plays this action and loads it at the end, with no reload stage (0x00C2E570, 0x00C2E730).
     pub crossbow_fast_fire: f32,
+    /// `m_FireReloadFast.m_fPlayRateOverride` (1.5): the play rate of its arms' sequence.
+    #[serde(default)]
+    pub crossbow_fast_fire_rate: f32,
     /// `DishonoredNotify_FireProjectile` of `Crossbow_Fire` in `Crossbows_as` (0.0336 s): the
     /// bolt leaves when the fire action's animation passes it, not on the press
     /// (0x00A96890 -> the item context's fire, 0x00C38230); the crossbow mesh's layer fires it
@@ -641,6 +644,7 @@ impl CombatTuning {
             crossbow_fire_recovery: anim::exit_time(c, CROSSBOW_SET, "Crossbow_Fire"),
             // Crossbow_Fire_FastReload `AnimStateExit` over `m_FireReloadFast.m_fPlayRateOverride`.
             crossbow_fast_fire: anim::exit_time(c, CROSSBOW_SET, "Crossbow_Fire_FastReload") / v(cb, "fire.m_FireReloadFast.m_fPlayRateOverride", 1.0),
+            crossbow_fast_fire_rate: v(cb, "fire.m_FireReloadFast.m_fPlayRateOverride", 1.0),
             crossbow_fire_notify: notify(CROSSBOW_MESH_SET, "Crossbow_Fire", "DishonoredNotify_FireProjectile"),
             crossbow_fast_fire_notify: notify(CROSSBOW_MESH_SET, "Crossbow_Fire_FastReload", "DishonoredNotify_FireProjectile"),
 

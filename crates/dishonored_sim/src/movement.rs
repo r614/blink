@@ -1209,6 +1209,7 @@ pub fn start_throw(p: &mut PlayerState, momentum: Vec3, th: &dishonored_ir::game
             prev_scale: 0.0,
             by_notify: false,
             direction: direction as u8,
+            getup: 0,
         };
     }
 }
@@ -1250,8 +1251,10 @@ pub fn step_thrown(p: &mut PlayerState, th: &dishonored_ir::gameplay::ThrowConfi
         p.mode = MoveMode::Walking;
     }
     let n = th.getup_recover.len();
-    let recover = if n == 0 { 0.0 } else { th.getup_recover[((p.roll() * n as f32) as usize).min(n - 1)] };
+    let k = if n == 0 { 0 } else { ((p.roll() * n as f32) as usize).min(n - 1) };
+    let recover = if n == 0 { 0.0 } else { th.getup_recover[k] };
     p.action_lock = th.getup_anim + DT + recover;
+    p.thrown.getup = if n == 0 { 0 } else { k as u8 + 1 };
 }
 
 /// The Flying phase of a throw (`physFlying`, then the state's tick 0x00A98DD0 with `m_bRagdoll`

@@ -98,6 +98,11 @@ pub struct Request {
     pub loco_speed: f32,
     /// The navmesh path the locomotion request follows this tick, when it follows one.
     pub path: Option<LocoPath>,
+    /// The behaviour's ambient idle (`DisAISubProcessAmbientAnims`, 0x00B39620: a
+    /// `StateNPCMasterPlayAnim` request of `AmbientIdle`, the NPC standing still): its group and
+    /// step, the serial of the pick (a new serial asks) and how long ago it began (seconds).
+    #[serde(default)]
+    pub ambient: Option<(u8, u8, u32, f32)>,
 }
 
 /// Where a locomotion request's path leads (`ArkComponentLocomotion`): the point walked to
@@ -139,6 +144,33 @@ pub enum Master {
     Thrown,
     /// `StateNPCMasterDead_Limp`: the death chain, then the ragdoll (0x00A9FC40).
     Dead,
+    /// `StateNPCMasterStrongHitReact`: `HitReactStrong` (the damage type's
+    /// `m_NPCCustomReactAnim` instead when set: the Windblast's `HitReactWindblast`), the step its
+    /// `m_Direction` (0x00A78980).
+    StrongHitReact,
+    /// `StateNPCMasterProjectileHitReact`: `HitReactProjectile` group 0, the step its hit region
+    /// (0x00A7B890).
+    ProjectileHitReact,
+    /// `StateNPCMasterStunned`: the `Stun` chain's group `m_Animation` (the get-up after a throw's
+    /// rest: group 1 from the front), its loop for `m_fStunDuration`, the recovery (0x00A78C20).
+    Stunned,
+    /// `StateNPCMasterBeingChoked` (enter 0x00A7C270): the `Choke` chain's group the choke
+    /// context's state names (0x00C09370: 0 In, 1 Loop, 2 Win, 3 CarryCorpse, 4 Lose, 5 Cancel),
+    /// step 0.
+    BeingChoked,
+    /// `StateNPCMasterDead_BeingCarried` (enter 0x00A998A0, tick 0x00A907F0): the
+    /// `CorpseBeingCarried` chain's steps by the carrier's carry state (In, Idle, Walk, the drops).
+    BeingCarried,
+    /// `StateNPCMasterAim`: its sub-state (+0x68: 0 Shoot, 1 Reload, 2 In, 3 Out, 4 Hold) plays
+    /// chain `0x60 + sub-state` (slot 112, 0x00A61570); the hold plays none.
+    Aim,
+    /// `StateNPCMasterSurprised`: a PlayAnim of `Surprised`, the step the stimulus's cardinal
+    /// direction (request 0x00A869B0).
+    Surprised,
+    /// `StateNPCMasterBeingAssassinated` (enter 0x00A7BEB0, slave start 0x00A7B350): the paired
+    /// move's slave chain (`m_SlaveAction.m_Animation`, step `m_Direction`, group the master's
+    /// variant); its ragdoll notify or its end puts the body down (0x00A78270).
+    BeingAssassinated,
 }
 
 impl Master {
@@ -151,6 +183,14 @@ impl Master {
             Master::PlayAnim => "StateNPCMasterPlayAnim",
             Master::Thrown => "StateNPCMasterThrown",
             Master::Dead => "StateNPCMasterDead_Limp",
+            Master::StrongHitReact => "StateNPCMasterStrongHitReact",
+            Master::ProjectileHitReact => "StateNPCMasterProjectileHitReact",
+            Master::Stunned => "StateNPCMasterStunned",
+            Master::BeingChoked => "StateNPCMasterBeingChoked",
+            Master::BeingCarried => "StateNPCMasterDead_BeingCarried",
+            Master::Aim => "StateNPCMasterAim",
+            Master::Surprised => "StateNPCMasterSurprised",
+            Master::BeingAssassinated => "StateNPCMasterBeingAssassinated",
         }
     }
 }
@@ -165,11 +205,19 @@ pub struct StateRequest {
     pub group: i8,
     pub step: u8,
     pub context: ContextKind,
+    /// The chain's first step starts this far in (milliseconds): an ambient idle the brain began
+    /// before (a scenario's pinned idle); 0 otherwise.
+    #[serde(default)]
+    pub start_ms: u16,
+    /// The alternative of the chain's last step to play (1-based; 0 rolled): the get-up's
+    /// recovery, rolled where the rest test held the pawn for its length (`movement::step_thrown`).
+    #[serde(default)]
+    pub variant: u8,
 }
 
 impl StateRequest {
     pub fn new(state: Master, anim: u8, group: i8, step: u8, context: ContextKind) -> Self {
-        Self { state, anim, group, step, context }
+        Self { state, anim, group, step, context, start_ms: 0, variant: 0 }
     }
 }
 
@@ -219,6 +267,32 @@ pub struct PawnStates {
     /// The locomotion component's start, stop and turn sequences (`crate::npc_loco`).
     #[serde(default)]
     pub loco: crate::npc_loco::NpcLoco,
+    /// The ambient idle request serial last taken.
+    #[serde(default)]
+    pub ambient_serial: u32,
+    /// `StateNPCMasterStunned.m_fStunTimer` (+0x6C): the loop step's time held so far.
+    #[serde(default)]
+    pub stun_timer: f32,
+    /// The pawn carrying this body (while `StateNPCMasterDead_BeingCarried` holds it).
+    #[serde(default)]
+    pub carrier: Option<PlayerId>,
+    /// The brain's awareness the last tick (its surprise starts `StateNPCMasterSurprised`).
+    #[serde(default)]
+    pub awareness: u8,
+    /// `StateNPCMasterAim`'s sub-state (+0x68, [`aim`]).
+    #[serde(default)]
+    pub aim: u8,
+}
+
+/// `StateNPCMasterAim`'s sub-states: the chain each plays is `0x60 +` its value (`AimShoot` 96,
+/// `AimReload` 97, `AimIn` 98, `AimOut` 99); the hold plays none (the `Aim` locomotion modifier
+/// holds the pose).
+pub mod aim {
+    pub const SHOOT: u8 = 0;
+    pub const RELOAD: u8 = 1;
+    pub const IN: u8 = 2;
+    pub const OUT: u8 = 3;
+    pub const HOLD: u8 = 4;
 }
 
 /// `ERootMotionMode` values.
@@ -295,7 +369,8 @@ pub fn allows_context(state: &WorldState, id: PlayerId) -> bool {
     let Some(s) = state.pawn_states.get(&id) else { return true };
     let st = s.pending.unwrap_or(s.current);
     match st.state {
-        Master::Walk => true,
+        // Aim allows the melee contexts always and the gun's when holding (slot 95 0x00A65060).
+        Master::Walk | Master::Aim => true,
         Master::ActionMelee => state.anim.get(&id).and_then(|a| a.layers[layer::FULL_BODY].as_ref()).is_none_or(|l| l.token & token::KIND != token::SWING || l.interruptible),
         _ => false,
     }
@@ -360,15 +435,27 @@ fn play_step(state: &mut WorldState, i: usize, anim: u8, group: i8, step: u8, to
     let Some(grp) = chain.groups.get(g) else { return false };
     let k = if (step as usize) < grp.steps.len() { step as usize } else { 0 };
     let st = &grp.steps[k];
-    let r = a.roll();
+    // The state's own alternative of the group's last step (the get-up's recovery), else a roll.
+    let r = match s.current.variant {
+        v if v > 0 && k + 1 == grp.steps.len() && st.names.len() > 1 => {
+            a.roll();
+            (v as f32 - 0.5) / st.names.len() as f32
+        }
+        _ => a.roll(),
+    };
     let Some(seq) = step_sequence(cfg, st, r, armed) else { return false };
     let rate = 1.0 + st.rate_range * (2.0 * a.roll() - 1.0);
     s.serial = s.serial.wrapping_add(1);
     let tok = if token == 0 { token::CHAIN | (s.serial & 0x00FF_FFFF) } else { token };
+    let start = if first { s.current.start_ms as f32 * 1e-3 } else { 0.0 };
     a.play(layer::FULL_BODY, seq, tok, rate, st.looped, p.yaw);
     if let Some(l) = a.layers[layer::FULL_BODY].as_mut() {
         l.blend_in = st.blend_in;
         l.blend_out = grp.blend_out;
+        // A chain the brain began before plays on from there (its blend in as far along).
+        l.time = start;
+        l.prev = start;
+        l.elapsed = start;
     }
     s.chain = Some(ChainPlay { anim, group: g as u8, step: k as u8, looping: st.looped, no_auto: st.no_auto_transitions, blend_out: grp.blend_out, token: tok });
     if first {
@@ -424,7 +511,7 @@ pub fn chain_tick(state: &mut WorldState, cfg: &SimConfig) {
         let layer_seq = state.anim.get(&p.id).and_then(|a| a.layers[layer::FULL_BODY].as_ref()).filter(|l| l.token == c.token).cloned();
         let Some(l) = layer_seq else {
             stop_chain(state, p.id);
-            chain_ended(state, i);
+            chain_ended(state, i, c, cfg);
             continue;
         };
         if l.looping || c.no_auto {
@@ -432,7 +519,10 @@ pub fn chain_tick(state: &mut WorldState, cfg: &SimConfig) {
         }
         let Some(grp) = cfg.gameplay.npc_anim.defs.chains.get(c.anim as usize).and_then(|ch| ch.groups.get(c.group as usize)) else { continue };
         let next = c.step as usize + 1;
-        let last = grp.end_after_one || next >= grp.steps.len();
+        // A carried body's drop is its last step (its slave goes on to the next drop's step: the
+        // body leaves the state before, at the carrier's release, 0x00A90B50).
+        let dropping = c.anim == NpcAnim::CorpseBeingCarried as u8 && c.step >= carry::DROP_LOW;
+        let last = grp.end_after_one || next >= grp.steps.len() || dropping;
         let threshold = if last { c.blend_out } else { 1e-4 };
         let info = cfg.anim.info(l.seq);
         let rate = info.map_or(1.0, |n| n.rate_scale_or_one()) * l.rate;
@@ -442,14 +532,14 @@ pub fn chain_tick(state: &mut WorldState, cfg: &SimConfig) {
         }
         if last {
             stop_chain(state, p.id);
-            chain_ended(state, i);
+            chain_ended(state, i, c, cfg);
         } else {
             // The next step keeps the chain's group (the record's); a state chain's step plays
             // with a token of its own, so that the slot sees a new sequence.
             let tok = if c.token & token::KIND == token::CHAIN { 0 } else { c.token };
             if !play_step(state, i, c.anim, c.group as i8, next as u8, tok, false, cfg) {
                 stop_chain(state, p.id);
-                chain_ended(state, i);
+                chain_ended(state, i, c, cfg);
             }
         }
     }
@@ -457,13 +547,60 @@ pub fn chain_tick(state: &mut WorldState, cfg: &SimConfig) {
 
 /// The anim player's event type 1 (the chain ended) to the state that played it: the action
 /// states request their exit (ActionMelee 0x00A64CC0, PlayAnim 0x00A659C0, the parry's base);
-/// the dead stay dead (0x00A7D1A0: the ragdoll follows).
-fn chain_ended(state: &mut WorldState, i: usize) {
+/// the dead stay dead (0x00A7D1A0: the ragdoll follows). The choked victim (slot 85 0x00A74720):
+/// its In's end plays the Loop group, its Win's end puts it down (`StateNPCMasterDead_Limp`,
+/// ragdoll at once: 0x00A6D380), its Lose's end and a Cancel's let it go; a carried body's drop
+/// leaves it down (0x00A90B50, the ragdoll).
+fn chain_ended(state: &mut WorldState, i: usize, c: ChainPlay, cfg: &SimConfig) {
     let id = state.players[i].id;
-    let Some(s) = state.pawn_states.get_mut(&id) else { return };
-    match s.current.state {
-        Master::ActionMelee | Master::ActionParry | Master::PlayAnim => request_exit(s),
-        Master::Walk | Master::Thrown | Master::Dead => {}
+    let Some(cur) = state.pawn_states.get(&id).map(|s| s.current.state) else { return };
+    let exit = |state: &mut WorldState| request_exit(state.pawn_states.get_mut(&id).unwrap());
+    match cur {
+        // The reactions' event handlers too (StrongHitReact 0x00A65B60, Stunned the same rule).
+        Master::ActionMelee | Master::ActionParry | Master::PlayAnim | Master::StrongHitReact | Master::ProjectileHitReact | Master::Stunned | Master::Surprised => exit(state),
+        Master::BeingChoked => match c.group {
+            choke::IN => {
+                state.pawn_states.get_mut(&id).unwrap().current.group = choke::LOOP as i8;
+                play_chain(state, i, NpcAnim::Choke as u8, choke::LOOP as i8, 0, 0, cfg);
+            }
+            choke::WIN => down(state, id),
+            choke::LOSE | choke::CANCEL => exit(state),
+            _ => {}
+        },
+        Master::BeingCarried if c.step >= carry::DROP_LOW => down(state, id),
+        Master::BeingAssassinated => down(state, id),
+        Master::Walk | Master::Thrown | Master::Dead | Master::BeingCarried | Master::Aim => {}
+    }
+}
+
+/// The `Choke` chain's groups by the choke context's state (`eChokeState`).
+pub mod choke {
+    pub const IN: u8 = 0;
+    pub const LOOP: u8 = 1;
+    pub const WIN: u8 = 2;
+    pub const CARRY: u8 = 3;
+    pub const LOSE: u8 = 4;
+    pub const CANCEL: u8 = 5;
+}
+
+/// The `CorpseBeingCarried` chain's steps (the carry states).
+pub mod carry {
+    pub const IN: u8 = 0;
+    pub const IDLE: u8 = 1;
+    pub const WALK: u8 = 2;
+    pub const DROP_LOW: u8 = 3;
+    pub const DROP_LOW_SNEAK: u8 = 4;
+}
+
+/// A body put down (`StateNPCMasterDead_Limp` entered with its ragdoll at once, +0x2C): no chain,
+/// no root motion.
+fn down(state: &mut WorldState, id: PlayerId) {
+    stop_chain(state, id);
+    if let Some(s) = state.pawn_states.get_mut(&id) {
+        s.current = StateRequest::new(Master::Dead, NpcAnim::Death as u8, -1, 0, context::NONE);
+        s.pending = None;
+        s.ragdoll = true;
+        s.carrier = None;
     }
 }
 
@@ -484,6 +621,20 @@ pub fn tick(state: &mut WorldState, cfg: &SimConfig, out: &mut StepOut) {
         if p.time_scale <= 0.0 {
             continue;
         }
+        // The throw's rest (the Thrown tick 0x00A98DD0 -> 0x00A814B0): `StateNPCMasterStunned` with
+        // `m_Animation` 1, its group chosen from the ragdoll's pose (0x00A6B760: `RagdollToBack`
+        // when the recover bone's axis points up, else `RagdollToFront`; the sim has no ragdoll
+        // pose, so from the front), the recovery the rest test rolled.
+        let getup = state.players[i].thrown.getup;
+        if getup > 0 {
+            state.players[i].thrown.getup = 0;
+            if p.alive && state.pawn_states[&p.id].current.state == Master::Thrown {
+                let mut req = StateRequest::new(Master::Stunned, NpcAnim::Stun as u8, 1, 0, context::NONE);
+                req.variant = getup;
+                transition(state, i, req, cfg, out);
+            }
+        }
+        other_requests(state, i, cfg, out);
         if p.alive && !p.incapacitated() {
             take_request(state, i, cfg, out);
         }
@@ -491,6 +642,109 @@ pub fn tick(state: &mut WorldState, cfg: &SimConfig, out: &mut StepOut) {
         // The context the pawn runs, published for the presentation (`PlayerInput::npc_move`).
         let ctx = state.pawn_states.get(&p.id).map(|s| s.current.context).filter(|c| *c != context::NONE).unwrap_or(request(state, p.id).context);
         state.players[i].last_input.npc_move = ctx;
+    }
+}
+
+/// The states other pawns' states put this one in, taken before its own requests: the choke
+/// context's (0x00C09370 plays the victim's `Choke` group of its state, the victim's enter
+/// 0x00A7C270), the carrier's (its carry state requests `StateNPCMasterDead_BeingCarried`,
+/// 0x00A776E0; the body's tick 0x00A907F0 plays Walk while the carrier's horizontal speed is above
+/// 0 and Idle at 0; the drop 0x00A7D0B0 the low drop, crouched the sneaking one: the drop's trace
+/// classification, 0x00A6C910, is not modelled), and the brain's surprise (`StateNPCMasterSurprised`
+/// toward the nearest player: the attention reaction's stimulus is not in the request, LIKELY).
+fn other_requests(state: &mut WorldState, i: usize, cfg: &SimConfig, out: &mut StepOut) {
+    let p = state.players[i];
+    let id = p.id;
+    let cur = state.pawn_states[&id].current;
+    let group_of = |ph: crate::state::ChokePhase| {
+        use crate::state::ChokePhase as C;
+        match ph {
+            C::In => Some(choke::IN),
+            C::Loop => Some(choke::LOOP),
+            C::Win => Some(choke::WIN),
+            C::Lose => Some(choke::LOSE),
+            C::Cancel => Some(choke::CANCEL),
+            C::None => None,
+        }
+    };
+    let choker = state.players.iter().find(|o| o.choke.target == Some(id)).and_then(|o| group_of(o.choke.phase));
+    let carrier = p.carried_by.and_then(|c| state.player(c)).copied();
+    if let Some(g) = choker.filter(|_| carrier.is_none()) {
+        if cur.state != Master::BeingChoked {
+            transition(state, i, StateRequest::new(Master::BeingChoked, NpcAnim::Choke as u8, g as i8, 0, context::NONE), cfg, out);
+        } else if cur.group != g as i8 && g != choke::LOOP && !(g == choke::CANCEL && cur.group == choke::WIN as i8) {
+            // The Loop follows the victim's own In (`chain_ended`); Cancel is refused once won.
+            state.pawn_states.get_mut(&id).unwrap().current.group = g as i8;
+            play_chain(state, i, NpcAnim::Choke as u8, g as i8, 0, 0, cfg);
+        }
+        return;
+    }
+    if let Some(c) = carrier {
+        let carry_from_choke = cur.state == Master::BeingChoked;
+        match cur.state {
+            // Lifted straight from a won choke: the choke's CarryCorpse group while the carrier's
+            // lift plays (0x00A78FA0), then carried from Idle (a takedown's body).
+            Master::BeingChoked if c.carry_anim > 0.0 => {
+                if cur.group != choke::CARRY as i8 {
+                    state.pawn_states.get_mut(&id).unwrap().current.group = choke::CARRY as i8;
+                    play_chain(state, i, NpcAnim::Choke as u8, choke::CARRY as i8, 0, 0, cfg);
+                }
+            }
+            Master::BeingCarried => {
+                let Some(ch) = state.pawn_states[&id].chain else { return };
+                let moving = c.velocity.truncate().length() > 0.0;
+                let want = match ch.step {
+                    carry::IDLE if moving => Some(carry::WALK),
+                    carry::WALK if !moving => Some(carry::IDLE),
+                    _ => None,
+                };
+                if let Some(k) = want {
+                    play_step(state, i, NpcAnim::CorpseBeingCarried as u8, 0, k, 0, false, cfg);
+                }
+            }
+            _ => {
+                let takedown = carry_from_choke || (cur.state == Master::Dead && state.anim.get(&id).and_then(|a| a.layers[layer::FULL_BODY].as_ref()).is_some_and(|l| l.playing));
+                let step = if takedown { carry::IDLE } else { carry::IN };
+                transition(state, i, StateRequest::new(Master::BeingCarried, NpcAnim::CorpseBeingCarried as u8, 0, step, context::NONE), cfg, out);
+                state.pawn_states.get_mut(&id).unwrap().carrier = Some(c.id);
+            }
+        }
+        return;
+    }
+    if cur.state == Master::BeingCarried {
+        // Let go: the drop step.
+        let crouched = state.pawn_states[&id].carrier.and_then(|c| state.player(c)).is_some_and(|c| c.crouched);
+        let dropping = state.pawn_states[&id].chain.is_some_and(|c| c.step >= carry::DROP_LOW);
+        if !dropping && !play_step(state, i, NpcAnim::CorpseBeingCarried as u8, 0, if crouched { carry::DROP_LOW_SNEAK } else { carry::DROP_LOW }, 0, false, cfg) {
+            down(state, id);
+        }
+        return;
+    }
+    // The surprise: on the brain's turn to surprised.
+    let was = state.pawn_states[&id].awareness;
+    state.pawn_states.get_mut(&id).unwrap().awareness = p.ai_awareness;
+    if p.alive && !p.incapacitated() && p.ai_awareness == crate::state::awareness::SURPRISED && was != p.ai_awareness {
+        let near = state.players.iter().filter(|o| o.kind == PawnKind::Human && o.alive).map(|o| o.position).min_by(|a, b| a.distance_squared(p.position).total_cmp(&b.distance_squared(p.position)));
+        if let Some(at) = near {
+            let d = (at - p.position).truncate();
+            let fwd = crate::movement::forward_vector(p.yaw).truncate();
+            let right = crate::movement::right_vector(p.yaw).truncate();
+            let step = cardinal_step(d.dot(fwd), d.dot(right));
+            try_request(state, id, StateRequest::new(Master::Surprised, NpcAnim::Surprised as u8, -1, step, context::NONE), cfg);
+        }
+    }
+}
+
+/// `ECardinalDirection` of a point in the pawn's frame (0x00BBA970, the strong hit's and the
+/// surprise's direction): Front (0) or Back (3) when |forward| > |right|, else Right (2) when right
+/// > 0, else Left (1).
+pub fn cardinal_step(forward: f32, right: f32) -> u8 {
+    if forward.abs() > right.abs() {
+        if forward >= 0.0 { 0 } else { 3 }
+    } else if right > 0.0 {
+        2
+    } else {
+        1
     }
 }
 
@@ -549,6 +803,33 @@ fn take_request(state: &mut WorldState, i: usize, cfg: &SimConfig, out: &mut Ste
             try_request(state, p.id, StateRequest::new(Master::PlayAnim, anim, -1, 0, context::NONE), cfg);
         }
     }
+    // The ambient idle (`DisAISubProcessAmbientAnims` 0x00B39620): the full-body
+    // `StateNPCMasterPlayAnim` of `AmbientIdle`'s group and step for an NPC standing still (the
+    // transition logic may refuse it; the subprocess then retries).
+    // The pistol's aim (`DisAISubStateFirePistol` 0x00B47720 equips, then waits for Aim's hold):
+    // `StateNPCMasterAim`, entered here from Walk (the original enters it at its equip state's
+    // chain end, 0x00A65660 -> pawn slot 498; the port's NPCs draw the pistol without an equip
+    // state).
+    if req.context == context::FIRE_PISTOL && state.pawn_states[&p.id].current.state == Master::Walk && state.pawn_states[&p.id].pending.is_none() {
+        try_request(state, p.id, StateRequest::new(Master::Aim, NpcAnim::AimIn as u8, -1, 0, context::FIRE_PISTOL), cfg);
+    }
+    // The subprocess's stop (slot 76, 0x00B39580) exits the play state when it plays its chain: the
+    // brain dropped its ambient idle (the NPC left its routine or moved; LIKELY: the brain's stop
+    // conditions stand for the subprocess's).
+    let st = state.pawn_states[&p.id].current;
+    if req.ambient.is_none() && st.state == Master::PlayAnim && st.anim == NpcAnim::AmbientIdle as u8 {
+        request_exit(state.pawn_states.get_mut(&p.id).unwrap());
+    }
+    if let Some((group, step, serial, age)) = req.ambient {
+        let s = state.pawn_states.get_mut(&p.id).unwrap();
+        if serial != s.ambient_serial {
+            let mut r = StateRequest::new(Master::PlayAnim, NpcAnim::AmbientIdle as u8, group as i8, step, context::NONE);
+            r.start_ms = (age.max(0.0) * 1000.0).round().min(u16::MAX as f32) as u16;
+            if try_request(state, p.id, r, cfg) {
+                state.pawn_states.get_mut(&p.id).unwrap().ambient_serial = serial;
+            }
+        }
+    }
 }
 
 /// An NPC swing's start (the melee context's start, 0x00C24020 -> slot 125 0x00C0D670: the zones
@@ -588,7 +869,7 @@ fn machine_tick(state: &mut WorldState, i: usize, cfg: &SimConfig, out: &mut Ste
         }
         None => {}
     }
-    state_tick(state, i);
+    state_tick(state, i, cfg);
     if let Some(p) = state.pawn_states.get_mut(&id).and_then(|s| s.pending.take()) {
         if p.state != state.pawn_states[&id].current.state {
             transition(state, i, p, cfg, out);
@@ -652,6 +933,65 @@ fn enter(state: &mut WorldState, i: usize, cfg: &SimConfig, out: &mut StepOut) {
                 state.anim.get_mut(&id).map(|a| a.stop(layer::FULL_BODY));
             }
         }
+        // StrongHitReact's enter (0x00A78980): its chain (group -1, the step `m_Direction`) on slot
+        // 0, the step's own blend-in; a play failure exits. The yaw snap it pushes as rotation
+        // intent 0xC (the hit exactly from the authored side) is not applied (U-862: the port's
+        // NPCs turn by their brain's input). ProjectileHitReact's (0x00A7B890) the same with group
+        // 0 and its hit region.
+        Master::StrongHitReact | Master::ProjectileHitReact => {
+            if !play_chain(state, i, cur.anim, cur.group, cur.step, 0, cfg) {
+                request_exit(state.pawn_states.get_mut(&id).unwrap());
+            }
+        }
+        // Stunned's enter (0x00A78C20): the `Stun` chain's group `m_Animation`, step 0.
+        Master::Stunned => {
+            if let Some(s) = state.pawn_states.get_mut(&id) {
+                s.stun_timer = 0.0;
+            }
+            if !play_chain(state, i, cur.anim, cur.group, 0, 0, cfg) {
+                request_exit(state.pawn_states.get_mut(&id).unwrap());
+            }
+        }
+        // The choked victim's enter (0x00A7C270): the choke context's group (In, 0x00C09370), the
+        // step's blend-in (blend -1); the victim is placed at its choker by the retargeting
+        // component (snapped: drawn in the choker's frame, `viewmodel::BodyFrames`).
+        Master::BeingChoked => {
+            play_chain(state, i, cur.anim, cur.group, 0, 0, cfg);
+        }
+        // The carried body's enter (0x00A998A0): In lifted from the ground, Idle from a takedown.
+        Master::BeingCarried => {
+            if !play_chain(state, i, cur.anim, 0, cur.step, 0, cfg) {
+                down(state, id);
+            }
+        }
+        // Aim's enter (0x00A70740): the in (sub-state 2), the `Aim` body stance.
+        Master::Aim => {
+            if let Some(s) = state.pawn_states.get_mut(&id) {
+                s.aim = aim::IN;
+            }
+            if !play_chain(state, i, 0x60 + aim::IN, -1, 0, 0, cfg) {
+                if let Some(s) = state.pawn_states.get_mut(&id) {
+                    s.aim = aim::HOLD;
+                }
+            }
+        }
+        // The slave (0x00A7B350): its chain on slot 0 with its step's blend-in, its ragdoll notify
+        // handled as a death's (`crate::anim::handle`); the retargeting component places it at
+        // its master (drawn in the master's frame, `viewmodel::BodyFrames`).
+        Master::BeingAssassinated => {
+            if let Some(s) = state.pawn_states.get_mut(&id) {
+                s.ragdoll = false;
+            }
+            if !play_chain(state, i, cur.anim, cur.group, cur.step, token::DEATH, cfg) {
+                down(state, id);
+            }
+        }
+        // Surprised (a PlayAnim subclass: 0x00A7B6D0 / 0x00A65A60).
+        Master::Surprised => {
+            if !play_chain(state, i, cur.anim, cur.group, cur.step, 0, cfg) {
+                request_exit(state.pawn_states.get_mut(&id).unwrap());
+            }
+        }
         Master::Thrown => {}
     }
 }
@@ -662,7 +1002,7 @@ fn enter(state: &mut WorldState, i: usize, cfg: &SimConfig, out: &mut StepOut) {
 fn exit(state: &mut WorldState, i: usize, next: Master) {
     let id = state.players[i].id;
     let cur = state.pawn_states[&id].current.state;
-    if matches!(cur, Master::ActionMelee | Master::ActionParry | Master::PlayAnim | Master::Dead) {
+    if matches!(cur, Master::ActionMelee | Master::ActionParry | Master::PlayAnim | Master::Dead | Master::StrongHitReact | Master::ProjectileHitReact | Master::Stunned | Master::BeingChoked | Master::BeingCarried | Master::Aim | Master::Surprised | Master::BeingAssassinated) {
         stop_chain(state, id);
         if let Some(a) = state.anim.get_mut(&id) {
             a.stop(layer::UPPER_BODY);
@@ -688,18 +1028,80 @@ fn exit(state: &mut WorldState, i: usize, next: Master) {
 
 /// A state's tick (slot 77): ActionMelee exits when its slot no longer plays its chain (a hit or
 /// a block cut the swing, 0x00A6AB50); Thrown hands back once the pawn is up (physics.md 3.7).
-fn state_tick(state: &mut WorldState, i: usize) {
+fn state_tick(state: &mut WorldState, i: usize, cfg: &SimConfig) {
     let p = state.players[i];
     let Some(s) = state.pawn_states.get(&p.id) else { return };
     let exit = match s.current.state {
-        Master::ActionMelee | Master::ActionParry | Master::PlayAnim => s.chain.is_none() && s.pending.is_none(),
+        Master::ActionMelee | Master::ActionParry | Master::PlayAnim | Master::StrongHitReact | Master::ProjectileHitReact | Master::Stunned | Master::Surprised => s.chain.is_none() && s.pending.is_none(),
         Master::Thrown => p.alive && !p.thrown.active && !p.thrown.ragdoll,
-        Master::Walk | Master::Dead => false,
+        // A choked victim nobody chokes or carries any more and that is up again (a lost or
+        // cancelled choke whose chain was cut).
+        Master::BeingChoked => p.alive && !p.incapacitated() && s.chain.is_none() && !state.players.iter().any(|o| o.choke.target == Some(p.id)),
+        Master::BeingAssassinated => false,
+        Master::Walk | Master::Dead | Master::BeingCarried | Master::Aim => false,
     };
     if exit {
         request_exit(state.pawn_states.get_mut(&p.id).unwrap());
+        return;
+    }
+    // The slave's ragdoll notify (pawn event 5, 0x00A79790) puts the body down.
+    if s.current.state == Master::BeingAssassinated && s.ragdoll {
+        down(state, p.id);
+        return;
+    }
+    // Aim's tick (0x00A64F00): a sub-state's chain ended (slot 85 0x00A61440) goes on by slot 111
+    // (0x00A64FE0): shoot, reload and in to the hold, out to the exit. In the hold the pistol's
+    // shot (`DisItemContext_NPCFireGun`'s start 0x00C25720 -> 0x00A61490) plays the shoot, its
+    // reload (0x00A614D0) the reload; the brain no longer running the context lowers the gun.
+    if s.current.state == Master::Aim {
+        let sub = s.aim;
+        let ended = s.chain.is_none();
+        let ctx = request(state, p.id).context;
+        let next = if ended && sub != aim::HOLD {
+            if sub == aim::OUT {
+                request_exit(state.pawn_states.get_mut(&p.id).unwrap());
+                return;
+            }
+            Some(aim::HOLD)
+        } else if sub == aim::HOLD {
+            match p.left.phase {
+                crate::state::LeftPhase::Recovering if p.left.timer == 0.0 => Some(aim::SHOOT),
+                crate::state::LeftPhase::Reloading if p.left.timer == 0.0 => Some(aim::RELOAD),
+                _ if ctx != context::FIRE_PISTOL => Some(aim::OUT),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(n) = next {
+            state.pawn_states.get_mut(&p.id).unwrap().aim = n;
+            if n != aim::HOLD && !play_chain(state, i, 0x60 + n, -1, 0, 0, cfg) && n == aim::OUT {
+                request_exit(state.pawn_states.get_mut(&p.id).unwrap());
+            }
+        }
+        return;
+    }
+    // Stunned's tick (0x00A61E20): the looping step holds while `m_fStunTimer` (rolled at the
+    // loop's start as `rand() * m_fStunDuration`) stays below `m_fStunDuration`, then the anim
+    // player is made to go on to the recovery (0x00C53410). `m_fStunDuration` is unset in
+    // `Default__StateNPCMasterStunned` and the pawn templates: 0, so the loop is left on the tick
+    // after it starts (it never shows).
+    if s.current.state == Master::Stunned {
+        let Some(c) = s.chain.filter(|c| c.looping) else { return };
+        let dt = crate::DT * p.time_scale;
+        let s = state.pawn_states.get_mut(&p.id).unwrap();
+        s.stun_timer += dt;
+        if s.stun_timer > STUN_DURATION {
+            let tok = 0;
+            if !play_step(state, i, c.anim, c.group as i8, c.step + 1, tok, false, cfg) {
+                stop_chain(state, p.id);
+            }
+        }
     }
 }
+
+/// `StateNPCMasterStunned.m_fStunDuration` (+0x88): no cooked value overrides the class's 0.
+const STUN_DURATION: f32 = 0.0;
 
 /// The step of a Parried_Lose `Parry` chain (0x00C174C0): Right* when the swing's attack zone
 /// swings right, Left* when it swings left (`m_SwingDirection`), the defender's side the first of
@@ -720,6 +1122,21 @@ pub fn request_parried(state: &mut WorldState, id: PlayerId, cfg: &SimConfig) {
 pub fn request_death(state: &mut WorldState, id: PlayerId, anim: NpcAnim, step: u8, cfg: &SimConfig) {
     state.pawn_states.entry(id).or_insert_with(PawnStates::new);
     try_request(state, id, StateRequest::new(Master::Dead, anim as u8, -1, step, context::NONE), cfg);
+}
+
+/// A paired move's victim (the execute 0x00C0DFD0 -> `StateNPCMasterBeingAssassinated`, its
+/// request 0x00A71B50 / apply 0x00A6B010): the slave chain, group and step, entered at once (the
+/// slave starts in the master state's first tick, 0x00A7B350, LIKELY; the master plays from the
+/// press's tick, `crate::anim::start_paired`). False when the pawn already plays its slave or was
+/// put down after it.
+pub fn start_slave(state: &mut WorldState, id: PlayerId, anim: NpcAnim, group: i8, step: u8, cfg: &SimConfig, out: &mut StepOut) -> bool {
+    let Some(i) = state.players.iter().position(|p| p.id == id) else { return false };
+    let Some(s) = state.pawn_states.get(&id) else { return false };
+    if s.current.state == Master::BeingAssassinated || (s.current.state == Master::Dead && s.ragdoll) {
+        return false;
+    }
+    transition(state, i, StateRequest::new(Master::BeingAssassinated, anim as u8, group, step, context::NONE), cfg, out);
+    state.pawn_states[&id].current.state == Master::BeingAssassinated
 }
 
 /// The throw (`StateNPCMasterThrown`): entered with its first update in the hit's tick
