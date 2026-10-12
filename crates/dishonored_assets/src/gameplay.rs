@@ -566,10 +566,20 @@ pub fn load_gameplay_config(content: &Content) -> Result<GameplayConfig> {
     };
     let fatality = crate::fatality::load_fatality(content, &db)?;
     l.prov.insert("fatality".into(), format!("{} (move set 0, Twk_Pawn_Corvo states, Ply_Sword_Fatality_as notifies)", crate::fatality::FATALITY));
-    let root_motion = crate::fatality::load_root_motion(content, &fatality)?;
+    let mut root_motion = crate::fatality::load_root_motion(content, &fatality)?;
     l.prov.insert("root_motion".into(), "Ply_Sword_Assassination_as / Ply_Sword_Fatality_as masters' root0_jnt track, Engine Ply_Player.Skm_Player RotOrigin".into());
-    let sequences = crate::sim_anim::load_sequences(content, &db, &root_motion, &mut l.prov)?;
+    let mut sequences = crate::sim_anim::load_sequences(content, &db, &root_motion, &mut l.prov)?;
     let npc_anim = crate::sim_anim::load_npc_anim(content, &mut l.prov)?;
+    // The NPC sequences' root motion, keyed by their sequence keys.
+    let npc_tree = crate::sim_anim::load_npc_tree_data(content)?;
+    let npc_root = crate::sim_anim::load_npc_root_motion(&npc_tree, &npc_anim.sets, &sequences);
+    l.prov.insert("root_motion.npc".into(), format!("{} NPC sequences: the root bone track of {}'s sets on its body skeleton, through the mesh's RotOrigin turned to +X (the NPC tree's frame)", npc_root.len(), crate::sim_anim::NPC_TWEAK));
+    for (k, s) in sequences.iter_mut() {
+        if npc_root.contains_key(k) {
+            s.root_motion = Some(k.clone());
+        }
+    }
+    root_motion.extend(npc_root);
     Ok(GameplayConfig {
         adrenaline,
         throw,

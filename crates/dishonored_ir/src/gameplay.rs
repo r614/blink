@@ -677,11 +677,11 @@ impl Default for FatalityConfig {
     }
 }
 
-/// The root motion of a player master sequence (its state's `m_RootMotionMode` `RMM_Translate`
-/// and `m_RootMotionRotationMode` `RMRM_RotateActor`: the root bone's travel moves the pawn and its
-/// turn turns it): the root bone's offset from its first frame in the pawn's frame (forward,
-/// right) and its yaw from the first frame (degrees, positive to the right), `rate` samples per
-/// second.
+/// The root motion of a sequence: the root bone's offset from its first frame in the pawn's frame
+/// (forward, right) and its yaw from the first frame (degrees, positive to the right), `rate`
+/// samples per second. A player master's state uses `m_RootMotionMode` `RMM_Translate` and
+/// `m_RootMotionRotationMode` `RMRM_RotateActor` (the root bone's travel moves the pawn and its
+/// turn turns it); how an NPC's sequences move it is `dishonored_sim::pawn_states`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RootMotion {
     pub rate: f32,
@@ -771,7 +771,9 @@ pub struct GameplayConfig {
     /// The player sword's finisher kills (`DisTweaks_Fatality`).
     #[serde(default)]
     pub fatality: FatalityConfig,
-    /// The paired moves' masters' root motion, by sequence name.
+    /// The paired moves' masters' root motion, by sequence name, and the NPC sequences' (the
+    /// attacks, dodges, reactions and the locomotion's start, stop and turn sequences), by
+    /// [`sequence_key`].
     #[serde(default)]
     pub root_motion: BTreeMap<String, RootMotion>,
     /// The sequences the simulation plays (`dishonored_sim::anim`), by [`sequence_key`]: their
@@ -863,6 +865,9 @@ pub struct NpcAnimConfig {
     pub sets: Vec<String>,
     pub item_prefix: String,
     pub empty_prefix: String,
+    /// The NPC master state machine's transition logic (`dishonored_sim::pawn_states`).
+    #[serde(default)]
+    pub fsm: crate::npc_anim::NpcFsm,
 }
 
 impl GameplayConfig {

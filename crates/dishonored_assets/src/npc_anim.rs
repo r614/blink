@@ -54,6 +54,16 @@ fn anim_names(pkg: &Package, props: &[Property], n: &str) -> Vec<String> {
     structs(pkg, props, n).iter().map(|s| name_of(s, "m_AnimName")).filter(|s| !s.is_empty() && s != "None").collect()
 }
 
+/// The start / stop / turn props of a speed mode, in the order of [`anim_names`] (named entries
+/// only).
+fn anim_props(pkg: &Package, props: &[Property], n: &str) -> Vec<LocoAnimProp> {
+    structs(pkg, props, n)
+        .iter()
+        .map(|s| LocoAnimProp { name: name_of(s, "m_AnimName"), move_anim_in: f32_of(s, "m_fMoveAnimIn"), move_anim_out: f32_of(s, "m_fMoveAnimOut"), cut_if_moving: f32_of(s, "m_fCutIfMoving"), straight_dist: f32_of(s, "m_fStraightDist") })
+        .filter(|p| !p.name.is_empty() && p.name != "None")
+        .collect()
+}
+
 /// Decode an `ArkComponentLocomotionConfig` export.
 pub fn read_loco_config(pkg: &Package, export: usize) -> Result<LocoConfig> {
     let h = pkg.read_object(export)?;
@@ -73,8 +83,16 @@ pub fn read_loco_config(pkg: &Package, export: usize) -> Result<LocoConfig> {
             stop_anims: anim_names(pkg, &m, "m_StopAnimProps"),
             turn_anims: anim_names(pkg, &m, "m_TurnAnimProps"),
             foot_on_ground: f32_of(&m, "m_fFootOnGroundPct"),
+            turn_props: anim_props(pkg, &m, "m_TurnAnimProps"),
+            start_props: anim_props(pkg, &m, "m_StartAnimProps"),
+            stop_props: anim_props(pkg, &m, "m_StopAnimProps"),
         });
     }
+    let opt = |n: &str| find(p, n).and_then(|x| x.as_float());
+    c.max_speed_static_turn = opt("m_fMaxSpeedForStaticTurn").unwrap_or(f32::NAN);
+    c.max_dist_to_path_end_to_turn = opt("m_fMaxDistToPathEndToTurn").unwrap_or(f32::NAN);
+    c.max_dist_to_first_path_turn = opt("m_fMaxDistToFirstPathTurn").unwrap_or(f32::NAN);
+    c.unaccuracy_radius = opt("m_fUnaccuracyRadius").unwrap_or(f32::NAN);
     for t in structs(pkg, p, "m_Transitions") {
         let i = |n: &str| match find(&t, n).map(|x| &x.value) {
             Some(Value::Int(v)) => *v,
@@ -154,9 +172,11 @@ pub fn load_loco_config(content: &Content, r: &(String, String)) -> Result<LocoC
     let pkg = content.package(&r.0)?;
     let i = find_export(&pkg, &r.1).with_context(|| format!("{} not in {}", r.1, r.0))?;
     let mut c = read_loco_config(&pkg, i)?;
-    // Unset arrays come from the class default object (Engine): e.g. FemaleLocomotionConfig
-    // keeps the default three speed names.
-    if c.speed_names.is_empty() || c.feet.is_empty() {
+    // Unset arrays and values come from the class default object (Engine): e.g.
+    // FemaleLocomotionConfig keeps the default three speed names; no Boyle config sets the turn
+    // and stop distances.
+    let unset = [c.max_speed_static_turn, c.max_dist_to_path_end_to_turn, c.max_dist_to_first_path_turn, c.unaccuracy_radius].iter().any(|v| v.is_nan());
+    if c.speed_names.is_empty() || c.feet.is_empty() || unset {
         if let Ok(e) = content.package("Engine") {
             if let Some(d) = find_export(&e, "Default__ArkComponentLocomotionConfig") {
                 let h = e.read_object(d)?;
@@ -169,6 +189,11 @@ pub fn load_loco_config(content: &Content, r: &(String, String)) -> Result<LocoC
                 if c.feet.is_empty() {
                     c.feet = structs(&e, &h.properties, "m_Feet").iter().map(|f| f32_of(f, "m_fOnGroundPct")).collect();
                 }
+                for (v, n) in [(&mut c.max_speed_static_turn, "m_fMaxSpeedForStaticTurn"), (&mut c.max_dist_to_path_end_to_turn, "m_fMaxDistToPathEndToTurn"), (&mut c.max_dist_to_first_path_turn, "m_fMaxDistToFirstPathTurn"), (&mut c.unaccuracy_radius, "m_fUnaccuracyRadius")] {
+                    if v.is_nan() {
+                        *v = f32_of(&h.properties, n);
+                    }
+                }
             }
         }
     }
@@ -180,12 +205,17 @@ fn find_export(pkg: &Package, path: &str) -> Option<usize> {
 }
 
 const ITEM_PREFIX: &[&str] = &["eDisItemPrefix_None", "eDisItemPrefix_Both", "eDisItemPrefix_Primary", "eDisItemPrefix_Secondary", "eDisItemPrefix_Intended_Primary", "eDisItemPrefix_Intended_Secondary"];
+/// `ERootMotionMode` and `ERootMotionRotationMode` (Engine).
+const ROOT_MOTION_MODE: &[&str] = &["RMM_Translate", "RMM_Velocity", "RMM_Ignore", "RMM_Accel", "RMM_Relative"];
+const ROOT_ROTATION_MODE: &[&str] = &["RMRM_Ignore", "RMRM_RotateActor"];
 
 fn read_chains(pkg: &Package, props: &[Property]) -> Vec<AnimChain> {
     structs(pkg, props, "m_Animations")
         .iter()
         .map(|c| AnimChain {
             ragdoll_if_pushed: bool_of(c, "m_bGoToRagdollIfPushed"),
+            root_motion_mode: enum_index(c, "m_RootMotionMode", ROOT_MOTION_MODE),
+            root_rotation_mode: enum_index(c, "m_RootRotationMode", ROOT_ROTATION_MODE),
             groups: structs(pkg, c, "m_Groups")
                 .iter()
                 .map(|g| AnimGroup {
@@ -201,6 +231,7 @@ fn read_chains(pkg: &Package, props: &[Property]) -> Vec<AnimChain> {
                             rate_range: f32_of(s, "m_fPlayRateModifierRange"),
                             item_prefix: enum_index(s, "m_FirstItemPrefix", ITEM_PREFIX),
                             face: Some(name_of(s, "m_FaceAnimName")).filter(|n| !n.is_empty() && n != "None").unwrap_or_default(),
+                            no_auto_transitions: bool_of(s, "m_bNoAutoTransitions"),
                         })
                         .collect(),
                 })

@@ -206,6 +206,29 @@ pub struct SpeedMode {
     /// `m_fFootOnGroundPct`: fraction of the cycle a foot stays planted (0 for idle modes).
     #[serde(default)]
     pub foot_on_ground: f32,
+    /// The props of [`Self::turn_anims`], [`Self::start_anims`], [`Self::stop_anims`] in the same
+    /// order (`ArkCpntLocoTurnAnimProp` / `StartAnimProp` / `StopAnimProp`), the sequences the
+    /// locomotion component requests from its path (research/dishonored/ANIMATION.md section 3).
+    #[serde(default)]
+    pub turn_props: Vec<LocoAnimProp>,
+    #[serde(default)]
+    pub start_props: Vec<LocoAnimProp>,
+    #[serde(default)]
+    pub stop_props: Vec<LocoAnimProp>,
+}
+
+/// A start, stop or turn sequence of a speed mode (`ArkCpntLoco{Turn,Start,Stop}AnimProp`): the
+/// sequence, `m_fMoveAnimIn` (turns, stops: the move loop's phase at which it is requested),
+/// `m_fMoveAnimOut` (turns, starts), `m_fCutIfMoving` (turns: the fraction of the sequence played
+/// when the turn leads into a walk) and `m_fStraightDist` (the straight path it needs). A field
+/// the prop's class does not have is 0.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LocoAnimProp {
+    pub name: String,
+    pub move_anim_in: f32,
+    pub move_anim_out: f32,
+    pub cut_if_moving: f32,
+    pub straight_dist: f32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -231,6 +254,18 @@ pub struct LocoConfig {
     /// 0.44, right 0.94).
     #[serde(default)]
     pub feet: Vec<f32>,
+    /// `m_fMaxSpeedForStaticTurn` (+0x48), `m_fMaxDistToPathEndToTurn` (+0x4C),
+    /// `m_fMaxDistToFirstPathTurn` (+0x50), `m_fUnaccuracyRadius` (+0x9C): the turn and stop
+    /// rules of the locomotion component (`Engine.Default__ArkComponentLocomotionConfig`: 40,
+    /// 100, 100, 120 where a config leaves them).
+    #[serde(default = "default_static_turn_speed")]
+    pub max_speed_static_turn: f32,
+    #[serde(default = "default_turn_dist")]
+    pub max_dist_to_path_end_to_turn: f32,
+    #[serde(default = "default_turn_dist")]
+    pub max_dist_to_first_path_turn: f32,
+    #[serde(default = "default_unaccuracy_radius")]
+    pub unaccuracy_radius: f32,
 }
 
 fn default_stop_speed() -> f32 {
@@ -239,6 +274,18 @@ fn default_stop_speed() -> f32 {
 
 fn default_start_speed() -> f32 {
     60.0
+}
+
+fn default_static_turn_speed() -> f32 {
+    40.0
+}
+
+fn default_turn_dist() -> f32 {
+    100.0
+}
+
+fn default_unaccuracy_radius() -> f32 {
+    120.0
 }
 
 impl LocoConfig {
@@ -267,6 +314,10 @@ pub struct AnimStep {
     /// `m_FaceAnimName`: sequence the `FaceSlot` plays with this step (full name, empty: none).
     #[serde(default)]
     pub face: String,
+    /// `m_bNoAutoTransitions`: the anim player does not end the step nor go on to the next by
+    /// itself (0x00C53260); its state advances it.
+    #[serde(default)]
+    pub no_auto_transitions: bool,
 }
 
 /// `DisAnimationGroup`: steps played in order (intro, loop, outro).
@@ -282,6 +333,61 @@ pub struct AnimGroup {
 pub struct AnimChain {
     pub groups: Vec<AnimGroup>,
     pub ragdoll_if_pushed: bool,
+    /// `m_RootMotionMode` / `m_RootRotationMode`: the mesh's root-motion modes while the chain
+    /// plays on the full-body slot (`ERootMotionMode`: 0 Translate, 1 Velocity, 2 Ignore, 3 Accel,
+    /// 4 Relative; `ERootMotionRotationMode`: 0 Ignore, 1 RotateActor), set by the NPC anim
+    /// player's play (0x00C57310 -> pawn slot 469, 0x00B6E680).
+    #[serde(default)]
+    pub root_motion_mode: u8,
+    #[serde(default)]
+    pub root_rotation_mode: u8,
+}
+
+/// The NPC master state machine's transition logic (`Default__DishonoredNPCPawn.MasterFSM.
+/// pMasterFSMTransitionLogic`, `DisNativeStateTransitionLogic.m_Transitions`) with the parents of
+/// the state classes it names.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct NpcFsm {
+    /// (from class, to class, `EStateTransitionLogicResult`: 0 NotAllowed, 1 Allowed, 2 Call),
+    /// in the cooked order.
+    pub transitions: Vec<(String, String, u8)>,
+    /// A state class's super class (up to `DishonoredNativeState`).
+    pub parents: std::collections::BTreeMap<String, String>,
+}
+
+/// `EStateTransitionLogicResult` values.
+pub mod transition {
+    pub const NOT_ALLOWED: u8 = 0;
+    pub const ALLOWED: u8 = 1;
+    pub const CALL: u8 = 2;
+}
+
+impl NpcFsm {
+    /// A class and its parents, nearest first.
+    fn lineage<'a>(&'a self, class: &'a str) -> Vec<&'a str> {
+        let mut out = vec![class];
+        while let Some(p) = self.parents.get(*out.last().unwrap()) {
+            if out.len() > 16 || out.contains(&p.as_str()) {
+                break;
+            }
+            out.push(p);
+        }
+        out
+    }
+
+    /// The transition result from a state class to another (the map builder 0x00A7BBE0): the
+    /// first row found walking the from class up its parents and, for each, the to class up its
+    /// parents; Call (the state's CanTransitionTo) when no row matches.
+    pub fn result(&self, from: &str, to: &str) -> u8 {
+        for f in self.lineage(from) {
+            for t in self.lineage(to) {
+                if let Some(r) = self.transitions.iter().find(|r| r.0 == f && r.1 == t) {
+                    return r.2;
+                }
+            }
+        }
+        transition::CALL
+    }
 }
 
 /// A `DisAnimDefinitions` class's `m_Animations`, indexed by `eDisNPCAnimations`.

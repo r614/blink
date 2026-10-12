@@ -1035,13 +1035,17 @@ impl TreeState {
             let Some(c) = clips.find(&s.name) else { continue };
             let Some(j) = c.bones.iter().position(|b| *b == Some(0)) else { continue };
             let (dt, dq) = root_track_delta(&c, j, from, d, s.looping);
-            let mut dt = dt;
+            // `ExtractRootMotion` (slot 117, 0x0058E780) zeroes the axes that are not
+            // `RBA_Translate` in the mesh's `RotOrigin` frame (`SkeletalMesh.m_OriginTransform`),
+            // not in the track's: the slots' [Translate, Translate, Default] keep the horizontal
+            // travel. The extra turn of `mesh_rotation` (about Z) leaves Z where it is.
+            let mut dt = shape.mesh_rotation * dt;
             for (k, on) in translate.iter().enumerate() {
                 if !on {
                     dt[k] = 0.0;
                 }
             }
-            travel += shape.mesh_rotation * dt * n.total;
+            travel += dt * n.total;
             if extract {
                 // The root's turn seen in the pawn's frame: where it takes the pawn's forward
                 // axis (UE3 yaw: x forward, y right).
