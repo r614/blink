@@ -106,7 +106,8 @@ Reported from play testing, not yet fixed:
 - **Effects**:
   - blood renders black;
   - the camera's lens blood renders as white blobs;
-  - particles start early or late against their events and stay too long.
+  - particles start early or late against their events and stay too long;
+  - the first-person pistol's muzzle smoke (now drawn at the gun) renders as a large cyan cloud.
 - **Audio**:
   - throwing a grenade plays a gunshot;
   - combat sounds are out of sync with their events;
@@ -117,11 +118,9 @@ Reported from play testing, not yet fixed:
   - alerted and fighting NPCs move out of step with their animations;
   - death animations and their particles look incomplete.
 - **Animation not yet requested by the simulation**: the renderer only draws what the
-  simulation plays, so these are missing until the pawn states move there:
-  - first person: the walk, run, crouch and jump arms, the left hand's idles, the Blink,
-    Windblast and possession casts, equips, parries, mantles and the choke and carry poses;
-  - NPCs: hit reactions, blocks, parries, stuns, ambient idles, turns and starts, blinks, the
-    assassination and choke victims' moves and the get-ups (a thrown NPC stands up at once).
+  simulation plays, so these are missing:
+  - NPCs: the block and the defender's won parry, the pistol bullet's and the grenade's
+    knock-down (a shot NPC does not react), the cowering pose, the special classes' own moves.
 - **Performance**: frame rates are very low in Free Roam.
 
 ## Platforms

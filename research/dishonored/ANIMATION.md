@@ -261,8 +261,17 @@ behaviours, not brains. `DisTweaks_AISubProcess_AmbientAnims` instances exist on
 `_Aggressive` (30-60 s, upper body, `m_bCheckForMovement` false: they also play while walking),
 `TwkBehavior_StationarySearch_Default` (class defaults: 2-6 s, full body, standing only), the
 weeper, tallboy and musical overseer patrols. Idle, wander and group-idle behaviours have none, so
-relaxed civilians do not play ambient idles. The port maps the patrol stance (patrol and guard
-behaviours) to the first set and the search stance to the second.
+relaxed civilians do not play ambient idles.
+
+The request (0x00B39620, decoded 2026-10-12): the subprocess rolls the CRT's global `rand()` (the
+first timer `rand()/32767 x max`, the next `min + rand() x (max - min)/32767`, the variant
+`(int)(rand() x count / 32768)`), counts down while still or with the movement check off, picks
+group 1 when a hand holds an item, else 0, and builds a pawn-state request: `StateNPCMasterPlayAnim`
+(full body) with `m_bPlayFullBodyAnimation` or when standing, `StateNPCUpperPlayAnim`
+(`UpperBodySlot`) otherwise; a refused request retries every tick, and the subprocess's stop
+exits the play state. Port: the brain's head runs the timer and the pick (`dishonored_ai::head`,
+eligible on routine while still; its CRT stream per head) and the pawn's request carries the pick
+(`Request::ambient`), which the simulation plays through PlayAnim (`pawn_states::take_request`).
 
 Face sequences: every `DisAnimation` step has `m_FaceAnimName` (e.g. `Sword_DodgeIn_Face`); it
 plays in `FaceSlot` with the step (decoded into `AnimStep::face`, played on the bones below
@@ -314,40 +323,55 @@ simulation's sequence names in).
 
 | Situation | Original mechanism | Port |
 |---|---|---|
-| walking / running | locomotion modifier and speed modes | §3, the simulation's tree; modifier from the brain's awareness (`dishonored_sim::anim::modifier`): guards `SwordPatrol` when unaware, `SearchSword` surprised or suspicious, `Sword` in combat, `PanicSword` fearful or begging; civilians `Empty`, `SearchEmpty`, `PanicEmpty`; one profile's config (the doorman's) for every NPC (U-978); human players' bodies have no tree: they stand in `NPC_Human_at` as cooked |
-| modifier change | `m_Transitions` | not requested (the tree's "Specific anim" child stays unused) |
-| standing still / patrolling | `AmbientIdle` subprocess of the behaviour | not requested yet (pawn states, ARCHITECTURE step 6): the NPC stands in its locomotion idle |
+| walking / running | locomotion modifier and speed modes | §3, the simulation's tree; modifier from the brain's awareness (`dishonored_sim::anim::modifier`): guards `SwordPatrol` when unaware, `SearchSword` surprised or suspicious, `Sword` in combat, `PanicSword` fearful or begging; civilians `Empty`, `SearchEmpty`, `PanicEmpty`; `Aim` in `StateNPCMasterAim`; one profile's config (the doorman's) for every NPC (U-978). The decoded body stance -> modifier table (0x00B71000, U-892 below) is not wired: the brain publishes no body stance |
+| modifier change | `m_Transitions` (node side, 0x00911230) | the node's own rule in the simulation's tree (`dishonored_anim::locomotion`) |
+| standing still / patrolling | `AmbientIdle` subprocess of the behaviour (0x00B39620: a `StateNPCMasterPlayAnim` request, full body standing, `StateNPCUpperPlayAnim` moving with the upper-body flag) | the brain's head picks it (`dishonored_ai::head`, CRT `rand()` stream per head) and requests it (`Request::ambient`: group, step, serial, age); the simulation plays it through `StateNPCMasterPlayAnim` on `FullBodySlot` with its `<sequence>_Face` on `FaceSlot`; dropping it (moving, off routine) exits the state (LIKELY: the subprocess's stop) |
 | melee swing (`SwordSwing`) | `AttackShort/Medium/Long` chains from the AI attack pattern | the simulation's `StateNPCMasterActionMelee` (`dishonored_sim::pawn_states`): the context's chain (`AttackShort`, `AttackStepBack`, `AttackMedium`, `AttackLong`, `JumpAttack`), random group, played whole with its root motion on `FullBodySlot` |
 | side / back step, GenericActions | `DisItemContext_NPCSideStep` / `BackStep`, the behaviours' `PlayAnim` requests | `StateNPCMasterPlayAnim` in the simulation (`SideStep` group by side, `JumpBack`; the behaviour's chain); `MatchView::npc_actions` from the pawn states |
 | start / stop / turn in place | `ArkComponentLocomotion` from the path (section 3) | the simulation's `npc_loco` (rules decoded) in the tree's "Specific anim" child |
-| blocking | `Parry_AwaitingImpact` | not requested |
-| parry (`SwordParried`) | `Parry` groups | not requested |
-| stagger | `Stun` | not requested |
-| hit (`Damage`) | `HitReactStrong` / `HitReactProjectile` / `HitReactWindblast` / additive small | not requested |
-| assassinated | `Assassination` (`_Slave` sequences synced to the player's) | not requested (the slaves' sets are not in the simulation's table): the victim's death without a sequence, the ragdoll at once |
-| death | `Death` / `DeathFast` ... then `DishonoredNotify_Ragdoll` (e.g. 2.299 s into `Generic_DeathFrontA`) | the simulation's `Death` step by the killer's direction on `NPC_Dead_at`'s `FullBodySlot` (blended in over 0.2 s from that tree's source, the reference pose), then the presentation ragdoll at the notify's event (§8) |
+| blocking | `Parry_AwaitingImpact` | not requested (the NPC block context's animation was not decoded) |
+| parry (`SwordParried`) | `Parry` groups | the parried attacker's `Parry` group 2 (`StateNPCActionParry`); the defender's won parry not requested |
+| stagger | `Stun` | the parried attacker's chain above; `StateNPCMasterStunned`'s group 0 (`Versus_Stun_In`) has no native requester |
+| hit (`Damage`) | the damage type's `m_ExpectedHitReaction`, else Weak (0x00B57F00; `m_bDisableWeakHitReaction` false for every cooked combat tweak): Weak plays `HitReactSmall_Additive` on `AdditiveReactSlot` (slot 421, 0x00B733F0, eight-way step, no state), Strong `StateNPCMasterStrongHitReact` (cardinal `m_Direction` from 0x00A6D5F0's sectors), Projectile `StateNPCMasterProjectileHitReact` (hit region step; a non-leg hit from behind falls back to Strong), Knockdown a Thrown request | the simulation (`anim::hit_reactions`): the player's sword and the Windblast Weak, the crossbow bolt Projectile (head for a headshot, else the torso: the hit bone is not in the event), the slide Strong. Not modelled: the pistol bullet's and the grenade's Knockdown (`DishonoredDamageType_Bullet`, a Thrown request with the momentum), StrongHitReact's yaw snap (intent 0xC, U-862) |
+| assassinated | `StateNPCMasterBeingAssassinated` (0x00A7BEB0 / 0x00A7B350): the slave chain (`m_SlaveAction`), its step the direction, its group the master's variant; Dead_Limp at its ragdoll notify or end | the simulation's `BeingAssassinated` from the master's tick (`Assassination` by direction, `AssassinationDrop`, the synced short fatalities' forehand / backhand group, a finisher's slave and variant), the ragdoll at its notify; the victim is drawn at its master (the retargeting component, 0x00C88440, is not run by the simulation) |
+| death | `Death` / `DeathFast` ... then `DishonoredNotify_Ragdoll` (e.g. 2.299 s into `Generic_DeathFrontA`); every chain step is played with blend-out 0 and the death groups' `m_fBlendOutTime` is 0: full weight up to and past the notify (0x00C52E00 / 0x00C53260) | the simulation's `Death` step by the killer's direction on `NPC_Dead_at`'s `FullBodySlot` at the step's blend-in (0.5), blend-out 0, then the presentation ragdoll at the notify's event (§8) |
 | first seen dead (late join, corpse spawners) | the corpse is already a ragdoll at rest | the ragdoll run to rest at once from the pose drawn (§8, U-147) |
 | sleep dart | `m_bSlowDeathOnly`: the "death" is the knock-out | not requested: the ragdoll at once |
-| held in a choke | `StateNPCMasterBeingChoked`: the `Choke` chain, one group per choke state | not requested; the won choke's body goes to the ragdoll at once |
-| carried | `CorpseBeingCarried` (steps = carry states: In, Idle, Walk, DropLow, DropLowSneak, DropHigh, DropNoMove, DropFetal) | not requested: the body shows its tree (`NPC_Dead_at` after its death's slot blended out: the reference pose) at the carrier's root; on the drop the ragdoll starts from that pose |
-| panic start | `Panic` | not requested; the `PanicEmpty` / `PanicSword` locomotion |
-| cower | `DisAISubStateCower` (0x00B12840): body stance `PanicRecover` (`Equipped` when armed), face the enemy | not requested (the simulation's modifiers have no `PanicRecover`) |
-| noticing | `ReactToNoticing` | not requested |
+| held in a choke | `StateNPCMasterBeingChoked`: the choke context's state plays the victim's `Choke` group (0x00C09370: In, Loop, Win, CarryCorpse, Lose, Cancel; blend -1: the step's 0.2); the victim's In end plays the Loop; Win's end puts it down (Dead_Limp, ragdoll at once) | the simulation follows the choker's `ChokePhase` (In, Win, Lose, Cancel; the Loop after the victim's own In; Cancel refused once won); Win's end puts it down, Lose's and Cancel's let it go. The port's gameplay still switches In -> Loop on the master's length and wins at the timer (U-101) |
+| carried | `StateNPCMasterDead_BeingCarried` (0x00A998A0 / 0x00A907F0): In from the ground, Idle from a takedown, Walk while the carrier's horizontal speed > 0; the drops by the trace's class (0x00A6C910) | the simulation: In / Idle, Walk / Idle by the carrier's speed, the low drop (the sneaking one crouched; the drop's trace classification is not modelled), the ragdoll at the drop's notify or end; drawn at the carrier's root |
+| panic start | `Panic` (GenericAction) | the brain's GenericAction through PlayAnim; the `PanicEmpty` / `PanicSword` locomotion |
+| cower | `DisAISubStateCower` (0x00B12840): body stance `PanicRecover` (`Equipped` when armed), face the enemy | not requested (no body stance from the brain) |
+| noticing | the Notice behaviour's GenericAction (`DisNPCAnim_ReactToNoticing`, chance 1) | the brain asks it once per Notice behaviour (`NPC_ANIM_REACT_TO_NOTICING`): PlayAnim of `<prefix>PlayerCheck` |
+| surprised | `StateNPCMasterSurprised` (PlayAnim subclass, request 0x00A869B0): `Surprised` by the stimulus's cardinal direction, from the attention reactions (0x00B0BB90) | the simulation on the brain's turn to surprised, toward the nearest player (LIKELY: the reaction's stimulus is not in the request) |
+| pistol | `StateNPCMasterAim`: In, the hold (no chain: the `Aim` modifier), Shoot, Reload, Out (chain `0x60 + sub-state`) | the simulation's `Aim` from the brain's `FIRE_PISTOL` context (the original enters it at its equip state's end), the shot and the reload at the left hand's, Out when the context ends |
 | talking | the blurb's FaceFX animation on the face and head (§12); body gestures only from soiree matinees (U-142, resolved: blurbs carry no animation, `DisBehaviorBlockingDialog` only faces the listener, no `eDisNPCAnimations` chain is a gesture, and the FaceFX actors pose `head_jnt` and the face bones only) | FaceFX lip sync and head motion on the tree's output (§12); body: the soiree matinee's AI-group anim tracks as the `MatineeStackNode` channels (CUTSCENES.md) |
-| crouched armed player | no crouch locomotion in the NPC sets | not drawn (players' bodies have no tree) |
-| thrown (Windblast, push) | `StateNPCMasterThrown`: `PushToRagdoll` group 1 by direction, ragdoll at its notify; at rest `StateNPCMasterStunned` (`eStunEnterAnim_RagdollFront`) | the simulation's throw (`play_throw`), the ragdoll at its notify's event; the get-up is not requested (§13) |
-| special classes (`npc_move` 20-28) | the item contexts' `m_MainAttack.m_Animation`, the minigame groups, the Tallboy aim sub-states, the music box's walk upper body | not requested: one profile for every NPC (U-978), the special classes' swings timed without a sequence (§13) |
-| plague / rat death | `DeathPlague` / `DeathSwarmAttack` (by name, U-890) | rats: `DeathSwarmAttack` (the simulation); plague: the directional `Death` |
+| a human player's body | (the original has none in single player) | its own `NPC_Human_at` in the simulation (`player_anim::Body`, the former third-person picker's rules through the NPC profile, LIKELY): `Sword` / `Aim` / `Empty` modifier; a new swing's `AttackShort` group (group 5 in a paired move), a won parry's `Parry` group 0, the block's `Parry_AwaitingImpact`, the stagger's `Stun` group 0, the gun's `AimIn` / `AimShoot` / `AimReload`, an armed crouch's `Sword_Cover_Loop`, the hits' and the death's directional chains |
+| thrown (Windblast, push) | `StateNPCMasterThrown`: `PushToRagdoll` group 1 by direction (blend-out 0), ragdoll at its notify; at rest `StateNPCMasterStunned` (0x00A6B760: group 2 `RagdollToBack` when the recover bone's axis points up, else group 1 `RagdollToFront`; cut in), the loop for `m_fStunDuration` (0: left on the next tick), the recovery | the simulation's throw (`play_throw`), the ragdoll at its notify's event; at rest `Stunned` group 1 (the sim has no ragdoll pose to choose group 2), the recovery the rest test rolled (§13) |
+| special classes (`npc_move` 20-28) | the item contexts' `m_MainAttack.m_Animation`, the minigame groups (`StateNPCMasterMinigame`: `SyncAttack` group `m_GroupIndex`, step = the minigame state), the Tallboy aim sub-states, the music box's walk upper body | not requested: one profile for every NPC (U-978), the special classes' swings timed without a sequence (§13) |
+| plague / rat death | `DeathPlague` / `DeathSwarmAttack` (by name, U-890) | rats: `DeathSwarmAttack`; plague: `DeathPlague` (the simulation) |
 
 Directional steps (U-143): the step index is a direction enum's value. Groups of 4 follow
 `ECardinalDirection` (Forward, Left, Right, Back): `StateNPCMasterStrongHitReact` plays its
-chain step `m_Direction` (+0x6C) and turns the pawn by +90 / -90 / 180 degrees for Left / Right /
-Back (0x00A78980). Groups of 8 or more follow `eDisDeathDirection` (Forward, Forward_Left,
-Forward_Right, Left, Right, Back, Back_Left, Back_Right, then the `_Up` variants Forward_Up ...
-Back_Up at 8..13), matching the 14-entry `Death` / `DeathFast` groups. CONFIRMED from the enums.
-The port computes the direction from the attacker position with 90-degree (cardinal) and
-45-degree (eight-way) sectors; the sector thresholds and when the `_Up` variants are used were
-not traced (LIKELY).
+chain step `m_Direction` (+0x6C) and, at its enter, snaps the pawn's yaw (rotation intent 0xC at
+`m_fYawAdjustmentSpeed` 120) to the hit's reverse momentum offset by +90 / -90 / 180 degrees for
+Left / Right / Back, so that the hit comes from the authored side (0x00A78980; a correction of at
+most 45 degrees). The cardinal sectors (0x00BBA970 on `Location - momentum x 8888`, CONFIRMED
+2026-10-12): in the pawn's frame, Front when |x| > |y| and x >= 0, Back when x < 0, else Right
+when y > 0, else Left (diagonal ties to the sides). Groups of 8 or more follow
+`eDisDeathDirection` (Forward, Forward_Left, Forward_Right, Left, Right, Back, Back_Left,
+Back_Right, then the `_Up` variants Forward_Up ... Back_Up at 8..13), matching the 14-entry
+`Death` / `DeathFast` groups. CONFIRMED from the enums. The port computes the cardinal step with
+the decoded sectors from the attacker's position (the momentum is not in the events) and the
+eight-way one with 45-degree sectors (LIKELY); when the `_Up` variants are used was not traced.
+
+Body stance -> locomotion modifier (U-892, decoded 2026-10-12: 0x00B70FB0 applies the highest of
+a 15-level stance stack through pawn slot 497 0x00B71000; indices into the elite guard config's
+`m_Modifiers`): 0 SwordPatrol with an unsheathed primary item (not a music box), else Empty; 1
+EmptyPatrol; 2 SearchSword with a weapon intended, else SearchEmpty; 3 (Equipped) MusicBox / Sword;
+4 SwordPatrol; 5 Aim with a ranged secondary item, else Empty; 6 PanicSword / PanicEmpty; 7
+(PanicRecover) PanicRecoverSword / PanicRecoverEmpty; 9 MeleeRush; 10 ExplosionEscape_Equipped /
+_Empty; others Empty. The simulation still maps the brain's awareness (`anim::modifier`): the
+port's brain publishes no body stance.
 
 Cower (U-141, resolved): the cower sub-state's entry (0x00B12840) issues a body-intention request
 with stance `eDisNPCBodyStance_PanicRecover` (7), or `Equipped` (3) when the pawn holds a weapon,
@@ -355,8 +379,17 @@ then a face-to request toward the enemy proxy (rotation speed -100: default). No
 played: the cowering pose is the `PanicRecoverEmpty` idle loop (`Empty_Idle_Panic_Recover`).
 
 Layering: the tree's own (§2): the slots blend their channels in and out over the requested
-times (the simulation requests 0.2 s, `DisAnimation.m_fBlendInTime`'s class default, for every
-chain: the layers carry no other blend time), the upper-body slot is masked to `spine_0_jnt` and
+times. The anim player (pawn +0xD74, slots 0 `FullBodySlot`, 1 `UpperBodySlot` with
+`UpperBodyFilter`, 2 `FaceSlot` with `FaceFilter`, 3 `AdditiveReactSlot` with
+`AdditiveReactFilter`; 0x00C488D0) plays a chain step with `PlayCustomAnim(name, rate, the step's
+m_fBlendInTime, blend-out 0, loop, override)` (0x00C52E00 -> 0x005B7860: a looping step's pending
+blend-out -1, held), stops the chain's last step `m_fBlendOutTime` before its end with
+`StopCustomAnim(m_fBlendOutTime)` and the slot's filter to 0 (0x00C48CF0), and on every step start
+plays the step's `m_FaceAnimName` (else `<sequence>_Face`) on `FaceSlot` at the body's rate and
+blend-in and sets `FaceFilter` to 1 if one played, else 0, over 0.1 s (U-974, resolved): the
+simulation requests the same (`anim::step_tree`), landed before the tree's advance (U-975). The
+blinks are the look-at component's roll on `BlinkBlender` (§9), in the simulation's tree. The
+upper-body slot is masked to `spine_0_jnt` and
 its descendants (`UpperBodyFilter.BranchStartBoneName`). Tracks bind by bone name and every clip
 translation is used (`dishonored_anim::bind_tracks` with the sets' flags: the Boyle NPC sets leave
 `bAnimRotationOnly` false, which the face bones of the `stealth/detect_1300` capture confirm,
@@ -437,7 +470,11 @@ the vision cone points. The renderer sets those aims on its copy of the simulati
 (`TreeState::present`, the mode from the locomotion node's modifier and smoothed speed). The
 former approximation for a pawn speaking a line without a HeadTrack request (the nearest player
 within 600 uu, eased in about 0.25 s, U-281) and the runtime's blinks went with its clock
-(2026-10-11): the simulation rolls no blink yet (the tree state can carry a `BlinkTimer`).
+(2026-10-11). The blinks are the simulation's (2026-10-12): the roll 0x00952EC0 (from the look-at
+tick 0x00955B40) counts its timer down every enabled tick, blinking or not, and below 0 rolls the
+next interval and restarts `Blink` at a rolled rate (interval first); the timer starts at 0, so
+the first enabled tick blinks (LIKELY). `dishonored_anim::lookat::BlinkTimer` on every
+`NPC_Human_at` state, seeded per pawn (the original rolls the CRT's global `rand()`).
 
 ## 10. Bodies, chokes and carrying
 
@@ -448,9 +485,10 @@ Data (`DisNPCAnimDefinitions_*`, `Ply_Sword_Choke_as`, `Ply_Empty_CarryCorpse_as
   DropNoMove,DropFetal}_Slave`; the player's `Empty_CarryCorpse_{In,Idle,Walk,DropLow,
   DropLowSneak,DropHigh,DropNoMove}_Master`.
 
-Port (third person): see the §6 table; since 2026-10-11 the simulation requests none of these
-chains, so a choked or carried body shows its tree and a knocked-out or dropped one goes to the
-ragdoll at once. Carried bodies are drawn at their carrier's root (the slave
+Port (third person): see the §6 table; since 2026-10-12 the simulation plays the choked
+victim's `Choke` groups, the carried body's `CorpseBeingCarried` steps and the paired moves'
+slaves (`dishonored_sim::pawn_states`: `BeingChoked`, `BeingCarried`, `BeingAssassinated`), and a
+down body goes to the ragdoll at its chain's ragdoll notify or end. Carried bodies are drawn at their carrier's root (the slave
 sequences are authored there), also in the carrier's own first-person view, where the body hangs over the shoulder in front of the camera. Skinned bodies
 are no longer tipped over by the renderer (their sequences and ragdoll lay them down) and are
 placed on the standing cylinder's bottom whatever their collision height (this also fixes
@@ -467,10 +505,22 @@ Since 2026-10-11 the viewmodel poses the simulation's layers (ARCHITECTURE.md st
 and the block-in on the upper body, the casts (Bend Time, Swarm, the possession's out), gadget
 deploys, gun fire and reload stages on the left arm, the paired masters on the full body, the
 crossbow mesh's fire; each layer weighted from its playhead and the requesting state's blend time
-(`SeqPlay::blend`). Nothing else is requested yet, so the rig stands in `Sword_Ready_Idle`'s first
-frame for the navigation (and its head bob), the mantle, choke and carry masters, the stun, slide,
-climb and swim, the equips, jump and crouch reactions, the possession and Blink aims, the
-Windblast cast, the parries and the left hand's idles. Before, the viewmodel's pickers played:
+(`SeqPlay::blend`). Since 2026-10-12 the player's other states are requested too
+(`dishonored_sim::player_anim`, the former pickers' rules with the navigation trees' decoded
+nodes): the navigation (`Ply_Player_Nav_Default_at` / `_Sprinting_at` / `_Crouched_at`: the
+speed blends 0x00594BA0 over 0x00A89900's 2D speed, idle at 0, walk up to 250 uu/s, run above;
+sprint above 300; the crouch's walk above 0 on the 3D speed; 0.4 s between speeds, 0.3 s to the
+air child, which shows in the jump state or after `m_fAnimateFallTime` 0.25 s of a fall; every loop
+at rate 1), the left hand's (`Ply_Nav_LeftHand_at`: idle at 0, `DisAnimNodeBlendByLocoType`'s walk
+or sprint, no notifies, in the full body's sync group), the mantle (by edge height and stance,
+the empty-handed set with the sword not ready, at `Attribute_MantleAnimRate`), the choke and carry
+masters, the stun, the slide, the climb (`Head_Rope_Climb` above an acceleration of 36, the
+reference pose below), the swim (`Empty_SwimIdle` up to an input of 0.36, else the input
+direction's dominant loop: one layer cannot mix `DisAnimNodeBlendDirectional`'s neighbours), the
+block's in / loop / won parry / out, the transitions' one-shots (equip on respawn, crouch in / out,
+jump in, small land, the gunshot reaction, the left item's equip / switch, sword slash and jump
+reactions), the possession and Blink aims, the Blink and Windblast casts and the step-up's head on
+the additive layer. Before 2026-10-11, the viewmodel's pickers played:
 - choke: `Sword_Choke_{In,Loop,Win,Lose,Cancel}_Master` by choke state, whole rig;
 - carrying: `Empty_CarryCorpse_In_Master` on a lift (`Sword_Choke_CarryCorpse_Master` when the
   lift follows a won choke), `Idle_Master` / `Walk_Master`, `DropLow_Master` over the drop's

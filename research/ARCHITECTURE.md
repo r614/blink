@@ -142,12 +142,20 @@ as events (`Effect` / `EffectEnd` ticks); the player's tree (U-972) is not sampl
    fully in (U-280), fed to the simulation's tree. `PlayerInput::npc_speed` retired (the speed is
    the locomotion's request); `npc_move` is no longer sent (the step publishes the running context
    into `last_input` for the runtime's picker); `MatchView::npc_actions` comes from the pawn states.
-   Stays: the special classes' contexts start timed swings with the travel stand-in (U-978); the
-   strong hit reaction, stun, choke, assassination, aim, minigame and surprise are not states yet
-   (their timers stay in the sim modules; decoded, LOG); `Call` rows of the transition logic allow
-   (the states' `CanTransitionTo` not decoded, LIKELY); the component's undecoded parts (U-981) and
-   its LOD flag (U-980); the runtime still draws its own picks and its speed-threshold start / stop
-   (step 7).
+   Stays: the special classes' contexts start timed swings with the travel stand-in (U-978);
+   `Call` rows of the transition logic allow (the states' `CanTransitionTo` not decoded, LIKELY);
+   the component's undecoded parts (U-981) and its LOD flag (U-980).
+   **Completed 2026-10-12** (LOG.md, "the simulation requests what the runtime used to play"):
+   the reactions (`StrongHitReact`, `ProjectileHitReact`, the Weak additive on
+   `AdditiveReactSlot`, by the decoded reaction chooser), `Stunned` (the throw's get-up),
+   `BeingChoked`, `BeingAssassinated` (the paired moves' slaves), `BeingCarried`, `Aim`,
+   `Surprised`, the ambient idles (the brain's pick through PlayAnim), the Notice GenericAction,
+   the face slot and its filter, the blinks; the player's states' sequences on its layers
+   (`dishonored_sim::player_anim`: the navigation trees' decoded speed blends, the full-body
+   states, the block, the transitions' one-shots, the left hand's aims, casts and navigation, the
+   step-up's head) and a human player's third-person body. Stays: the pistol's and the grenade's
+   Knockdown, the NPC block and the defender's parry (U-987), the minigames (U-893), the body
+   stances (U-892), the stand-ins of U-985; the choke's gameplay timing (U-101).
 7. The runtime's pickers deleted as the generic path covers each case. **Done 2026-10-11**
    (LOG.md): the runtime draws `WorldState::anim` (`SessionView::anim`) and plays
    `SimEvent::AnimNotify`. Third person: every NPC is posed from its simulation `TreeState` with
@@ -166,9 +174,14 @@ as events (`Effect` / `EffectEnd` ticks); the player's tree (U-972) is not sampl
    notify tables (`SetData::notifies`, `crossing`, the rig's particle / lens / trail tables), the
    viewmodel's pickers (`full_body`, `upper_body`, `left_arm`, the transitions, `SWING_TAIL`) and
    every animation clock (the `Local<u64>` tick accumulators, `AnimInput::dt`; the ragdoll steps
-   by the simulation's ticks). What the simulation does not request yet is not drawn (LOG.md:
-   the player's navigation and most of its states, the NPCs' hit reactions, blocks, stuns,
-   ambient idles, blinks, slaves and get-ups); waits on step 6.
+   by the simulation's ticks). What the simulation does not request is not drawn; since
+   2026-10-12 it requests what the pickers played (step 6's completion), so the contact sheets
+   match the pickers' but for the intended differences (LOG.md). The slot requests land before the
+   tree's advance (U-975), the chains' blend-outs are the groups' (a death plays at full weight
+   past its ragdoll notify), and the runtime only skins the new requests (the reference pose of
+   the climb at rest, the step-up's additive layer, the first-person pistol's muzzle on the drawn
+   gun, the left hand's actions held until the simulation replaces them). The item aim's easing
+   stays a runtime filter (its tick, 0x00C0B990, belongs to the simulation).
 
 Two cautions: take the tick order from the exe, not from design (done for pawns, controllers and
 animation in [`tick_order.md`](dishonored/systems/tick_order.md); its open items are the components' tick groups
