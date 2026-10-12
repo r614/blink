@@ -471,7 +471,10 @@ fn npcs_never_assassinate() {
     let mut r = Run::new(floor_world(|_| {}), &[(1, Vec3::new(0., 0., STAND_Z + 1.), 0.), (2, Vec3::new(110., 0., STAND_Z + 1.), 0.)]);
     r.state.player_mut(1).unwrap().kind = dishonored_sim::state::PawnKind::Guard;
     r.settle();
-    r.step(&[(1, input(0., 0, buttons::PRIMARY)), (2, input(0., 0, 0))]);
+    // The guard's swing is its brain's melee context (`dishonored_sim::pawn_states`).
+    r.state.requests = vec![(1, dishonored_sim::pawn_states::Request { context: dishonored_sim::pawn_states::context::ATTACK_SHORT, start: true, ..Default::default() })];
+    r.step(&[(1, input(0., 0, 0)), (2, input(0., 0, 0))]);
+    r.state.requests.clear();
     // The guard's attack chain (`AttackShort`: `Sword_Attack_ShortSmall*` / `Attack_Fast*`, damage
     // zones 0.32 to 0.83 s into the sequence).
     r.steps(90, &[(1, input(0., 0, 0)), (2, input(0., 0, 0))]);
@@ -687,11 +690,14 @@ fn guard_slash_damage_jump_attack_and_offscreen() {
     r.settle();
     let swing = |r: &mut Run, me_yaw: f32, mv: u8| {
         r.events.clear();
-        let g = PlayerInput { yaw: 180.0, buttons: buttons::PRIMARY, ..Default::default() };
-        r.state.requests = vec![(100, dishonored_sim::pawn_states::Request { context: mv, ..Default::default() })];
+        // Each swing from the guard's place (the attacks' root motion moves it: the jump attack's
+        // chain carries it 800 uu).
+        r.state.player_mut(100).unwrap().position = Vec3::new(120., 0., STAND_Z + 1.);
+        let g = input(180., 0, 0);
+        r.state.requests = vec![(100, dishonored_sim::pawn_states::Request { context: mv, start: true, ..Default::default() })];
         r.step(&[(1, input(me_yaw, 0, 0)), (100, g)]);
         r.state.requests.clear();
-        r.steps(60, &[(1, input(me_yaw, 0, 0)), (100, input(180., 0, 0))]);
+        r.steps(150, &[(1, input(me_yaw, 0, 0)), (100, input(180., 0, 0))]);
         r.events.iter().filter_map(|e| match e {
             SimEvent::Damage { victim: 1, amount, .. } => Some(*amount),
             _ => None,

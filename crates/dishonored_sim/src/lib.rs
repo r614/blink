@@ -184,9 +184,11 @@ pub fn step_world(
             continue;
         }
         let dt = DT * scale;
-        // What the NPC's brain asks of its pawn this tick; the speed it asks of the locomotion.
+        // What the NPC's brain asks of its pawn this tick; the speed it asks of the locomotion. A
+        // full-body chain of its pawn states switches the locomotion off: the root motion moves it.
         let req = pawn_states::request(state, state.players[i].id);
         state.players[i].loco_speed = req.loco_speed;
+        let loco_off = pawn_states::locomotion_off(state, state.players[i].id);
         let p0 = state.players[i];
         let mvc = powers::effective_movement(&p0, g);
         let ctx = MoveCtx { world, cfg: &mvc, dt };
@@ -297,7 +299,7 @@ pub fn step_world(
         let left_input = if inventory::owns(&state.players[i], inventory::left_hand_bit(left_input.left_hand)) { left_input } else { PlayerInput { left_hand: input::LeftHand::Empty, ..left_input } };
         let p = &mut state.players[i];
         let choke_lock = p.choke.phase != state::ChokePhase::None;
-        let locked = combat::sword_locks_movement(p) || p.mode == MoveMode::Blinking || choke_lock || p.action_lock > 0.0 || p.carry_anim > 0.0;
+        let locked = combat::sword_locks_movement(p) || p.mode == MoveMode::Blinking || choke_lock || p.action_lock > 0.0 || p.carry_anim > 0.0 || loco_off;
         let sword_out = movement::sword_in_right_hand(p);
         movement::step_movement(p, &input, sword_out, !locked, &ctx, &mut out.events);
         noise::track_fall(&p0, p);
@@ -310,7 +312,7 @@ pub fn step_world(
             input
         };
         let pa = state.anim.get(&p.id);
-        combat::update_sword(p, &sword_input, &cfg.tuning, pa, &cfg.anim, req.context, dt, &mut out.events);
+        combat::update_sword(p, &sword_input, &cfg.tuning, pa, &cfg.anim, dt, &mut out.events);
         let mut local = Vec::new();
         let mut acts = Vec::new();
         left_hand::update(p, &left_input, &ctx, g, &cfg.tuning, pa, &mut local, &mut acts, bend_active, &mut out.events);
@@ -332,11 +334,18 @@ pub fn step_world(
         // The sequences the pawn's states asked for this tick (they play in this tick's advance).
         anim::sync_requests(state, i, cfg);
     }
-    // The item context each NPC runs, published for the presentation (`PlayerInput::npc_move`).
+    // The NPCs' pawn states, after their physics: the AI's requests, the machines' ticks (the
+    // chains their states play advance in this tick). A rat's context is published as requested.
     for i in 0..state.players.len() {
-        if state.players[i].kind != state::PawnKind::Human && state.players[i].time_scale > 0.0 {
+        let p = &state.players[i];
+        if p.kind != state::PawnKind::Human && !pawn_states::has_states(p) && p.time_scale > 0.0 {
             state.players[i].last_input.npc_move = pawn_states::request(state, state.players[i].id).context;
         }
+    }
+    {
+        let mut ao = anim::StepOut::default();
+        pawn_states::tick(state, cfg, &mut ao);
+        out.events.extend(ao.events);
     }
     // The animation advance (tick_order.md: each pawn's skeletal mesh ticks after its pawn's
     // physics and states, the notifies firing inside the advance). No handler reads another
@@ -349,8 +358,13 @@ pub fn step_world(
         spawns.extend(ao.spawns);
     }
     // The pose barrier: the paired moves' `RMM_Translate` root motion moves the pawns now, after
-    // their physics and before the melee sweep reads them.
+    // their physics and before the melee sweep reads them; the NPCs' chains' root motion moves
+    // them or accumulates. Then the NPCs' anim players (the next step, the chain's end) and their
+    // locomotion (the accumulated root motion as the next tick's velocity).
     sync_motion::step(state, world, cfg);
+    pawn_states::barrier(state, world, cfg);
+    pawn_states::chain_tick(state, cfg);
+    pawn_states::locomotion(state, cfg);
     // Rat attack groups.
     let rat_dt = DT * powers::world_time_scale(state, g, false);
     if rat_dt > 0.0 && state.players.iter().any(|p| p.kind == state::PawnKind::Rat) {

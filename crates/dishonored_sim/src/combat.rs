@@ -28,12 +28,12 @@ pub fn swing_layer(p: &PlayerState) -> usize {
 }
 
 /// Advance the attacker-side state machine and collect swing requests. `anim` is the pawn's
-/// animation state as the last advance left it: the swing's notifies drive its phases there;
-/// `context` is the item context the NPC's brain runs ([`crate::pawn_states::Request`]).
-#[allow(clippy::too_many_arguments)]
-pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, anim: Option<&PawnAnim>, table: &SeqTable, context: crate::pawn_states::ContextKind, dt: f32, events: &mut Vec<SimEvent>) {
+/// animation state as the last advance left it: the swing's notifies drive its phases there. A
+/// player's press swings; an NPC's swing is its melee context's start (`crate::pawn_states`).
+pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, anim: Option<&PawnAnim>, table: &SeqTable, dt: f32, events: &mut Vec<SimEvent>) {
     let (swing_startup, swing_active, swing_recovery) = swing_phases(p, t);
     let played = anim.and_then(|a| a.with(swing_layer(p), token::SWING | p.sword.swings as u32)).cloned();
+    let parry_chain = anim.is_some_and(|a| a.layers[layer::FULL_BODY].as_ref().is_some_and(|l| l.token == token::PARRY));
     let paired = anim.and_then(|a| {
         let tok = token::PAIRED | p.sword.assassination_move as u32;
         a.with(layer::FULL_BODY, tok).or(a.with(layer::UPPER_BODY, tok))
@@ -52,14 +52,13 @@ pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, 
                 s.phase = SwordPhase::Blocking;
                 s.timer = 0.0;
                 s.block_time = 0.0;
-            } else if input.buttons & buttons::PRIMARY != 0 && p.prev_buttons & buttons::PRIMARY == 0 {
+            } else if p.kind == PawnKind::Human && input.buttons & buttons::PRIMARY != 0 && p.prev_buttons & buttons::PRIMARY == 0 {
                 s.phase = SwordPhase::Startup;
                 s.timer = 0.0;
                 s.hit_done = false;
                 s.hit_count = 0;
                 s.offscreen_to = None;
-                // The item context the brain swings with (players: none).
-                s.npc_move = context;
+                s.npc_move = crate::pawn_states::context::NONE;
                 s.swing_clip = if p.crouched { 4 } else { s.swings % 4 };
                 s.swings = s.swings.wrapping_add(1);
                 events.push(SimEvent::SwordSwing { id: p.id });
@@ -97,7 +96,8 @@ pub fn update_sword(p: &mut PlayerState, input: &PlayerInput, t: &CombatTuning, 
             s.phase = SwordPhase::Idle;
             s.timer = 0.0;
         }
-        SwordPhase::Staggered if s.timer >= t.stagger_time => {
+        // A parried NPC's stagger is its `Parry` chain (`StateNPCActionParry`, `crate::pawn_states`).
+        SwordPhase::Staggered if s.timer >= t.stagger_time && !parry_chain => {
             s.phase = SwordPhase::Idle;
             s.timer = 0.0;
         }
@@ -391,6 +391,9 @@ pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, cfg: &
                     let a = &mut state.players[ai];
                     a.sword.phase = SwordPhase::Staggered;
                     a.sword.timer = 0.0;
+                    // A parried NPC's context goes Parried_Lose (`m_MeleeState` 7): its pawn states
+                    // play the parry's `ParryLost` chain from its next machine tick.
+                    crate::pawn_states::request_parried(state, attacker.id, cfg);
                     if victim.sword.block_time < t.parry_tap_window {
                         state.players[vi].sword.force_block = t.force_block_after_tap;
                     }

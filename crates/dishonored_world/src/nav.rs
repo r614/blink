@@ -954,6 +954,10 @@ pub struct Follower {
     /// is replanned when one of them aborts its pawns (`ArkDynamicPylon` slot 245).
     #[serde(default)]
     pub pylons: Vec<(u16, u32)>,
+    /// The path point passed last (the start of the segment to `path[0]`; the pawn's position
+    /// when the path was planned).
+    #[serde(default)]
+    pub from: Option<Vec3>,
 }
 
 impl Follower {
@@ -975,17 +979,19 @@ impl Follower {
                     self.path = p;
                     self.pylons = w;
                     self.failed = false;
+                    self.from = Some(me);
                 }
                 None => {
                     self.path.clear();
                     self.pylons.clear();
                     self.failed = true;
+                    self.from = None;
                 }
             }
         }
         let feet = me.truncate();
         while self.path.len() > 1 && self.path[0].truncate().distance(feet) < 48.0 {
-            self.path.remove(0);
+            self.from = Some(self.path.remove(0));
         }
         match self.path.first() {
             Some(&w) => Vec3::new(w.x, w.y, me.z.max(w.z)),

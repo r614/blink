@@ -253,7 +253,9 @@ impl Brain {
     }
 
     /// Start an attack context: its cooldown (scaled by aggression, 0x00b3deb0), the group
-    /// inhibition, the flurry count; the swing travels to the sword's reach first.
+    /// inhibition, the flurry count. The special classes' chains are not in the simulation's NPC
+    /// profile (U-978), so their root motion does not carry them: the port's stand-in travels to the
+    /// sword's reach at the run loop's speed before the context starts.
     fn start_special(&mut self, a: &SpecialAttack, k: usize, m: &ManageAttacksConfig, tg: &Target, inhibit: &mut Vec<(PlayerId, u8, f32)>, ai: &AiConfig, mut i: PlayerInput) -> PlayerInput {
         let scale = (1.0 - self.aggression) * m.cooldown_factor_at_min_aggression + 1.0;
         self.special.cooldowns[k] = combat::roll(a.cooldown, rng_next(&mut self.rng)) * scale;
@@ -266,7 +268,8 @@ impl Brain {
         self.attack_timer = ATTACK_WINDOW;
         self.request.context = a.kind;
         if tg.d <= SWORD_REACH {
-            i.buttons |= buttons::PRIMARY;
+            // The context starts: the swing (its chain is not in the profile: timed, U-978).
+            self.request.start = true;
             self.attack = 0;
         } else {
             i.forward = 127;
@@ -814,10 +817,7 @@ impl Brain {
         self.request.context = kind;
         let close = d <= SWORD_REACH;
         if close && me.sword.phase == SwordPhase::Idle {
-            i.buttons |= buttons::PRIMARY;
-            if kind == npc_moves::ATTACK_STEP_BACK {
-                i.forward = -127;
-            }
+            self.request.start = true;
             self.attack = 0;
             return Some(i);
         }

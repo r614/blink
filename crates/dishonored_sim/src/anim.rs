@@ -140,6 +140,10 @@ pub mod token {
     pub const THROWN: u32 = 6 << 24;
     /// An NPC's death.
     pub const DEATH: u32 = 7 << 24;
+    /// An NPC state's chain (`crate::pawn_states`), with the pawn's chain serial below.
+    pub const CHAIN: u32 = 8 << 24;
+    /// A parried NPC attacker's `Parry` chain (`StateNPCActionParry`).
+    pub const PARRY: u32 = 9 << 24;
     pub const KIND: u32 = 0xFF << 24;
 }
 
@@ -185,6 +189,16 @@ pub struct SeqPlay {
     pub interruptible: bool,
     pub advanced: bool,
     pub windows: Vec<Window>,
+    /// Play time since the request (the pawn's seconds) and the slot channel's blend-in (an NPC
+    /// chain step's `m_fBlendInTime`; 0: at once): the channel's weight, which scales the
+    /// sequence's root motion, is `elapsed / blend_in` up to 1 (`AnimNodeSlot`'s linear blend).
+    #[serde(default)]
+    pub elapsed: f32,
+    #[serde(default)]
+    pub blend_in: f32,
+    /// The slot's blend-out when the sequence stops (an NPC chain group's `m_fBlendOutTime`).
+    #[serde(default)]
+    pub blend_out: f32,
 }
 
 impl SeqPlay {
@@ -204,6 +218,9 @@ pub struct NpcTree {
     pub requested: [u32; layer::COUNT],
     /// The last update's root motion (pawn frame, uu; yaw degrees).
     pub root: (Vec3, f32),
+    /// The blend-out of the sequence each slot was last asked to play (its stop's).
+    #[serde(default)]
+    pub blend_out: [f32; layer::COUNT],
 }
 
 /// A pawn's animation state, beside its `PlayerState` in [`WorldState::anim`].
@@ -234,7 +251,7 @@ impl PawnAnim {
 
     /// Play `seq` on `layer` from its start (`AnimNodeSlot::PlayCustomAnim`).
     pub fn play(&mut self, layer: usize, seq: SeqId, token: u32, rate: f32, looping: bool, yaw: f32) {
-        self.layers[layer] = Some(SeqPlay { seq, token, time: 0.0, prev: 0.0, rate, looping, playing: true, yaw, exited: false, interruptible: false, advanced: false, windows: Vec::new() });
+        self.layers[layer] = Some(SeqPlay { seq, token, time: 0.0, prev: 0.0, rate, looping, playing: true, yaw, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0 });
     }
 
     pub fn stop(&mut self, layer: usize) {
@@ -324,33 +341,9 @@ pub fn paired_master(p: &PlayerState, cfg: &SimConfig) -> Option<(SeqId, usize)>
 /// its alternatives, picked with `roll`) with the item prefix when the step has one
 /// (`m_FirstItemPrefix`), looked up in the profile's sets.
 fn chain_step(cfg: &SimConfig, anim: NpcAnim, group: usize, step: usize, roll: f32, armed: bool) -> Option<SeqId> {
-    let npc = &cfg.gameplay.npc_anim;
-    let g = npc.defs.chain(anim)?.groups.get(group)?;
+    let g = cfg.gameplay.npc_anim.defs.chain(anim)?.groups.get(group)?;
     let s = g.steps.get(step).or(g.steps.first())?;
-    let name = s.names.get(((roll * s.names.len() as f32) as usize).min(s.names.len().saturating_sub(1)))?;
-    let prefix = if armed { npc.item_prefix.as_str() } else { npc.empty_prefix.as_str() };
-    let full = if s.item_prefix == 0 { name.clone() } else { format!("{prefix}{name}") };
-    cfg.anim.find(&npc.sets, &full)
-}
-
-/// An NPC swing's chain (`m_MainAttack.m_Animation` of the elite guard's item contexts, as the
-/// runtime's `npc_anim` picks them): the move's chain, a group at random, the group's first step
-/// (the attack groups are `m_bEndChainAfterOneAnimation` with three steps whose directional index
-/// is 0 for a group under four steps, U-143).
-fn npc_swing(cfg: &SimConfig, npc_move: u8, a: &mut PawnAnim) -> Option<SeqId> {
-    use crate::input::npc_moves as m;
-    let chain = match npc_move {
-        m::NONE | m::ATTACK_SHORT => NpcAnim::AttackShort,
-        m::ATTACK_STEP_BACK => NpcAnim::AttackStepBack,
-        m::ATTACK_MEDIUM => NpcAnim::AttackMedium,
-        m::ATTACK_LONG => NpcAnim::AttackLong,
-        m::JUMP_ATTACK => NpcAnim::JumpAttack,
-        _ => return None,
-    };
-    let groups = cfg.gameplay.npc_anim.defs.chain(chain)?.groups.len();
-    let g = ((a.roll() * groups as f32) as usize).min(groups.saturating_sub(1));
-    let r = a.roll();
-    chain_step(cfg, chain, g, 0, r, true)
+    crate::pawn_states::step_sequence(cfg, s, roll, armed)
 }
 
 /// The sequences a player's left hand plays for its state on the tick its action starts (the
@@ -421,26 +414,25 @@ fn left_requests(p: &PlayerState, cfg: &SimConfig, a: &mut PawnAnim) {
     }
 }
 
-/// The requests of a pawn's states this tick, made after its states ran and before its advance
+/// The requests of a player's states this tick, made after its states ran and before its advance
 /// (a request made here plays in this tick's advance): the swing, the block and the left hand.
+/// The NPCs' chains are their pawn states' (`crate::pawn_states`).
 pub fn sync_requests(state: &mut WorldState, i: usize, cfg: &SimConfig) {
     let p = state.players[i];
-    if p.kind == PawnKind::Rat {
+    if p.kind != PawnKind::Human {
         return;
     }
     let a = state.anim.entry(p.id).or_insert_with(|| PawnAnim::new(p.id));
     let t = &cfg.anim;
     let s = &p.sword;
-    let human = p.kind == PawnKind::Human;
-    let swing_layer = if human { layer::UPPER_BODY } else { layer::FULL_BODY };
+    let swing_layer = layer::UPPER_BODY;
     let swing_token = token::SWING | s.swings as u32;
     let mut swing_seq = None;
     if p.alive && s.phase == SwordPhase::Startup && s.timer == 0.0 && a.with(swing_layer, swing_token).is_none() {
-        let seq = if human { t.id_of(SWORD_ATTACK_SET, SWING_CLIPS[(s.swing_clip as usize).min(4)]) } else { npc_swing(cfg, s.npc_move, a) };
+        let seq = t.id_of(SWORD_ATTACK_SET, SWING_CLIPS[(s.swing_clip as usize).min(4)]);
         if let Some(seq) = seq {
             a.play(swing_layer, seq, swing_token, 1.0, false, p.yaw);
         }
-        // A swing without a sequence (a special class's move) is timed (`combat::swing_phases`).
         swing_seq = Some(seq.unwrap_or(SeqId::MAX));
     }
     // A swing cut short stops its sequence: staggered, blocking, in a paired move, dead, or back
@@ -450,19 +442,17 @@ pub fn sync_requests(state: &mut WorldState, i: usize, cfg: &SimConfig) {
     if swinging.is_some_and(|l| cut || (s.phase == SwordPhase::Idle && l.token == swing_token && !l.interruptible && !l.done())) {
         a.stop(swing_layer);
     }
-    if human {
-        // The block (`AnimMeleeBlock`: `Sword_Ready_ParryIdle_In`, `Sword_Sneak_ParryIdle_In`
-        // crouched), whose `DisNotify_BlockParryZone` is the parry window.
-        if s.phase == SwordPhase::Blocking && a.with(layer::UPPER_BODY, token::BLOCK).is_none() {
-            let seq = t.id_of(SWORD_VERSUS_SET, if p.crouched { "Sword_Sneak_ParryIdle_In" } else { "Sword_Ready_ParryIdle_In" });
-            if let Some(seq) = seq {
-                a.play(layer::UPPER_BODY, seq, token::BLOCK, 1.0, false, p.yaw);
-            }
-        } else if s.phase != SwordPhase::Blocking && a.with(layer::UPPER_BODY, token::BLOCK).is_some() {
-            a.stop(layer::UPPER_BODY);
+    // The block (`AnimMeleeBlock`: `Sword_Ready_ParryIdle_In`, `Sword_Sneak_ParryIdle_In`
+    // crouched), whose `DisNotify_BlockParryZone` is the parry window.
+    if s.phase == SwordPhase::Blocking && a.with(layer::UPPER_BODY, token::BLOCK).is_none() {
+        let seq = t.id_of(SWORD_VERSUS_SET, if p.crouched { "Sword_Sneak_ParryIdle_In" } else { "Sword_Ready_ParryIdle_In" });
+        if let Some(seq) = seq {
+            a.play(layer::UPPER_BODY, seq, token::BLOCK, 1.0, false, p.yaw);
         }
-        left_requests(&p, cfg, a);
+    } else if s.phase != SwordPhase::Blocking && a.with(layer::UPPER_BODY, token::BLOCK).is_some() {
+        a.stop(layer::UPPER_BODY);
     }
+    left_requests(&p, cfg, a);
     if let Some(seq) = swing_seq {
         state.players[i].sword.swing_seq = seq;
     }
@@ -497,9 +487,10 @@ pub fn start_paired(state: &mut WorldState, cfg: &SimConfig, world: &dyn WorldQu
 
 /// The requests made after the pawn group (they play from the next tick's advance): the end of a
 /// paired move; a throw's sequence (its first update runs in the hit's tick, `play_throw`); an
-/// NPC's death chain (`Death` by the killer's direction, 0x00BBA970's eight ways as the runtime's
-/// `eight_way`, U-143; `DeathSwarmAttack` for the rats) from this tick's deaths. A paired move's
-/// victim plays its slave as its death (the slaves' sets are not in the table: nothing here).
+/// NPC's death (`StateNPCMasterDead_Limp`, pending until its next machine tick: `Death` by the
+/// killer's direction, 0x00BBA970's eight ways as the runtime's `eight_way`, U-143;
+/// `DeathSwarmAttack` for the rats) from this tick's deaths. A paired move's victim plays its
+/// slave as its death (not ported: nothing here).
 pub fn after_group(state: &mut WorldState, cfg: &SimConfig, events: &[SimEvent], world: &dyn WorldQuery, out: &mut StepOut) {
     for i in 0..state.players.len() {
         let p = state.players[i];
@@ -533,19 +524,9 @@ pub fn after_group(state: &mut WorldState, cfg: &SimConfig, events: &[SimEvent],
             let right = crate::movement::right_vector(v.yaw).truncate();
             d.dot(right).atan2(d.dot(fwd)).to_degrees()
         });
-        let a = state.anim.entry(victim).or_insert_with(|| PawnAnim::new(victim));
-        let (chain, step) = if cause == crate::events::DamageCause::Rats { (NpcAnim::DeathSwarmAttack, None) } else { (NpcAnim::Death, Some(eight_way(angle))) };
-        let r = a.roll();
-        let seq = match step {
-            Some(k) => chain_step(cfg, chain, 0, k, r, true),
-            // `DeathSwarmAttack`: the group's steps in order end with the death (`<item>SwarmAttack_Out`).
-            None => cfg.gameplay.npc_anim.defs.chain(chain).and_then(|c| c.groups.first()).and_then(|g| (0..g.steps.len()).rev().find_map(|k| chain_step(cfg, chain, 0, k, r, true))),
-        };
-        a.stop(layer::UPPER_BODY);
-        match seq {
-            Some(seq) => a.play(layer::FULL_BODY, seq, token::DEATH, 1.0, false, v.yaw),
-            None => a.stop(layer::FULL_BODY),
-        }
+        state.anim.entry(victim).or_insert_with(|| PawnAnim::new(victim));
+        let (chain, step) = if cause == crate::events::DamageCause::Rats { (NpcAnim::DeathSwarmAttack, 0) } else { (NpcAnim::Death, eight_way(angle) as u8) };
+        crate::pawn_states::request_death(state, victim, chain, step, cfg);
     }
 }
 
@@ -575,6 +556,7 @@ pub fn eight_way(angle: f32) -> usize {
 pub fn play_throw(state: &mut WorldState, id: PlayerId, direction: usize, first_dt: f32, cfg: &SimConfig, world: &dyn WorldQuery, out: &mut StepOut) {
     let Some(i) = state.players.iter().position(|p| p.id == id) else { return };
     let yaw = state.players[i].yaw;
+    crate::pawn_states::enter_thrown(state, id);
     let a = state.anim.entry(id).or_insert_with(|| PawnAnim::new(id));
     let r = a.roll();
     let Some(seq) = chain_step(cfg, NpcAnim::PushToRagdoll, 1, direction, r, false) else { return };
@@ -621,6 +603,7 @@ fn advance_layer(s: &mut SeqPlay, info: &SequenceInfo, dt: f32, fired: &mut Vec<
     if mv <= 0.0 {
         return;
     }
+    s.elapsed += dt;
     let t0 = s.time;
     let len = info.duration;
     let base = Fired { seq: s.seq, token: s.token, notify: 0, phase: Phase::Start, t0 };
@@ -770,6 +753,12 @@ fn handle(state: &mut WorldState, i: usize, f: &Fired, n: &NotifyInfo, cfg: &Sim
                 p.thrown.ragdoll = true;
             }
         }
+        // A death's ragdoll notify (0x00A8CFE0 -> pawn slot 352): the body goes to the ragdoll; its
+        // chain's root motion stops.
+        ("DishonoredNotify_Ragdoll", Phase::Start) if kind == token::DEATH => {
+            let id = state.players[i].id;
+            crate::pawn_states::ragdolled(state, id);
+        }
         ("DisNotify_BendTime_Ranged" | "DisNotify_AdrenalineBendTime_Ranged", Phase::Start | Phase::End) if kind == token::PAIRED => {
             crate::fatality::bend_window(state, i, n, matches!(f.phase, Phase::Start));
         }
@@ -892,9 +881,8 @@ fn modifier(p: &PlayerState) -> &'static str {
 }
 
 /// Tick an NPC's tree (with the install): the slot requests of its layers' new sequences
-/// (`FullBodySlot` / `UpperBodySlot`, blended in and out over 0.2 s: the elite guard's attack
-/// steps' `m_fBlendInTime` and groups' `m_fBlendOutTime`; the layers do not carry the other
-/// chains' blend times, whose deaths blend in over 0.5 s), the owner's physics, the locomotion from
+/// (`FullBodySlot` / `UpperBodySlot`, blended in and out over the chain step's and group's times),
+/// the owner's physics, the locomotion from
 /// its velocity relative to its facing and its stance modifier. The tree's own requests land
 /// after its advance (the evaluator's order, U-975), so its slots run a tick behind the layers.
 fn step_tree(state: &mut WorldState, i: usize, dt: f32, cfg: &SimConfig) {
@@ -904,7 +892,7 @@ fn step_tree(state: &mut WorldState, i: usize, dt: f32, cfg: &SimConfig) {
     let Some(a) = state.anim.get_mut(&p.id) else { return };
     let want = dead as u8;
     if a.tree.as_ref().is_none_or(|t| t.tree != want) {
-        a.tree = Some(NpcTree { tree: want, state: assets.shape.initial_state(), requested: [0; layer::COUNT], root: (Vec3::ZERO, 0.0) });
+        a.tree = Some(NpcTree { tree: want, state: assets.shape.initial_state(), requested: [0; layer::COUNT], root: (Vec3::ZERO, 0.0), blend_out: [0.0; layer::COUNT] });
     }
     let mut slots = Vec::new();
     let tree = a.tree.as_mut().unwrap();
@@ -914,9 +902,15 @@ fn step_tree(state: &mut WorldState, i: usize, dt: f32, cfg: &SimConfig) {
             continue;
         }
         tree.requested[l] = cur;
+        // The chain step's `m_fBlendInTime` and its group's `m_fBlendOutTime` (`crate::pawn_states`);
+        // 0.2 s for a sequence played without them.
+        let or = |x: f32| if x > 0.0 { x } else { 0.2 };
         let action = match a.layers[l].as_ref().and_then(|s| cfg.anim.name(s.seq).map(|n| (n, s))) {
-            Some((name, s)) => SlotAction::Play { sequence: name.to_string(), rate: s.rate, blend_in: 0.2, blend_out: Some(0.2), looping: s.looping, start: 0.0 },
-            None => SlotAction::Stop { blend_out: 0.2 },
+            Some((name, s)) => {
+                tree.blend_out[l] = or(s.blend_out);
+                SlotAction::Play { sequence: name.to_string(), rate: s.rate, blend_in: or(s.blend_in), blend_out: Some(or(s.blend_out)), looping: s.looping, start: 0.0 }
+            }
+            None => SlotAction::Stop { blend_out: or(tree.blend_out[l]) },
         };
         slots.push(SlotRequest { slot: slot.to_string(), action });
     }
@@ -947,7 +941,7 @@ mod tests {
     }
 
     fn run(info: &SequenceInfo, looping: bool, steps: usize, dt: f32) -> Vec<(usize, Fired)> {
-        let mut s = SeqPlay { seq: 0, token: 0, time: 0.0, prev: 0.0, rate: 1.0, looping, playing: true, yaw: 0.0, exited: false, interruptible: false, advanced: false, windows: Vec::new() };
+        let mut s = SeqPlay { seq: 0, token: 0, time: 0.0, prev: 0.0, rate: 1.0, looping, playing: true, yaw: 0.0, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0 };
         let mut out = Vec::new();
         for k in 0..steps {
             let mut f = Vec::new();
@@ -999,7 +993,7 @@ mod tests {
     #[test]
     fn flags_and_end() {
         let info = seq(0.3, vec![(0.1, 0.0, "DishonoredNotify_AttackInterruptable"), (0.2, 0.0, "DishonoredNotify_AnimStateExit")]);
-        let mut s = SeqPlay { seq: 0, token: 0, time: 0.0, prev: 0.0, rate: 1.0, looping: false, playing: true, yaw: 0.0, exited: false, interruptible: false, advanced: false, windows: Vec::new() };
+        let mut s = SeqPlay { seq: 0, token: 0, time: 0.0, prev: 0.0, rate: 1.0, looping: false, playing: true, yaw: 0.0, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0 };
         let mut f = Vec::new();
         advance_layer(&mut s, &info, 0.15, &mut f);
         assert!(s.interruptible && !s.exited && s.playing);

@@ -8,6 +8,7 @@ use dishonored_sim::anim::{SeqTable, layer, token};
 use dishonored_sim::events::SimEvent;
 use dishonored_sim::input::{LeftHand, PlayerInput, buttons};
 use dishonored_sim::movement::DT;
+use dishonored_sim::pawn_states::{Request, context};
 use dishonored_sim::state::{LeftPhase, PawnKind, SwordPhase, WorldState, awareness, power};
 use dishonored_sim::{SimConfig, spawn_npc, spawn_player, state_hash, step_world};
 use dishonored_world::{CollisionWorld, Tri, channel};
@@ -208,7 +209,9 @@ fn a_guard_swing_is_its_chain_sequence() {
         r.step_with(&[(1, idle(0.0)), (100, idle(180.0))]);
     }
     let h0 = r.state.player(1).unwrap().vitals.health;
-    let press = r.step_with(&[(1, idle(0.0)), (100, PlayerInput { yaw: 180.0, buttons: buttons::PRIMARY, ..Default::default() })]);
+    r.state.requests = vec![(100, Request { context: context::ATTACK_SHORT, start: true, ..Default::default() })];
+    let press = r.step_with(&[(1, idle(0.0)), (100, idle(180.0))]);
+    r.state.requests.clear();
     let full = r.state.anim.get(&100).unwrap().layers[layer::FULL_BODY].clone().expect("the guard's swing plays");
     let key = r.table().key(full.seq).unwrap().to_string();
     assert!(key.starts_with("Npc_EliteGuard_Sword_as.Sword_Attack_"), "{key}");

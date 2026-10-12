@@ -315,10 +315,10 @@ pub fn npc_heads(brains: &[dishonored_ai::Brain], ai: &dishonored_ir::ai::AiConf
         .collect()
 }
 
-/// The behaviours' GenericAction animation requests (`dishonored_ai::Brain::anim_request`) of
-/// the pawns that made one.
-pub fn npc_actions(brains: &[dishonored_ai::Brain]) -> Vec<(PlayerId, u8, u32)> {
-    brains.iter().filter(|b| b.anim_request.serial != 0).map(|b| (b.id, b.anim_request.anim, b.anim_request.serial)).collect()
+/// The behaviours' GenericAction chains the pawns' states took (`dishonored_sim::pawn_states`:
+/// PlayAnim from the brains' requests), with their request serials, for the presentation.
+pub fn npc_actions(world: &dishonored_sim::state::WorldState) -> Vec<(PlayerId, u8, u32)> {
+    world.pawn_states.iter().filter(|(_, s)| s.play_serial != 0).map(|(id, s)| (*id, s.play_anim, s.play_serial)).collect()
 }
 
 /// Presentation stance of every AI pawn, from its brain state (animation only: locomotion

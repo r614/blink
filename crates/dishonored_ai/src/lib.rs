@@ -92,8 +92,6 @@ const P_ENEMY_SUS: usize = 3;
 const SWORD_REACH: f32 = 200.0;
 /// Longest an attack may travel toward its target before it is dropped (s).
 const ATTACK_WINDOW: f32 = 1.0;
-/// Speed at which the dodge animations cover their distance (uu/s; ground sprint speed).
-const DODGE_SPEED: f32 = 600.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrainState {
@@ -1336,6 +1334,7 @@ impl Crowd {
             let inp = b.act(me, world_state, &mut ctx, world, ai, dt);
             b.step_head(me, world_state, ai, dt);
             b.finish_request(&inp);
+            b.request.loco = b.loco_ref(ai);
             out.push((b.id, inp));
             b.transition_barks(was, me, world_state, &peers, ai);
             b.ambient_barks(ai, dt);
@@ -2770,6 +2769,11 @@ impl Brain {
         let mut i = PlayerInput { yaw: yaw_to(me.position, steer), forward: 127, left_hand: LeftHand::Empty, ..Default::default() };
         i.buttons |= if run { buttons::SPRINT } else { buttons::WALK };
         self.request.loco_speed = self.loco_speed(ai, run);
+        // The path the locomotion follows (its start, stop and turn sequences read it).
+        self.request.path = match (self.follow.path.first(), self.follow.path.last()) {
+            (Some(&to), Some(&dest)) if nav.is_some() => Some(dishonored_sim::pawn_states::LocoPath { from: self.follow.from.unwrap_or(me.position), to, next: self.follow.path.get(1).copied(), dest, accurate: self.accurate_stop().is_some() }),
+            _ => None,
+        };
         i
     }
 
@@ -2797,7 +2801,26 @@ impl Brain {
     /// `m_fSpeedMultiplier`. 0 without a locomotion config. LIKELY (speed = authored loop speed
     /// x modifier, not measured; research/dishonored/systems/ai.md §2, F3).
     pub fn loco_speed(&self, ai: &AiConfig, run: bool) -> f32 {
-        let Some(cfg) = self.loco_config(ai) else { return 0.0 };
+        let Some((ci, mi, speed, fallback)) = self.loco_choice(ai, run) else { return 0.0 };
+        let cfg = &ai.locomotion[ci];
+        let mode = if fallback { cfg.mode(mi, speed).or_else(|| cfg.mode(mi, 1)) } else { cfg.mode(mi, speed) };
+        let Some(mode) = mode else { return 0.0 };
+        let forward = if mode.move_anims.len() >= 4 { mode.move_anims[2].1 } else { mode.move_anims.first().map_or(0.0, |a| a.1) };
+        forward * cfg.modifiers[mi].speed_multiplier
+    }
+
+    /// The pawn's locomotion config and stance for the pawn states' request: its index in
+    /// `AiConfig::locomotion` and the modifier's in its `m_Modifiers`.
+    pub fn loco_ref(&self, ai: &AiConfig) -> Option<(u16, u8)> {
+        self.loco_choice(ai, false).map(|(c, m, _, _)| (c as u16, m as u8))
+    }
+
+    /// [`Self::loco_speed`]'s choice: the config (index), the stance modifier the body intention
+    /// selects, the speed index of a walk or a run, and whether a missing speed mode falls back to
+    /// the walk (the special classes' transit speeds).
+    fn loco_choice(&self, ai: &AiConfig, run: bool) -> Option<(usize, usize, usize, bool)> {
+        let cfg = self.loco_config(ai)?;
+        let ci = ai.locomotion.iter().position(|c| std::ptr::eq(c, cfg))?;
         // The special classes: their configs' modifiers, and the speed index the transit speed
         // maps to (`m_TransitSpeedToLocomotionSpeed`: hound {0, 1, 3}, tallboy {0, 0, 1}).
         let special: Option<(&[&str], usize)> = match self.class {
@@ -2815,10 +2838,8 @@ impl Brain {
             _ => None,
         };
         if let Some((want, speed)) = special {
-            let Some(mi) = want.iter().find_map(|w| cfg.modifier(w)) else { return 0.0 };
-            let Some(mode) = cfg.mode(mi, speed).or_else(|| cfg.mode(mi, 1)) else { return 0.0 };
-            let forward = if mode.move_anims.len() >= 4 { mode.move_anims[2].1 } else { mode.move_anims.first().map_or(0.0, |a| a.1) };
-            return forward * cfg.modifiers[mi].speed_multiplier;
+            let mi = want.iter().find_map(|w| cfg.modifier(w))?;
+            return Some((ci, mi, speed, true));
         }
         let armed = self.kind == PawnKind::Guard;
         let want: &[&str] = match (self.state, armed) {
@@ -2832,10 +2853,8 @@ impl Brain {
             (_, true) => &["EmptyPatrol", "Empty"],
             _ => &["Empty"],
         };
-        let Some(mi) = want.iter().find_map(|w| cfg.modifier(w)) else { return 0.0 };
-        let Some(mode) = cfg.mode(mi, if run { 2 } else { 1 }) else { return 0.0 };
-        let forward = if mode.move_anims.len() >= 4 { mode.move_anims[2].1 } else { mode.move_anims.first().map_or(0.0, |a| a.1) };
-        forward * cfg.modifiers[mi].speed_multiplier
+        let mi = want.iter().find_map(|w| cfg.modifier(w))?;
+        Some((ci, mi, if run { 2 } else { 1 }, false))
     }
 
     fn reached(me: &PlayerState, goal: Vec3, r: f32) -> bool {
@@ -4134,61 +4153,36 @@ impl Brain {
             self.threat_timer = 0.0;
             self.threat_needed = -1.0;
         }
-        // A move in progress.
-        if self.attack != 0 {
-            self.attack_timer -= dt;
+        // A side or back step in progress: its chain (`SideStep` / `JumpBack`) moves the pawn by
+        // its root motion (`dishonored_sim::pawn_states`); the context ends when the pawn's PlayAnim
+        // lets go of it (0x00C1C590), which the brain sees in the pawn's states.
+        if matches!(self.attack, npc_moves::SIDE_STEP | npc_moves::BACK_STEP) {
+            self.attack_timer += dt;
             let kind = self.attack;
             self.request.context = kind;
-            match kind {
-                npc_moves::SIDE_STEP | npc_moves::BACK_STEP => {
-                    if self.attack_timer <= 0.0 {
-                        self.attack = 0;
-                    } else if kind == npc_moves::SIDE_STEP {
-                        i.right = 127 * self.dodge_dir;
-                    } else {
-                        i.forward = -127;
-                    }
-                    return i;
-                }
-                _ => {
-                    // The attack travels to the target (root motion of the long and jump
-                    // attacks), swinging once within the sword's reach.
-                    let close = d <= SWORD_REACH;
-                    if close && me.sword.phase == SwordPhase::Idle {
-                        i.buttons |= buttons::PRIMARY;
-                        if kind == npc_moves::ATTACK_STEP_BACK {
-                            i.forward = -127;
-                        }
-                        self.attack = 0;
-                        return i;
-                    }
-                    if self.attack_timer <= 0.0 || !sighted {
-                        self.attack = 0;
-                    } else if !close && combat::lunges(kind) {
-                        i.forward = 127;
-                        i.buttons |= buttons::SPRINT;
-                        if kind == npc_moves::JUMP_ATTACK && self.attack_timer > ATTACK_WINDOW - dt * 1.5 {
-                            i.buttons |= buttons::JUMP;
-                        }
-                    }
-                    return i;
-                }
+            let stepping = ws.pawn_states.get(&me.id).is_some_and(|s| s.current.context == kind || s.pending.is_some_and(|p| p.context == kind));
+            if stepping || self.attack_timer <= dt * 1.5 {
+                return i;
             }
+            self.attack = 0;
         }
+        // The pawn's state takes no item context (an attack before its `m_bAttackNowInterruptable`,
+        // a GenericAction, a step: the context gate, 0x00B74400).
+        let free = dishonored_sim::pawn_states::allows_context(ws, me.id);
         // Dodges (`DisItemContext_NPCBackStep` / `_NPCSideStep`, with their group inhibition).
         let dodge_ok = |k: u8| !inhibit.iter().any(|x| x.0 == t.id && x.1 == 200 + k);
-        if self.incoming_needed > 0 && self.incoming >= self.incoming_needed && dodge_ok(npc_moves::BACK_STEP) {
+        if free && self.incoming_needed > 0 && self.incoming >= self.incoming_needed && dodge_ok(npc_moves::BACK_STEP) {
             self.incoming = 0;
             self.incoming_needed = 0;
             inhibit.push((t.id, 200 + npc_moves::BACK_STEP, dg.back_step_inhibition));
-            return self.start_dodge(npc_moves::BACK_STEP, dg.back_step_distance, i);
+            return self.start_dodge(npc_moves::BACK_STEP, i);
         }
-        if self.threat_needed >= 0.0 && self.threat_timer >= self.threat_needed && dodge_ok(npc_moves::SIDE_STEP) {
+        if free && self.threat_needed >= 0.0 && self.threat_timer >= self.threat_needed && dodge_ok(npc_moves::SIDE_STEP) {
             self.threat_timer = 0.0;
             self.threat_needed = -1.0;
             self.dodge_dir = if rng_next(&mut self.rng) < 0.5 { -1 } else { 1 };
             inhibit.push((t.id, 200 + npc_moves::SIDE_STEP, dg.side_step_inhibition));
-            return self.start_dodge(npc_moves::SIDE_STEP, dg.side_step_distance, i);
+            return self.start_dodge(npc_moves::SIDE_STEP, i);
         }
         // The pistol (`DisAISubStateFindShootingPosition` / `DisAISubStateFirePistol`).
         let reachable = nav.is_none_or(|_| !self.follow.failed);
@@ -4242,7 +4236,7 @@ impl Brain {
         }
         // Melee: the first context of the pattern that fits (`combat::pick_context`), while
         // the flurry has attacks left.
-        if sighted && self.flurry > 0 && me.sword.phase == SwordPhase::Idle {
+        if sighted && free && self.flurry > 0 && me.sword.phase == SwordPhase::Idle {
             if let Some(k) = combat::pick_context(ctxs, &self.melee_cd, inhibit, t.id, d, dz) {
                 // The context's cooldown, scaled by `(1 - aggression) x
                 // m_fCooldownFactorAtMinAggression + 1` (0x00b3deb0).
@@ -4257,22 +4251,10 @@ impl Brain {
                 // `DDH_COMBAT_BIG_ATTACK`).
                 let bark = if kind == npc_moves::JUMP_ATTACK { "DDH_COMBAT_BIG_ATTACK" } else { "DDH_COMBAT_ATTACK" };
                 self.barks.push((bark.into(), Some(t.id)));
-                self.attack = kind;
-                self.attack_timer = ATTACK_WINDOW;
+                // The context starts now (its range is the attack's): its chain's root motion
+                // carries the pawn to the target (`dishonored_sim::pawn_states`).
                 self.request.context = kind;
-                if d <= SWORD_REACH {
-                    i.buttons |= buttons::PRIMARY;
-                    if kind == npc_moves::ATTACK_STEP_BACK {
-                        i.forward = -127;
-                    }
-                    self.attack = 0;
-                } else {
-                    i.forward = 127;
-                    i.buttons |= buttons::SPRINT;
-                    if kind == npc_moves::JUMP_ATTACK {
-                        i.buttons |= buttons::JUMP;
-                    }
-                }
+                self.request.start = true;
                 return i;
             }
         }
@@ -4289,16 +4271,16 @@ impl Brain {
         i
     }
 
-    fn start_dodge(&mut self, kind: u8, distance: f32, mut i: PlayerInput) -> PlayerInput {
+    /// A side or back step's start (`DisItemContext_NPCSideStep` 0x00C277A0: PlayAnim of
+    /// `SideStep` in the side's group; `_NPCBackStep` 0x00C20C50: `JumpBack`): its chain's root
+    /// motion moves the pawn. The contexts' `m_fSideStepDistance` / `m_fBackStepDistance` are their
+    /// clearance tests (0x00C27630 / 0x00C28AB0), not ported.
+    fn start_dodge(&mut self, kind: u8, i: PlayerInput) -> PlayerInput {
         self.attack = kind;
-        // Covered at sprint speed (the dodge animations' root motion).
-        self.attack_timer = distance / DODGE_SPEED;
+        self.attack_timer = 0.0;
         self.request.context = kind;
-        if kind == npc_moves::SIDE_STEP {
-            i.right = 127 * self.dodge_dir;
-        } else {
-            i.forward = -127;
-        }
+        self.request.start = true;
+        self.request.variant = if self.dodge_dir < 0 { 0 } else { 1 };
         i
     }
 
@@ -4484,8 +4466,8 @@ impl Brain {
     }
 
     /// Complete this tick's request to the pawn once the brain acted: the move in progress when
-    /// nothing named a context, the behaviour's GenericAction chain, and the locomotion speed only
-    /// for an input that moves (a walk the brain dropped this tick asks nothing of it).
+    /// nothing named a context, the behaviour's GenericAction chain, and the locomotion speed and
+    /// path only for an input that moves (a walk the brain dropped this tick asks nothing of it).
     fn finish_request(&mut self, input: &PlayerInput) {
         if self.request.context == npc_moves::NONE {
             self.request.context = self.attack_kind();
@@ -4495,6 +4477,7 @@ impl Brain {
         }
         if input.forward == 0 && input.right == 0 {
             self.request.loco_speed = 0.0;
+            self.request.path = None;
         }
     }
 
@@ -5887,9 +5870,9 @@ mod tests {
         assert!(!b.unaware_of(1));
     }
 
-    /// A guard in combat picks the attack by distance and requests its item context: the long
-    /// attack travels toward the target, the short one swings at once; a back step follows an
-    /// incoming attack (`m_IncomingAttacksBeforeBackStep` 1).
+    /// A guard in combat picks the attack by distance and starts its item context at once (the
+    /// long attack's chain carries it to the target: no travel, no button); a back step follows an
+    /// incoming attack (`m_IncomingAttacksBeforeBackStep` 1), its chain moving the pawn.
     #[test]
     fn combat_moves_follow_item_context_ranges() {
         let ai = AiConfig::default();
@@ -5910,13 +5893,11 @@ mod tests {
         let mut inh = Vec::new();
         let (g, ws, mut b) = setup(450.0);
         let i = b.combat(&g, &ws, &w, None, &ai, &mut inh, 1.0 / 60.0);
-        assert_eq!(b.request.context, npc_moves::ATTACK_LONG);
-        assert!(i.forward > 0 && i.buttons & buttons::PRIMARY == 0);
-        assert_eq!(b.attack, npc_moves::ATTACK_LONG);
+        assert_eq!((b.request.context, b.request.start), (npc_moves::ATTACK_LONG, true));
+        assert!(i.forward == 0 && i.buttons & (buttons::PRIMARY | buttons::SPRINT) == 0);
         let (g, ws, mut b) = setup(150.0);
-        let i = b.combat(&g, &ws, &w, None, &ai, &mut inh, 1.0 / 60.0);
-        assert_eq!(b.request.context, npc_moves::ATTACK_SHORT);
-        assert!(i.buttons & buttons::PRIMARY != 0);
+        b.combat(&g, &ws, &w, None, &ai, &mut inh, 1.0 / 60.0);
+        assert_eq!((b.request.context, b.request.start), (npc_moves::ATTACK_SHORT, true));
         // Incoming attack: the player winds up facing the guard at close range.
         let (g, mut ws, mut b) = setup(150.0);
         b.flurry = 0;
@@ -5924,8 +5905,8 @@ mod tests {
         b.in_fight = true;
         ws.players[1].sword.phase = SwordPhase::Startup;
         let i = b.combat(&g, &ws, &w, None, &ai, &mut Vec::new(), 1.0 / 60.0);
-        assert_eq!(b.request.context, npc_moves::BACK_STEP);
-        assert!(i.forward < 0);
+        assert_eq!((b.request.context, b.request.start), (npc_moves::BACK_STEP, true));
+        assert_eq!(i.forward, 0);
     }
 
     /// Runs one arbitration (`drain`) of a brain with an empty world around it.

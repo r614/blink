@@ -484,6 +484,10 @@ pub fn step_movement(
         return;
     }
     let rat = p.kind == PawnKind::Rat;
+    // The locomotion's root-motion velocity is the walking physics' (physFalling reads none).
+    if p.mode != MoveMode::Walking {
+        p.root_velocity = None;
+    }
     // The player pawn's tick (0x00ADBD00): `m_bMantleAllowed` is set while walking or swimming.
     if matches!(p.mode, MoveMode::Walking | MoveMode::Swimming) {
         p.mantle_allowed = true;
@@ -897,6 +901,12 @@ fn walking_move(p: &mut PlayerState, input: &PlayerInput, sword_out: bool, can_m
         slide(p, ctx);
         // The speed modifier keeps tracking so the exit blends down from the slide.
         p.speed_mod = p.velocity.truncate().length() / cfg.run_speed;
+    } else if let Some(v) = p.root_velocity.take() {
+        // The NPC locomotion's velocity from last tick's root motion (`crate::pawn_states`): the
+        // walking physics integrates it as it stands (`APawn::physWalking` 0x006BD150 skips
+        // `CalcVelocity` for a pawn with a locomotion component; `Velocity.Z` = 0).
+        p.velocity = Vec3::new(v.x, v.y, 0.0);
+        walk_move(p, p.velocity * ctx.dt, ctx);
     } else {
         // physWalking: Velocity.Z = Acceleration.Z = 0; CalcVelocity(AccelDir, dt, GroundSpeed,
         // PhysicsVolume.GroundFriction, 0, brake, 0).

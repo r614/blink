@@ -37,8 +37,11 @@ fn guard_tree_follows_its_layers_and_round_trips() {
     }
     let tree = st.anim[&100].tree.clone().expect("the guard's tree");
     assert_eq!(tree.tree, 0, "NPC_Human_at while alive");
-    // A swing: the full-body layer plays the attack and the tree's slot takes it.
-    step(&mut st, PlayerInput { buttons: buttons::PRIMARY, ..idle(180.0) });
+    // A swing (the brain's melee context, `dishonored_sim::pawn_states`): the full-body layer
+    // plays the attack and the tree's slot takes it.
+    st.requests = vec![(100, dishonored_sim::pawn_states::Request { context: dishonored_sim::pawn_states::context::ATTACK_SHORT, start: true, ..Default::default() })];
+    step(&mut st, idle(180.0));
+    st.requests.clear();
     let swing = st.anim[&100].layers[layer::FULL_BODY].as_ref().expect("the swing").token;
     for _ in 0..3 {
         step(&mut st, idle(180.0));
@@ -49,10 +52,12 @@ fn guard_tree_follows_its_layers_and_round_trips() {
     let json = serde_json::to_string(&st).unwrap();
     let mut back: WorldState = serde_json::from_str(&json).unwrap();
     assert_eq!(back.anim, st.anim);
+    assert_eq!(back.pawn_states, st.pawn_states);
     for _ in 0..20 {
         step(&mut st, idle(180.0));
         step(&mut back, idle(180.0));
         assert_eq!(back.anim, st.anim);
+        assert_eq!(back.pawn_states, st.pawn_states);
     }
     // Dead: NPC_Dead_at.
     st.player_mut(100).unwrap().vitals.health = 1.0;

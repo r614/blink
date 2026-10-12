@@ -406,6 +406,11 @@ pub struct PlayerState {
     /// replaces the stance speeds of the walking physics. 0 for players and without a request.
     #[serde(skip)]
     pub loco_speed: f32,
+    /// The velocity the NPC locomotion set from the root motion its pawn states' chain gave last
+    /// tick (`crate::pawn_states::locomotion`, 0x0094BEC0's off-path branch); this tick's walking
+    /// physics integrates it in place of the input's.
+    #[serde(default)]
+    pub root_velocity: Option<Vec3>,
     /// Helmet of an NPC (`m_PotentialNPCArmor`, `DisTweaks_Armor` protecting the head), until hits
     /// knock it off. The armour damage filter (0x00B78610) zeroes hits of `m_DamageTypesToAbsorb`
     /// types on the protected region and side, but the shipped helmets (elite, city, thug) absorb
@@ -803,6 +808,7 @@ impl PlayerState {
             nav_walk: false,
             nav_end: None,
             loco_speed: 0.0,
+            root_velocity: None,
             helmet: false,
             plague: false,
             rat_attack: RatAttackState::default(),
@@ -1004,6 +1010,9 @@ pub struct WorldState {
     /// Each pawn's animation state (`crate::anim`), by pawn id.
     #[serde(default)]
     pub anim: std::collections::BTreeMap<PlayerId, crate::anim::PawnAnim>,
+    /// Each NPC's pawn states (`crate::pawn_states`), by pawn id.
+    #[serde(default)]
+    pub pawn_states: std::collections::BTreeMap<PlayerId, crate::pawn_states::PawnStates>,
 }
 
 /// A movable prop the player holds (`DishonoredItemEmpty.m_pGrabbed_Movable`, 0x00C3D030).
@@ -1120,12 +1129,17 @@ pub struct WorldExtras {
     /// each peer evaluates its own from the layers).
     #[serde(default)]
     pub anim: std::collections::BTreeMap<PlayerId, crate::anim::PawnAnim>,
+    /// The NPCs' pawn states (`WorldState::pawn_states`): their states, chains and root-motion
+    /// modes step the same on every peer.
+    #[serde(default)]
+    pub pawn_states: std::collections::BTreeMap<PlayerId, crate::pawn_states::PawnStates>,
 }
 
 impl WorldState {
     pub fn extras(&self) -> WorldExtras {
         WorldExtras {
             anim: self.anim.iter().map(|(id, a)| (*id, crate::anim::PawnAnim { layers: a.layers.clone(), rng: a.rng, tree: None })).collect(),
+            pawn_states: self.pawn_states.clone(),
             movables: self.movables.clone(),
             pickups: self.pickups.clone(),
             abstract_items: self.abstract_items.clone(),
@@ -1147,6 +1161,7 @@ impl WorldState {
         self.blink_layers = e.blink_layers;
         self.finisher_dilation = e.finisher_dilation;
         self.movables = e.movables;
+        self.pawn_states = e.pawn_states;
         // The layers are the snapshot's; a pawn keeps the NPC tree this world evaluated.
         let mut anim = e.anim;
         for (id, a) in anim.iter_mut() {
