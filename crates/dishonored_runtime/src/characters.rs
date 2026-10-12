@@ -783,7 +783,7 @@ pub fn animate_characters(
             // Diagnostics: DISH_ANIM_DEBUG=<pawn id> logs the pawn's slots and layers.
             if anim_debug.0 == Some(p.id) {
                 let layers: Vec<String> = sim.map(|a| a.layers.iter().flatten().map(|l| format!("{}:{}@{:.2}", token_kind(l.token), table.name(l.seq).unwrap_or("?"), l.time)).collect()).unwrap_or_default();
-                info!("anim {} mod={:?} vel={:?} full={:?} upper={:?} layers={layers:?} ragdoll={ragdolled} lying={lying} playing_out={playing_out} down={down} carried={:?} no_body={} alive={} pelvis={:?}", p.id, d.modifier, d.vel, d.full, d.upper, p.carried_by, p.no_body, p.alive, globals[0].get(1).map(|m| m.w_axis.truncate()));
+                info!("anim {} tick {} mod={:?} vel={:?} full={:?} upper={:?} layers={layers:?} ragdoll={ragdolled} lying={lying} playing_out={playing_out} down={down} carried={:?} no_body={} alive={} pelvis={:?}", p.id, view.tick, d.modifier, d.vel, d.full, d.upper, p.carried_by, p.no_body, p.alive, globals[0].get(1).map(|m| m.w_axis.truncate()));
             }
         }
         if let Some(s) = fresh {
