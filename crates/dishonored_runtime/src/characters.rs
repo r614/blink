@@ -710,12 +710,16 @@ pub fn animate_characters(
         let mut globals: Vec<Vec<glam::Mat4>> = parts.iter().zip(&pose).map(|(part, pp)| crate::npc_anim::local_globals(part, pp)).collect();
         // A body on the ground hands over to the ragdoll at its sequence's
         // `DishonoredNotify_Ragdoll` (the simulation's event: the pose drawn at that tick, the tick
-        // before for the velocities), at the end of a death or throw without one, or at once when
-        // the full body plays none (a knock-out, a dropped body, a body first seen down).
+        // before for the velocities), at the end of a death, a throw or a down body's chain (a won
+        // choke's slave, a carried body's drop) without one, or at once when the full body plays
+        // none (a knock-out, a body first seen down).
         let thrown = p.alive && (p.thrown.active || p.thrown.ragdoll);
-        let lying = (down || thrown) && p.carried_by.is_none() && !p.no_body;
+        // A body burnt to ash (`no_body`) lies too while it burns (`ash_bodies`): its death or
+        // slave plays to its ragdoll notify, after which the ragdoll owns the pose, as for any
+        // body (the death chain is not held, 0x00C53260).
+        let lying = (down || thrown) && p.carried_by.is_none();
         let full = sim.and_then(|a| a.layers[layer::FULL_BODY].as_ref());
-        let playing_out = full.is_some_and(|l| matches!(l.token & token::KIND, token::DEATH | token::THROWN) && l.playing);
+        let playing_out = full.is_some_and(|l| matches!(l.token & token::KIND, token::DEATH | token::THROWN | token::CHAIN) && l.playing);
         let mut limp = false;
         if !lying {
             st.ragdoll = None;
@@ -779,7 +783,7 @@ pub fn animate_characters(
             // Diagnostics: DISH_ANIM_DEBUG=<pawn id> logs the pawn's slots and layers.
             if anim_debug.0 == Some(p.id) {
                 let layers: Vec<String> = sim.map(|a| a.layers.iter().flatten().map(|l| format!("{}:{}@{:.2}", token_kind(l.token), table.name(l.seq).unwrap_or("?"), l.time)).collect()).unwrap_or_default();
-                info!("anim {} mod={:?} vel={:?} full={:?} upper={:?} layers={layers:?} ragdoll={ragdolled} pelvis={:?}", p.id, d.modifier, d.vel, d.full, d.upper, globals[0].get(1).map(|m| m.w_axis.truncate()));
+                info!("anim {} mod={:?} vel={:?} full={:?} upper={:?} layers={layers:?} ragdoll={ragdolled} lying={lying} playing_out={playing_out} down={down} carried={:?} no_body={} alive={} pelvis={:?}", p.id, d.modifier, d.vel, d.full, d.upper, p.carried_by, p.no_body, p.alive, globals[0].get(1).map(|m| m.w_axis.truncate()));
             }
         }
         if let Some(s) = fresh {
@@ -1017,7 +1021,8 @@ pub fn animate_characters(
             }
         }
         // Muzzle socket of the shown pistol (world space, Dishonored units) for the muzzle flash.
-        if let (Some(s), Some(k)) = (sockets.as_mut(), left_w.filter(|k| *k == TpWeapon::Pistol)) {
+        // The local player's drawn first-person rig places its own (`viewmodel`).
+        if let (Some(s), Some(k), false) = (sockets.as_mut(), left_w.filter(|k| *k == TpWeapon::Pistol), notes.first_person == Some(p.id)) {
             if let Some((w, (bone, loc))) = weapons.weapons.iter().find(|w| w.kind == k).and_then(|w| w.muzzle.map(|m| (w, m))) {
                 if let Some(sock) = body_bones.iter().position(|b| b.name.eq_ignore_ascii_case(w.socket_name)) {
                     let m = globals[0][sock] * w.to_socket * w.bind[bone];

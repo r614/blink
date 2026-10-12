@@ -12,9 +12,10 @@
 //!   capture refreshes on that tick only.
 //!
 //! An NPC whose spec pins its ambient idle (`NpcSetup::ambient`, `ambient_age`) gets the same
-//! pin in its tree ([`pin_ambient`]): the simulation's NPC trees take slot requests from the
-//! states' layers only, and the ambient idle is the AI's request, which does not reach the
-//! simulation yet (ARCHITECTURE.md step 6).
+//! pin in its tree ([`pin_ambient`]) unless the simulation already plays it: the brain's pinned
+//! idle reaches the simulation through its request (`pawn_states::Request::ambient`, played
+//! through `StateNPCMasterPlayAnim` from its age), so the pin only stands for an NPC whose pawn
+//! states have not taken it yet.
 
 use anyhow::Result;
 use dishonored_anim::tree::{FilterTarget, SlotAction, SlotRequest, TreeInputs, ZERO_WEIGHT};

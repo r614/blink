@@ -92,6 +92,7 @@ const SETS: &[&str] = &[
     "Ply_Gadgets_SpringRazor_as",
     "Ply_Head_Locomotion_as",
     "Ply_Empty_Locomotion_as",
+    "Ply_Empty_Idle_as",
 ];
 
 /// The rig's own sequences besides those the simulation's layers name (every sequence of the
@@ -394,6 +395,9 @@ pub struct ViewRig {
     /// The sword's swing trail (`melee_trail` of `Twk_Inv_SwordCorvo`): its template and the
     /// extent's corner sockets on the sword mesh (bone, location).
     sword_trail: Option<(String, [(usize, glam::Vec3); 2])>,
+    /// The pistol's `Spitfire` socket (`DisTweaks_FirePistol.m_MuzzleSocketName`) on the
+    /// first-person pistol mesh: the weapon's index, its bone and location.
+    pistol_muzzle: Option<(usize, usize, glam::Vec3)>,
     /// The rig's sockets: name -> (bone, transform relative to it).
     sockets: HashMap<String, (usize, glam::Mat4)>,
     /// Sockets and bones the hand effects are placed on (`effects::HandEffects`): the cast socket
@@ -749,7 +753,17 @@ pub fn load_view_rig(
     commands.insert_resource(ArmGlowMats(glow));
     let bind_pose = bones.iter().map(|b| (b.rotation, b.translation)).collect();
     let look_bones = [find("Collarbone_R_Jnt"), find("Collarbone_L_Jnt"), find("spine_3_jnt")];
-    commands.insert_resource(ViewRig { arms: arms_gpu, parents: parents(&bones), bones, bind_pose, m2p, weapons, bolts, lib, sword_trail, sockets: rig_sockets, effect_points, upper_body, left_arm, cam_bone, look_bones });
+    // The first-person pistol's muzzle (`Spitfire`): the flash leaves the drawn gun.
+    let pistol_muzzle = weapons.iter().position(|w| w.held == Held::Pistol).and_then(|wi| {
+        let s = dishonored_assets::characters::mesh_sockets(&content, "Startup", "Wpn_PlyGuns.Wpn_PlyGunElite").unwrap_or_default();
+        let s = s.iter().find(|s| s.name.eq_ignore_ascii_case("Spitfire"))?;
+        let bone = weapons[wi].bones.iter().position(|b| b.name.eq_ignore_ascii_case(&s.bone))?;
+        Some((wi, bone, s.location))
+    });
+    if pistol_muzzle.is_none() {
+        warn!("first-person rig: Wpn_PlyGunElite has no Spitfire socket");
+    }
+    commands.insert_resource(ViewRig { arms: arms_gpu, parents: parents(&bones), bones, bind_pose, m2p, weapons, bolts, lib, sword_trail, pistol_muzzle, sockets: rig_sockets, effect_points, upper_body, left_arm, cam_bone, look_bones });
 }
 
 /// The rig, parented to the game camera and drawn in the main view (see `VIEW_SCALE`).
@@ -797,22 +811,31 @@ pub fn spawn_view_rig(
 /// (the player's state pickers were not decoded, U-972, so LIKELY). Without one, what the layer
 /// plays for decides (`dishonored_sim::anim::token`): the block's sequence holds its last frame
 /// while the state holds it (the simulation stops it with the block: `ParryIdle_In`) and so does a
-/// paired move's master; the swings' and the left hand's sequences play out after their state
-/// (`left_requests`: "its sequence keeps playing out on the arm"), so they leave ending with the
-/// sequence (a slot's early blend-out, stock UE3 `AnimNodeSlot::TickAnim`). Times are play
-/// times: the sequence's time over `RateScale x Rate`.
-pub fn layer_weights(s: &SeqPlay, info: &SequenceInfo) -> (f32, f32) {
+/// paired move's master; the swings' and the upper body's one-shots play out after their state,
+/// so they leave ending with the sequence (a slot's early blend-out, stock UE3
+/// `AnimNodeSlot::TickAnim`); the navigation and the other continuing states (`token::NAV`) and
+/// the left hand's actions hold until the simulation replaces them (the arm's navigation blends
+/// in from their pose, as the left-arm picker's state did). A layer the
+/// state let go of (`SeqPlay::out`) blends out over the blend time from there. Times are play
+/// times: the in from the play time since the request (`SeqPlay::elapsed`, so a loop's wrap does
+/// not restart it), the exit and the end from the sequence's time over `RateScale x Rate`.
+pub fn layer_weights(s: &SeqPlay, info: Option<&SequenceInfo>) -> (f32, f32) {
     use dishonored_sim::anim::token;
-    let speed = (info.rate_scale_or_one() * s.rate).abs().max(1e-6);
     let ramp = |play: f32| if s.blend > 0.0 { (play / s.blend).clamp(0.0, 1.0) } else if play > 0.0 { 1.0 } else { 0.0 };
-    let w_in = if s.blend > 0.0 { ramp(s.time / speed) } else { 1.0 };
+    let w_in = if s.blend > 0.0 { ramp(s.elapsed) } else { 1.0 };
+    let w_release = s.out.map_or(1.0, |o| 1.0 - ramp(s.elapsed - o));
+    // A continuing state and a left-hand action hold to their replacement, which blends in from
+    // their pose (the simulation gives the arm back to the navigation when the action's state is
+    // done with it, `dishonored_sim::player_anim`).
+    let Some(info) = info.filter(|_| !matches!(s.token & token::KIND, token::NAV | token::LEFT)) else { return (w_in, w_release) };
+    let speed = (info.rate_scale_or_one() * s.rate).abs().max(1e-6);
     let w_exit = match info.notify("DishonoredNotify_AnimStateExit").map(|n| n.time) {
         Some(te) if s.time >= te => 1.0 - ramp((s.time - te) / speed),
         _ => 1.0,
     };
     let held = matches!(s.token & token::KIND, token::BLOCK | token::PAIRED);
     let w_end = if s.looping || held { 1.0 } else { ramp((info.duration - s.time) / speed) };
-    (w_in, w_exit.min(w_end))
+    (w_in, w_exit.min(w_end).min(w_release))
 }
 
 /// A sequence of the rig's sets at a time over the reference pose (bones it does not drive keep
@@ -857,7 +880,10 @@ impl RigLayer {
     /// The layer's pose and weight from the simulation's layer (`None`: nothing on it, shown at
     /// once as nothing).
     fn show(&mut self, s: Option<&SeqPlay>, table: &SeqTable, lib: &ClipLib, bind: &[(Quat, Vec3)], gameplay: &GameplayConfig) -> Option<Shown> {
-        let Some((s, info, name)) = s.and_then(|s| Some((s, table.info(s.seq)?, table.name(s.seq)?))) else {
+        use dishonored_sim::anim::REF_POSE;
+        // The layer's sequence, or the reference pose (`REF_POSE`: an empty child, the climb at
+        // rest).
+        let Some((s, info, name)) = s.and_then(|s| if s.seq == REF_POSE { Some((s, None, "")) } else { Some((s, Some(table.info(s.seq)?), table.name(s.seq)?)) }) else {
             *self = RigLayer::default();
             return None;
         };
@@ -867,7 +893,7 @@ impl RigLayer {
             self.seq = s.seq;
         }
         let (w_in, w_out) = layer_weights(s, info);
-        let mut pose = sequence_pose(lib, bind, name, s.time, s.looping, gameplay.root_motion.contains_key(name));
+        let mut pose = if s.seq == REF_POSE { bind.to_vec() } else { sequence_pose(lib, bind, name, s.time, s.looping, gameplay.root_motion.contains_key(name)) };
         let mut weight = w_in;
         match self.from.as_ref() {
             Some((from, fw)) if w_in < 1.0 && from.len() == pose.len() => {
@@ -999,7 +1025,7 @@ pub fn animate_view_rig(
     mut bjoints: Query<(&BoltJoint, &mut Transform), (Without<ViewRoot>, Without<ViewJoint>, Without<WeaponJoint>)>,
     mut bmeshes: Query<(&BoltMesh, &mut Visibility), (Without<ViewRoot>, Without<WeaponMesh>)>,
     cutscenes: Option<Res<crate::cutscene::Cutscenes>>,
-    (settings, mut hands, mut trails, mut notes): (Option<Res<crate::settings::GameSettings>>, ResMut<crate::effects::HandEffects>, Option<ResMut<crate::weapon_trails::WeaponTrails>>, ResMut<crate::anim_notify::AnimNotifies>),
+    (settings, mut hands, mut trails, mut notes, mut fx_sockets): (Option<Res<crate::settings::GameSettings>>, ResMut<crate::effects::HandEffects>, Option<ResMut<crate::weapon_trails::WeaponTrails>>, ResMut<crate::anim_notify::AnimNotifies>, Option<ResMut<crate::effects::EffectSockets>>),
 ) {
     use dishonored_sim::anim::layer;
     let Some(rig) = rig else { return };
@@ -1091,6 +1117,12 @@ pub fn animate_view_rig(
         add_additive_blend(lib, &items, true, w * s.weight, &mut fb_bob);
     }
     let mut locals = filters(&fb_bob);
+    // The step-up's head (`StepUpMantle`, `ADD_Head_Mantle_Low`): the simulation's additive layer over
+    // the whole pose, in and out over its blend time.
+    if let Some((s, info, name)) = sim_layer(layer::ADDITIVE).and_then(|s| Some((s, table.info(s.seq)?, table.name(s.seq)?))) {
+        let (i, o) = layer_weights(s, Some(info));
+        add_additive_blend(lib, &[(name.to_string(), s.time, 1.0)], false, i.min(o), &mut locals);
+    }
     // The look controls (`Ply_Player_at` SkelControlLists, driven by the pawn's view target
     // update 0x00AABDD0): both collarbones turn by the look pitch plus their item's arm pitch
     // offset (`m_ArmFollowOffset_Rot_Primary` / `_Secondary`, 0x00ACB8D0 from the view pitch,
@@ -1126,7 +1158,7 @@ pub fn animate_view_rig(
             w.lib.sample(c, 0.0, true, &mut pose);
         }
         let own = match (w.held, weapon_layer) {
-            (Held::Crossbow, Some((s, info, name))) if w.lib.has(name) => Some((name.to_string(), s.time, s.looping, { let (i, o) = layer_weights(s, info); i.min(o) })),
+            (Held::Crossbow, Some((s, info, name))) if w.lib.has(name) => Some((name.to_string(), s.time, s.looping, { let (i, o) = layer_weights(s, Some(info)); i.min(o) })),
             _ => driver.and_then(|d| weapon_clip(w, &d.name, me).filter(|c| Some(c) != idle.as_ref()).map(|c| (c, d.time, d.looping, d.weight))),
         };
         if let Some((c, time, looping, weight)) = own {
@@ -1196,6 +1228,20 @@ pub fn animate_view_rig(
             },
         };
         hands.sockets.insert(name.clone(), crate::cutscene::from_bevy(root_world * to_bevy(local)));
+    }
+    // The first-person pistol's `Spitfire` socket (Dishonored world space) for the muzzle flash: the
+    // gun drawn in the view, not the third-person body's (`characters.rs` leaves the local player's
+    // to the rig).
+    // The rig is drawn shrunk about the eye (`VIEW_SCALE`); the flash goes where the unshrunk gun's
+    // muzzle is, on the same line of sight and at its own size.
+    if let (Some(s), Some((wi, bone, loc)), LeftHand::Pistol) = (fx_sockets.as_mut(), rig.pistol_muzzle, me.left.item) {
+        let w = &rig.weapons[wi];
+        let wb = wglobals.get(wi).and_then(|g| g.get(bone)).copied().unwrap_or(w.bind[bone]);
+        let m = rig.m2p * globals[w.socket] * w.socket_rel * w.m2p * wb;
+        let unscaled = cam_world * master_local;
+        let at = |p: glam::Vec3| crate::cutscene::from_bevy(unscaled * to_bevy(m * glam::Mat4::from_translation(p))).w_axis.truncate();
+        let (p0, p1) = (at(loc), at(loc + glam::Vec3::Z * -10.0));
+        s.muzzle.insert(me.id, (p0, (p1 - p0).normalize_or_zero()));
     }
     // The particle notifies the simulation fired for the local player (`AnimNotify_PlayParticleEffect`
     // of the player sets: the Mark of the Outsider's glows on `Tattoo`, the swimming splashes) on
