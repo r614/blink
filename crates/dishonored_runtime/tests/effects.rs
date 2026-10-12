@@ -50,3 +50,14 @@ fn soft_particle_scale_follows_the_compiled_passes() {
     p.scalars.push(("Db_Depth_Biased_Alpha_Intensity".into(), 1.0));
     assert_eq!(soft_scale(&p), 1000.0);
 }
+
+#[test]
+fn look_up_glow_colour_comes_from_its_lookup() {
+    // `smoky_lookup` (diffuse_color2 (1, 0.838, 0.401), diffuse_color (0.406, 0.408, 0.368)) under
+    // the pistol smoke's ColorOverLife: (1, 0, 1) early is diffuse_color2, the blue is not read,
+    // and (0, 1, 1) late (drawn as cyan before the decode) adds nothing.
+    let lerp = [Vec3::new(1.0, 0.838, 0.401), Vec3::new(0.406, 0.408, 0.368)];
+    assert!(lookup_colour(Vec3::new(1.0, 0.0, 1.0), &lerp).abs_diff_eq(lerp[0], 1e-6));
+    assert!(lookup_colour(Vec3::new(0.5, 1.0, 0.0), &lerp).abs_diff_eq(lerp[1] * 0.5, 1e-6));
+    assert_eq!(lookup_colour(Vec3::new(0.0, 1.0, 1.0), &lerp), Vec3::ZERO);
+}

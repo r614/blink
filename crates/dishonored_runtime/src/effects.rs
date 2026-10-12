@@ -122,7 +122,9 @@ impl Material for GlowMaterial {
 #[derive(Asset, bevy::render::render_resource::AsBindGroup, Reflect, Debug, Clone, Default)]
 pub struct SoftFade {
     /// x: the depth-fade scale k (0: off), see `soft_scale`; y: the height-map erosion's
-    /// multiplier (`ParticleShading::erode_scale`, 0: no erosion).
+    /// multiplier (`ParticleShading::erode_scale`, 0: no erosion; -1 the look-up smoothstep);
+    /// z: the smoothstep's opacity; w: 1 when the smoothstep is not scaled by the vertex alpha
+    /// (`ParticleShading::erode_bare`).
     #[uniform(100)]
     pub soft: Vec4,
 }
@@ -203,6 +205,9 @@ struct LevelFx {
     skipped: std::collections::HashSet<(usize, usize)>,
     /// Sprite emitters whose material erodes by the particle alpha (`ParticleShading::erode`).
     erode: std::collections::HashSet<(usize, usize)>,
+    /// Sprite emitters whose particle colour drives a colour lookup (`ParticleShading::vertex_lerp`):
+    /// the two colours the vertex green lerps between.
+    vertex_lerp: HashMap<(usize, usize), [Vec3; 2]>,
     /// Untextured (procedural) mesh emitters: mesh, colour x intensity, glow parameters.
     glow: HashMap<(usize, usize), (Handle<Mesh>, Vec4, Vec4)>,
     /// Mesh emitters on Volume_Light_PMAT materials: mesh (with its vertex colours) and the decoded
@@ -421,8 +426,10 @@ fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Ass
         Some(e) => (AlphaMode::Add, [e[0], e[1], e[2], 1.0], e[3].min(4.0)),
         None => (alpha_mode, tint, gain),
     };
-    // The look-up smoke erodes the raw height and applies its opacity after (soft.z).
+    // The look-up smoke erodes the raw height and applies its opacity after (soft.z); the
+    // look-up glow's smoothstep is not scaled by the vertex alpha again (soft.w).
     let smooth = shading.is_some_and(|s| s.erode && s.erode_smooth);
+    let bare = smooth && shading.is_some_and(|s| s.erode_bare);
     let base_color = if alpha_mode == AlphaMode::Add {
         Color::linear_rgb(tint[0] * gain, tint[1] * gain, tint[2] * gain)
     } else {
@@ -437,7 +444,7 @@ fn material_for(map: &DishonoredMap, em: &ParticleEmitterAsset, images: &mut Ass
     };
     mats.add(FxMaterial {
         base: StandardMaterial { base_color, base_color_texture: image, unlit: true, alpha_mode, cull_mode: None, double_sided: true, fog_enabled: alpha_mode != AlphaMode::Add, ..default() },
-        extension: SoftFade { soft: Vec4::new(soft, erode, if smooth { gain.clamp(0.0, 1.0) } else { 0.0 }, 0.0) },
+        extension: SoftFade { soft: Vec4::new(soft, erode, if smooth { gain.clamp(0.0, 1.0) } else { 0.0 }, if bare { 1.0 } else { 0.0 }) },
     })
 }
 
@@ -639,6 +646,12 @@ pub fn spawn_level_effects(name: &str, map: &DishonoredMap, commands: &mut Comma
             .iter()
             .enumerate()
             .flat_map(|(si, s)| s.emitters.iter().enumerate().filter(|(_, e)| e.material.and_then(|m| map.material_params.get(m)).and_then(|p| p.particle).is_some_and(|p| p.erode)).map(move |(ei, _)| (si, ei)))
+            .collect(),
+        vertex_lerp: map
+            .particle_systems
+            .iter()
+            .enumerate()
+            .flat_map(|(si, s)| s.emitters.iter().enumerate().filter_map(move |(ei, e)| Some(((si, ei), e.material.and_then(|m| map.material_params.get(m))?.particle?.vertex_lerp?.map(Vec3::from)))))
             .collect(),
         materials,
         mesh_parts,
@@ -912,7 +925,8 @@ pub fn spawn_effect(commands: &mut Commands, meshes: &mut Assets<Mesh>, fx: &mut
 /// and the particle alpha rides in the second UV set, which `particle_soft.wgsl` subtracts from
 /// the baked height (earlier APPROXIMATION, replaced: the
 /// sprite fades where the original's shape shrinks).
-fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right: Vec3, cam_up: Vec3, cam_pos: Vec3, erode: bool, beam_target: Option<Vec3>, mesh: &mut Mesh) {
+/// `vertex_lerp`: the material reads the particle colour as a lookup ([`lookup_colour`]).
+fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right: Vec3, cam_up: Vec3, cam_pos: Vec3, erode: bool, vertex_lerp: Option<&[Vec3; 2]>, beam_target: Option<Vec3>, mesh: &mut Mesh) {
     let n = sim.particles.len();
     let mut pos = Vec::with_capacity(n * 4);
     let mut uv = Vec::with_capacity(n * 4);
@@ -921,7 +935,10 @@ fn build_mesh(em: &ParticleEmitterAsset, sim: &EmitterSim, xf: &Mat4, cam_right:
     let mut idx = Vec::with_capacity(n * 6);
     let mut uv_b: Vec<[f32; 2]> = Vec::new();
     let frames = (em.sub_h * em.sub_v).max(1);
-    let look = |p: &Particle| particle_look(em, p, sim.loop_time);
+    let look = |p: &Particle| {
+        let (color, alpha, size) = particle_look(em, p, sim.loop_time);
+        (vertex_lerp.map_or(color, |l| lookup_colour(color, l)), alpha, size)
+    };
     let world_of = |p: &Particle| particle_world(em, xf, p);
     if em.trail.is_some() || em.beam.is_some() {
         strip_mesh(em, sim, xf, cam_pos, &look, &world_of, beam_target, mesh);
@@ -1085,6 +1102,13 @@ fn particle_look(em: &ParticleEmitterAsset, p: &Particle, et: f32) -> (Vec3, f32
         }
     }
     (color, alpha, size)
+}
+
+/// The colour a look-up material makes of the particle colour `c` (`test_look_up`, shaders
+/// 36313 / 36315; EFFECTS.md "Every particle base"): the red scales, the green lerps from
+/// `lerp[0]` (`diffuse_color2`) to `lerp[1]` (`diffuse_color`), the blue is not read.
+pub fn lookup_colour(c: Vec3, lerp: &[Vec3; 2]) -> Vec3 {
+    c.x * (lerp[0] + (lerp[1] - lerp[0]) * c.y)
 }
 
 /// A particle's drawn position (Dishonored world space). Orbit: an emitter-space offset turned
@@ -1295,7 +1319,7 @@ fn simulate(
             } else if crate::profile::perf_baseline() {
                 // Before / after timings: the old per-frame rebuild of every sprite mesh.
                 if let Some(mut m) = inst.meshes.get(i).and_then(|h| meshes.get_mut(h)) {
-                    build_mesh(em, sim, &xf, right, up, cam_pos_b, lf.erode.contains(&(inst.system, i)), inst.beam_target, &mut m);
+                    build_mesh(em, sim, &xf, right, up, cam_pos_b, lf.erode.contains(&(inst.system, i)), lf.vertex_lerp.get(&(inst.system, i)), inst.beam_target, &mut m);
                     sim.mesh_empty = sim.particles.is_empty();
                 }
             } else if sprite_mesh_used(&lf, inst.system, i) {
@@ -1310,7 +1334,7 @@ fn simulate(
                         if sprite_culled {
                             clear_sprite_mesh(&mut m);
                         } else {
-                            build_mesh(em, sim, &xf, right, up, cam_pos_b, lf.erode.contains(&(inst.system, i)), inst.beam_target, &mut m);
+                            build_mesh(em, sim, &xf, right, up, cam_pos_b, lf.erode.contains(&(inst.system, i)), lf.vertex_lerp.get(&(inst.system, i)), inst.beam_target, &mut m);
                         }
                         sim.mesh_empty = empty;
                     }

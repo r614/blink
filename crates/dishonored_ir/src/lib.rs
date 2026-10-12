@@ -360,6 +360,14 @@ pub struct ParticleShading {
     /// `smoothstep(saturate((H - (1 - vertex alpha)) / vertex alpha)) x vertex alpha x opacity`.
     #[serde(default)]
     pub erode_smooth: bool,
+    /// With `erode_smooth`: the smoothstep is the opacity as it is, not scaled by the vertex
+    /// alpha again (`test_look_up`: alpha = `smoothstep(...) x opacity`).
+    #[serde(default)]
+    pub erode_bare: bool,
+    /// The particle colour drives a colour lookup instead of tinting (`test_look_up`, shaders
+    /// 36313 / 36315): rgb = vertex red x lerp(`[0]`, `[1]`, vertex green), the blue unused.
+    #[serde(default)]
+    pub vertex_lerp: Option<[[f32; 3]; 2]>,
     /// The shader ignores the texture's opacity: only the vertex alpha (and `opacity`) count
     /// (`Default_Simple_Translucent_PMAT` without `MA_Use_Masked_Alpha`).
     pub vertex_alpha_only: bool,

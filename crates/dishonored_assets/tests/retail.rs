@@ -262,8 +262,7 @@ fn gameplay_particle_sprites_have_an_opacity() {
             }
             // Additive sprites add their colour: an opaque alpha draws no square (black adds
             // nothing), and some decoded sources are opaque by design, e.g. `SleepBolt_Liquid_inst`
-            // (`O_EnableOpacityAlpha` on the DXT1 `Splash03_d`) or `smoky_lookup` on the additive
-            // test base `test_look_up`.
+            // (`O_EnableOpacityAlpha` on the DXT1 `Splash03_d`).
             if p.blend == MaterialBlend::Additive {
                 continue;
             }

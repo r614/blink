@@ -28,8 +28,10 @@
 // (HeightMapAnim / SubUV_HeightMap / WaterSplash bases: alpha = saturate((H - vertex alpha) x
 // Mask_Multiply), 0 = none), or -1 for the look-up smoke's erosion (Look_Up_Smoke_translu_PMAT,
 // 36275 / 37106: alpha = smoothstep(saturate((H - (1 - vertex alpha)) / vertex alpha)) x vertex
-// alpha x z, z = diffuse_color2.a). Eroding sprites keep their vertex alpha at 1 (the material
-// alpha is the baked height H) and carry the particle's alpha in the second UV set.
+// alpha x z, z = diffuse_color2.a); w = 1 drops the vertex alpha factor (test_look_up, 36313 /
+// 36315: the additive glow is smoothstep(...) x vertex red x its lookup colour, nothing else).
+// Eroding sprites keep their vertex alpha at 1 (the material alpha is the baked height H) and
+// carry the particle's alpha in the second UV set.
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> soft: vec4<f32>;
 
 // Bevy units per Unreal unit (coords::UU_TO_BEVY).
@@ -48,7 +50,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         pbr_input.material.base_color.a = saturate((pbr_input.material.base_color.a - va) * soft.y);
     } else if (soft.y < 0.0) {
         let t = saturate((pbr_input.material.base_color.a - (1.0 - va)) / max(va, 1.0e-6));
-        pbr_input.material.base_color.a = t * t * (3.0 - 2.0 * t) * va * soft.z;
+        pbr_input.material.base_color.a = t * t * (3.0 - 2.0 * t) * select(va, 1.0, soft.w > 0.0) * soft.z;
     }
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
     if (soft.x > 0.0) {

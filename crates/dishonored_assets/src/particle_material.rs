@@ -55,6 +55,13 @@ pub struct Recipe {
     pub erode: bool,
     /// With `erode`: the look-up smoke's smoothstep erosion (`ParticleShading::erode_smooth`).
     pub erode_smooth: bool,
+    /// With `erode_smooth`: the smoothstep is the opacity as it is, not scaled again by the
+    /// vertex alpha (`ParticleShading::erode_bare`).
+    pub erode_bare: bool,
+    /// The particle colour is not the sprite's colour: its red scales and its green lerps from
+    /// the first colour vector (name, default) to the second, its blue is unused
+    /// (`ParticleShading::vertex_lerp`).
+    pub vertex_lerp: Option<((&'static str, [f32; 4]), (&'static str, [f32; 4]))>,
 }
 
 const WHITE: [f32; 4] = [1.0; 4];
@@ -86,7 +93,7 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             } else {
                 Opacity::Texture { param: "O_Opacity", channel: mask("O_Opacity_Channel").unwrap_or(0) }
             };
-            Recipe { colour, opacity, tint: Some(("D_DiffuseColorTweak", WHITE, AlphaUse::Opacity)), brightness: None, opacity_scale: None, erode: false, erode_smooth: false }
+            Recipe { colour, opacity, tint: Some(("D_DiffuseColorTweak", WHITE, AlphaUse::Opacity)), brightness: None, opacity_scale: None, erode: false, erode_smooth: false, erode_bare: false, vertex_lerp: None }
         }
         // 37612..37620: rgb = D_Diffuse x vertex (D_DisableDiffuse: D_Diffuse_color.rgb x .a),
         // alpha = vertex alpha, x MA_MaskTexture[MA_Mask_Channel] with MA_Use_Masked_Alpha.
@@ -100,6 +107,8 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
                 opacity_scale: None,
                 erode: false,
                 erode_smooth: false,
+                erode_bare: false,
+                vertex_lerp: None,
             }
         }
         // 6086..6105: rgb = D_Diffuse x D_Diffuse_Brightness (B_Enable_Blood: x DiffuseColor.rgb
@@ -116,6 +125,8 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
                 opacity_scale: Some(("Mask_Multiply", 20.0)),
                 erode: true,
                 erode_smooth: false,
+                erode_bare: false,
+                vertex_lerp: None,
             }
         }
         // 5807 / 5820 / 5872 (BLEND_Masked): rgb = lerp of two sub-images of D_diffuse_texture x
@@ -129,6 +140,8 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             opacity_scale: Some(("Mask_Multiply", 20.0)),
             erode: true,
             erode_smooth: false,
+            erode_bare: false,
+            vertex_lerp: None,
         },
         // 0x60a95c8: rgb ~ D_DiffuseAlpha x vertex (plus a lit term), alpha = O_Opacity[channel] x
         // vertex alpha.
@@ -140,6 +153,8 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             opacity_scale: None,
             erode: false,
             erode_smooth: false,
+            erode_bare: false,
+            vertex_lerp: None,
         },
         // 0x69d877a / 0x6a3f7ee: rgb = R_Reflexion2d (normal-distorted) x D_DiffuseColorTweak.rgb x
         // .a x vertex red, alpha = Alpha[Alpha_Mask] x vertex alpha (additive: rgb x alpha).
@@ -151,6 +166,8 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             opacity_scale: None,
             erode: false,
             erode_smooth: false,
+            erode_bare: false,
+            vertex_lerp: None,
         },
         // 0x62006c7 (additive): rgb = Tex#0 x Tex#0 (two droplet scales) x Brightness, x
         // saturate((Shape.r - vertex alpha) x Max_Opacity).
@@ -162,6 +179,8 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             opacity_scale: Some(("Max_Opacity", 1.0)),
             erode: true,
             erode_smooth: false,
+            erode_bare: false,
+            vertex_lerp: None,
         },
         // 0x6201d3c: rgb = F_Fire_Color_Texture x F_Fire_Color.rgb x .a (eroded by D_Diffuse.r
         // with the vertex red) + smoke light, alpha = D_Diffuse.b x vertex alpha.
@@ -173,6 +192,8 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             opacity_scale: None,
             erode: false,
             erode_smooth: false,
+            erode_bare: false,
+            vertex_lerp: None,
         },
         // 0x60bcd89: rgb = gradient Tex#1 looked up by Tex#0.g (power vertex green) x
         // lookup_color, alpha = smoothstep of Diffuse.r against the vertex red x vertex alpha.
@@ -185,6 +206,8 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             opacity_scale: None,
             erode: false,
             erode_smooth: false,
+            erode_bare: false,
+            vertex_lerp: None,
         },
         // 0x6a19303: rgb = Color.rgb x Color.a (lerp to ColorAlert by Alert), alpha =
         // A_Alpha.r x (1 + inferno) x Opacity x vertex alpha.
@@ -196,6 +219,8 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             opacity_scale: Some(("Opacity", 0.25)),
             erode: false,
             erode_smooth: false,
+            erode_bare: false,
+            vertex_lerp: None,
         },
         // 36275 / 36277 (translucent, alpha_channel R / B), 37106 (two-sided): rgb =
         // diffuse_color2.rgb (no texture, no vertex colour), alpha = smoothstep(saturate((A_Alpha[ch]
@@ -209,6 +234,24 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             opacity_scale: None,
             erode: true,
             erode_smooth: true,
+            erode_bare: false,
+            vertex_lerp: None,
+        },
+        // 36313 / 36315 (additive; `alpha_channel` R / G, the particle vertex factory; 36314 /
+        // 36316 the same for meshes): rgb = smoothstep(saturate((Diffuse[ch] - (1 - vertex
+        // alpha)) / vertex alpha)) x vertex red x lerp(diffuse_color2, diffuse_color, vertex
+        // green), written with alpha 0; the vertex blue is not read and nothing else scales the
+        // smoothstep. The pistol muzzle's smoke (`smoky_lookup`, `alpha_channel` G).
+        "test_look_up" => Recipe {
+            colour: Colour::White,
+            opacity: Opacity::Texture { param: "Diffuse", channel: mask("alpha_channel").unwrap_or(0) },
+            tint: None,
+            brightness: None,
+            opacity_scale: None,
+            erode: true,
+            erode_smooth: true,
+            erode_bare: true,
+            vertex_lerp: Some((("diffuse_color2", WHITE), ("diffuse_color", WHITE))),
         },
         // 0x60faee0 (additive): rgb = G_GlowColor.rgb x vertex x (max(1 - 2r, 0)^G_GlowPower +
         // 0.1 r^2) x G_GlowColor.a x vertex alpha; no texture.
@@ -220,6 +263,8 @@ pub fn recipe(base: &str, switch: &dyn Fn(&str) -> bool, mask: &dyn Fn(&str) -> 
             opacity_scale: None,
             erode: false,
             erode_smooth: false,
+            erode_bare: false,
+            vertex_lerp: None,
         },
         _ => return None,
     };

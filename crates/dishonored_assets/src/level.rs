@@ -2228,7 +2228,9 @@ impl Importer<'_> {
             Colour::Expression(i) => chain.expression_textures.get(*i).copied().and_then(|k| self.texture(k)),
             Colour::White => None,
         };
-        let mut shading = ParticleShading { tint: [1.0; 3], opacity: 1.0, erode: r.erode, erode_scale: 0.0, erode_smooth: r.erode_smooth, vertex_alpha_only: false, opacity_missing: false, radial_power: None };
+        let vector = |(n, d): (&str, [f32; 4])| chain.vectors.iter().find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1).unwrap_or(d);
+        let vertex_lerp = r.vertex_lerp.map(|(a, b)| [vector(a), vector(b)].map(|v| [v[0], v[1], v[2]]));
+        let mut shading = ParticleShading { tint: [1.0; 3], opacity: 1.0, erode: r.erode, erode_scale: 0.0, erode_smooth: r.erode_smooth, erode_bare: r.erode_bare, vertex_lerp, vertex_alpha_only: false, opacity_missing: false, radial_power: None };
         if r.erode {
             shading.erode_scale = r.opacity_scale.map(|(n, d)| scalar(n, d)).unwrap_or(1.0);
         }
@@ -2268,7 +2270,7 @@ impl Importer<'_> {
             shading.tint = shading.tint.map(|c| c * b);
         }
         if let Some((n, d, use_alpha)) = r.tint {
-            let v = chain.vectors.iter().find(|(k, _)| k.trim().eq_ignore_ascii_case(n)).map(|v| v.1).unwrap_or(d);
+            let v = vector((n, d));
             let k = if use_alpha == AlphaUse::Colour { v[3] } else { 1.0 };
             for c in 0..3 {
                 shading.tint[c] *= v[c] * k;
