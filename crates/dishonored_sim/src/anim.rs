@@ -159,6 +159,32 @@ pub mod left_kind {
     pub const RELOAD_OUT: u32 = 8;
 }
 
+/// The blend time of the state that plays a layer's sequence (the renderer's blend in and out;
+/// nothing in the simulation reads it):
+/// - the player's (`m_fBlendTime` of `Twk_Pawn_Corvo_Release`'s animation states, as
+///   `viewmodel.rs` documented them): melee attacks and `AnimMeleeBlock` 0.1; gun fire, reload
+///   in / out and the power casts 0.1; the grenade and Spring Razor deploys 0.2; the
+///   assassinations and finishers (`Assassinate_*`, `Fatality_*`, the generic
+///   `Fatality_GenericA` / `B`) 0.2;
+/// - the crossbow mesh's fire: its own tree (`Crossbow_at`) was not decoded; 0.1 is the port's
+///   value for its clip changes, not a decoded one;
+/// - an NPC's full-body chains (swings, deaths, throws): `DisAnimation.m_fBlendInTime`'s class
+///   default 0.2, the value `step_tree` requests the tree's slots with.
+pub fn state_blend(layer: usize, token: u32) -> f32 {
+    match token & token::KIND {
+        token::SWING if layer == layer::FULL_BODY => 0.2,
+        token::THROWN | token::DEATH => 0.2,
+        token::SWING | token::BLOCK => 0.1,
+        token::PAIRED => 0.2,
+        token::LEFT => match token & !token::KIND {
+            left_kind::GRENADE | left_kind::SPRING_RAZOR => 0.2,
+            _ => 0.1,
+        },
+        token::WEAPON => 0.1,
+        _ => 0.2,
+    }
+}
+
 /// An active window of a notify with a duration (Arkane's list at +0x114 of the sequence node:
 /// the notify and the time left).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -199,6 +225,10 @@ pub struct SeqPlay {
     /// The slot's blend-out when the sequence stops (an NPC chain group's `m_fBlendOutTime`).
     #[serde(default)]
     pub blend_out: f32,
+    /// The requesting state's `m_fBlendTime` ([`state_blend`]): how long the layer takes to
+    /// blend in (and, in the renderer, out). Read by the presentation only.
+    #[serde(default)]
+    pub blend: f32,
 }
 
 impl SeqPlay {
@@ -249,9 +279,10 @@ impl PawnAnim {
         (x >> 8) as f32 / (1u32 << 24) as f32
     }
 
-    /// Play `seq` on `layer` from its start (`AnimNodeSlot::PlayCustomAnim`).
+    /// Play `seq` on `layer` from its start (`AnimNodeSlot::PlayCustomAnim`), blending in over
+    /// the requesting state's blend time.
     pub fn play(&mut self, layer: usize, seq: SeqId, token: u32, rate: f32, looping: bool, yaw: f32) {
-        self.layers[layer] = Some(SeqPlay { seq, token, time: 0.0, prev: 0.0, rate, looping, playing: true, yaw, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0 });
+        self.layers[layer] = Some(SeqPlay { seq, token, time: 0.0, prev: 0.0, rate, looping, playing: true, yaw, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0, blend: state_blend(layer, token) });
     }
 
     pub fn stop(&mut self, layer: usize) {
@@ -943,7 +974,7 @@ mod tests {
     }
 
     fn run(info: &SequenceInfo, looping: bool, steps: usize, dt: f32) -> Vec<(usize, Fired)> {
-        let mut s = SeqPlay { seq: 0, token: 0, time: 0.0, prev: 0.0, rate: 1.0, looping, playing: true, yaw: 0.0, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0 };
+        let mut s = SeqPlay { seq: 0, token: 0, time: 0.0, prev: 0.0, rate: 1.0, looping, playing: true, yaw: 0.0, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0, blend: 0.0 };
         let mut out = Vec::new();
         for k in 0..steps {
             let mut f = Vec::new();
@@ -995,7 +1026,7 @@ mod tests {
     #[test]
     fn flags_and_end() {
         let info = seq(0.3, vec![(0.1, 0.0, "DishonoredNotify_AttackInterruptable"), (0.2, 0.0, "DishonoredNotify_AnimStateExit")]);
-        let mut s = SeqPlay { seq: 0, token: 0, time: 0.0, prev: 0.0, rate: 1.0, looping: false, playing: true, yaw: 0.0, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0 };
+        let mut s = SeqPlay { seq: 0, token: 0, time: 0.0, prev: 0.0, rate: 1.0, looping: false, playing: true, yaw: 0.0, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0, blend: 0.0 };
         let mut f = Vec::new();
         advance_layer(&mut s, &info, 0.15, &mut f);
         assert!(s.interruptible && !s.exited && s.playing);

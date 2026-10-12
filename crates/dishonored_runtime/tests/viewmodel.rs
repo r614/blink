@@ -81,13 +81,42 @@ fn directional_weights_match_the_cooked_snapshot() {
     assert!(b[1] > 0.99, "{b:?}");
 }
 
+/// A simulation layer's weight from its own playhead: in over the state's blend time, out over
+/// it from its `AnimStateExit`; without one the block holds its last frame and the left hand's
+/// actions leave with their end.
 #[test]
-fn notify_windows_wrap_for_loops() {
-    use dishonored_runtime::viewmodel::crossed;
-    assert!(crossed(0.0, 0.0, 0.016, 1.0, false));
-    assert!(!crossed(0.5, 0.0, 0.4, 1.0, false));
-    assert!(crossed(0.05, 0.98, 1.06, 1.0, true));
-    assert!(!crossed(0.5, 0.98, 1.06, 1.0, true));
+fn layer_weights_ramp_in_and_out_on_the_playhead() {
+    use dishonored_ir::gameplay::{NotifyInfo, SequenceInfo};
+    use dishonored_runtime::viewmodel::layer_weights;
+    use dishonored_sim::anim::{SeqPlay, token};
+    let played = |token: u32, time: f32, rate: f32, looping: bool, blend: f32| SeqPlay { seq: 0, token, time, prev: 0.0, rate, looping, playing: true, yaw: 0.0, exited: false, interruptible: false, advanced: false, windows: Vec::new(), elapsed: 0.0, blend_in: 0.0, blend_out: 0.0, blend };
+    let play = |time: f32, rate: f32, looping: bool, blend: f32| played(token::SWING, time, rate, looping, blend);
+    let close = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4;
+    // `Sword_Ready_AttackRight_A_Small`: 1.1 s, `DishonoredNotify_AnimStateExit` at 0.951; the
+    // melee attack state's 0.1 s.
+    let swing = SequenceInfo { duration: 1.1, rate_scale: 1.0, notifies: vec![NotifyInfo { class: "DishonoredNotify_AnimStateExit".into(), time: 0.951, ..Default::default() }], root_motion: None };
+    assert!(close(layer_weights(&play(0.0, 1.0, false, 0.1), &swing), (0.0, 1.0)));
+    assert!(close(layer_weights(&play(0.05, 1.0, false, 0.1), &swing), (0.5, 1.0)));
+    assert!(close(layer_weights(&play(0.5, 1.0, false, 0.1), &swing), (1.0, 1.0)));
+    assert!(close(layer_weights(&play(1.001, 1.0, false, 0.1), &swing), (1.0, 0.5)), "halfway out 0.05 s after the exit");
+    assert!(close(layer_weights(&play(1.06, 1.0, false, 0.1), &swing), (1.0, 0.0)));
+    // At twice the rate the play times halve.
+    assert!(close(layer_weights(&play(0.05, 2.0, false, 0.1), &swing), (0.25, 1.0)));
+    // 0.0125 s past the exit, 0.062 s before the end: the end's ramp is the lower.
+    assert!(close(layer_weights(&play(0.976, 2.0, false, 0.1), &swing), (1.0, 0.62)));
+    // `Sword_Ready_ParryIdle_In` has no exit: the block holds its last frame while the simulation
+    // keeps it.
+    let block_in = SequenceInfo { duration: 0.56666666, rate_scale: 1.0, notifies: vec![NotifyInfo { class: "DishonoredNotify_AnimStateAdvance".into(), time: 0.5, ..Default::default() }], root_motion: None };
+    assert!(close(layer_weights(&played(token::BLOCK, 0.56666666, 1.0, false, 0.1), &block_in), (1.0, 1.0)), "held at its end");
+    // `Gadgets_SpringRazor_Deploy` has none either: the left hand's action leaves with its end.
+    let razor = SequenceInfo { duration: 0.36666667, rate_scale: 1.0, notifies: vec![NotifyInfo { class: "DisNotify_PlaceSpringRazor".into(), time: 0.2, ..Default::default() }], root_motion: None };
+    let left = token::LEFT | dishonored_sim::anim::left_kind::SPRING_RAZOR;
+    assert!(close(layer_weights(&played(left, 0.31666667, 1.0, false, 0.2), &razor), (1.0, 0.25)));
+    assert!(close(layer_weights(&played(left, 0.36666667, 1.0, false, 0.2), &razor), (1.0, 0.0)), "gone at its end");
+    assert!(close(layer_weights(&played(left, 0.3, 1.0, true, 0.2), &razor), (1.0, 1.0)), "a loop stays");
+    // No blend time: at once, in and out.
+    assert!(close(layer_weights(&play(0.0, 1.0, false, 0.0), &swing), (1.0, 1.0)));
+    assert!(close(layer_weights(&play(1.06, 1.0, false, 0.0), &swing), (1.0, 0.0)), "out at the exit");
 }
 
 /// `ArkAnimNodeRat` (0x00913ED0) with `Default__ArkAnimNodeRat`'s moves 55 / 98 / 302 uu/s.

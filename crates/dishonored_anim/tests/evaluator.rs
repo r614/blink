@@ -529,3 +529,91 @@ fn state_round_trips_through_serde_and_resumes_identically() {
     assert!(Arc::ptr_eq(c.shape(), &shape));
     assert_eq!(c.into_state(), *b.state());
 }
+
+/// `m_bFootOnGround` (0x009114A0): a foot is planted within half the moving modes' weighted
+/// `m_fFootOnGroundPct` of its `m_fOnGroundPct`, circularly.
+#[test]
+fn feet_windows() {
+    use dishonored_anim::locomotion::feet_on_ground;
+    // Walk (m_fFootOnGroundPct 0.4): left foot planted within 0.2 of 0.44, right of 0.94.
+    let feet = [0.44, 0.94];
+    assert_eq!(feet_on_ground(&feet, 0.30, 0.2), [true, false]);
+    assert_eq!(feet_on_ground(&feet, 0.05, 0.2), [false, true]);
+    assert_eq!(feet_on_ground(&feet, 0.69, 0.2), [false, false]);
+    assert_eq!(feet_on_ground(&feet, 0.3, 0.0), [false, false]);
+}
+
+/// What a renderer reads from a state the simulation stepped: the slot's channel, the
+/// locomotion node's modifier and velocity, the sequences to resolve, the feet; and its own
+/// inputs (the look-at aims, a stack channel) set on a copy without advancing anything.
+#[test]
+fn presentation_reads_and_inputs_on_a_stepped_state() {
+    let clips = Stub::new()
+        .constant("Idle", 2.0, [Some(q(5.0)), Some(q(5.0)), None])
+        .constant("Idle2", 1.5, [Some(q(-5.0)), Some(q(8.0)), None])
+        .moving("WalkS", 100.0, 0.0)
+        .moving("WalkW", 100.0, 0.0)
+        .moving("WalkN", 100.0, 0.0)
+        .moving("WalkE", 100.0, 0.0)
+        .constant("Act", 0.5, [Some(q(60.0)), None, None])
+        .constant("Upper", 1.0, [None, Some(q(-20.0)), Some(q(15.0))])
+        .constant("Blink", 0.2, [None, None, Some(q(45.0))])
+        .constant("Aim", 1.0, [None, Some(q(1.0)), None])
+        .constant("AimH", 1.0, [None, Some(q(3.0)), Some(q(2.0))])
+        .constant("AimT", 1.0, [None, Some(q(-2.0)), None])
+        .constant("Fall", 1.0, [Some(q(-10.0)), None, None]);
+    let mut cfg = state_loco_config();
+    cfg.modes[1].foot_on_ground = 0.4;
+    cfg.feet = vec![0.44, 0.94];
+    let shape = TreeShape::new(&state_tree(), &skeleton(), Quat::IDENTITY);
+    let mut st = shape.initial_state();
+    assert_eq!(st.locomotion(&shape), None, "before the node ticked");
+    assert_eq!(st.feet_on_ground(&shape, &clips, &cfg), None);
+    let play = [SlotRequest { slot: "FullBodySlot".into(), action: SlotAction::Play { sequence: "Act".into(), rate: 1.0, blend_in: 0.1, blend_out: Some(0.1), looping: false, start: 0.0 } }];
+    let dt = 1.0 / 60.0;
+    let mut walking = None;
+    for k in 0..30 {
+        let inputs = TreeInputs { physics: Some(1), slots: if k == 20 { &play[..] } else { &[] }, locomotion: Some(LocoInput { config: &cfg, modifier: "Empty", velocity: (0.0, 100.0), specific: None }), ..Default::default() };
+        st.update(&shape, &clips, &inputs, dt);
+        if k == 19 {
+            walking = Some(st.clone());
+        }
+    }
+    // A full-body action at full weight leaves the loops irrelevant: no foot is planted.
+    assert_eq!(st.feet_on_ground(&shape, &clips, &cfg), Some([false; 2]));
+    let (modifier, vel) = st.locomotion(&shape).unwrap();
+    assert_eq!(modifier, "Empty");
+    assert!((vel.1 - 100.0).abs() < 1e-3, "smoothed to 100: {vel:?}");
+    // The slot's channel: requested on tick 20, 9 ticks of play, its blend-in at 9/6.
+    let (seq, time, w) = st.slot(&shape, "FullBodySlot").unwrap();
+    assert_eq!(seq, "Act");
+    assert!((time - 9.0 * dt).abs() < 1e-4 && (w - 1.0).abs() < 1e-4, "{time} {w}");
+    assert_eq!(st.slot(&shape, "UpperBodyFilter"), None, "not a slot");
+    let names = st.sequence_names();
+    for n in ["Act", "WalkN", "Aim", "Blink", "Fall"] {
+        assert!(names.contains(&n), "{n} in {names:?}");
+    }
+    // The feet against the group's position: walking straight ahead at the walk's speed, the
+    // forward loop alone leads the group, half the walk's 0.4 either side of each foot.
+    let walking = walking.unwrap();
+    let feet = walking.feet_on_ground(&shape, &clips, &cfg).unwrap();
+    let inst = AnimTreeInstance::from_parts(Arc::new(shape.clone()), walking.clone());
+    let pos = (0..shape.tick_order().len()).find_map(|i| inst.sequence(i).filter(|s| s.name == "WalkN").map(|s| s.time)).unwrap();
+    assert_eq!(feet, dishonored_anim::locomotion::feet_on_ground(&cfg.feet, pos.rem_euclid(1.0), 0.2));
+    assert!(feet.iter().any(|f| *f), "20 ticks into the walk (position {pos}) the left foot is down");
+    // The presentation's inputs on a copy: the pose changes, the stepped state does not.
+    let before = st.pose(&shape, &clips);
+    let mode = LookatMode { name: "EmptyIdle".into(), head_range: [60.0, -60.0, 30.0, -30.0], torso_range: [45.0, -45.0, 20.0, -20.0], head: vec!["AimH".into(); 9], torso: vec!["AimT".into(); 9], ..Default::default() };
+    let look = LookInput { mode: &mode, head: [20.0, 0.0], torso: [0.0, 0.0], weight: 1.0 };
+    let blink = [dishonored_anim::StackChannel { stack: "BlinkBlender".into(), channel: 0, sequence: "Blink".into(), time: 0.1, weight: 1.0 }];
+    let mut shown = st.clone();
+    shown.present(&shape, Some(&look), &blink);
+    assert!(shown.sequence_names().contains(&"AimH"), "the mode's grids");
+    let after = shown.pose(&shape, &clips);
+    // The grids' deltas on mid: the head's 3 degrees over the torso's -2.
+    assert!((angle(after[1].0, before[1].0) - 1.0).abs() < 0.01, "the look-at turns mid: {:?} vs {:?}", after[1].0, before[1].0);
+    assert!(angle(after[2].0, before[2].0) > 1.0, "the stack channel drives the tip");
+    let again = { let mut s = st.clone(); s.present(&shape, Some(&look), &blink); s };
+    assert_eq!(again, shown, "deterministic");
+    assert_ne!(shown, st);
+}

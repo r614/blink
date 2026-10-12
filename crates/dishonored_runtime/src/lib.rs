@@ -40,6 +40,7 @@ pub mod ash_bodies;
 pub mod weapon_trails;
 #[doc(hidden)]
 pub mod npc_anim;
+pub mod anim_notify;
 #[doc(hidden)]
 pub mod facefx;
 #[doc(hidden)]
@@ -573,6 +574,9 @@ pub fn main() {
             .add_systems(Update, (hud_wheel::update_power_wheel.before(input_map::gather_input).after(pause_menu::rebuild), hud_wheel::draw_power_wheel.after(hud_wheel::update_power_wheel).after(gfx_hud::draw_gfx_hud)))
             .init_resource::<viewmodel::ViewAnim>()
             .init_resource::<viewmodel::BodyFrames>()
+            // The simulation's animation notifies of the frame, before the poses that place them.
+            .init_resource::<anim_notify::AnimNotifies>()
+            .add_systems(Update, (session::sync_anim, anim_notify::dispatch).chain().before(viewmodel::animate_view_rig).before(characters::animate_characters))
             // Weapons dead pawns let go of (`DisNotify_DropItem`), after the poses that drop them.
             .init_resource::<dropped_weapons::DroppedWeapons>()
             .add_systems(Update, dropped_weapons::update.after(characters::animate_characters))

@@ -2684,6 +2684,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bevy",
+ "dishonored_anim",
  "dishonored_assets",
  "dishonored_audio",
  "dishonored_bots",

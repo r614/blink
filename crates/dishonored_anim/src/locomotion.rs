@@ -3,16 +3,17 @@
 //! angle, the two speed modes of the modifier bracketing its (diagonal-corrected) speed, and the
 //! `LocoGroup` rate that keeps the authored stride on the ground.
 //!
-//! The maths is the runtime's (`dishonored_runtime::npc_anim::{smooth_velocity, dir_weights,
-//! diagonal_factor, loco_pose}`), decoded from the steps below and copied here unchanged; the
-//! runtime keeps its copy until it is wired to this crate:
+//! The maths was the runtime's (`dishonored_runtime::npc_anim::{smooth_velocity, dir_weights,
+//! diagonal_factor, loco_pose, feet_on_ground}`), decoded from the steps below and moved here
+//! unchanged when the runtime started drawing the simulation's trees:
 //! - 0x0090BC00 velocity smoothing (CONFIRMED);
 //! - 0x009331D0 direction entries and weights, 0.98 snap;
 //! - 0x00910E30 diagonal correction (CONFIRMED);
 //! - 0x009105B0 speed-mode bracket, 0.98 snap;
 //! - 0x00910970 S and W loops play with rate -1 (the `_Revert` loops are authored reversed);
 //! - 0x00916950 sync-group rate, the master being the heaviest loop;
-//! - 0x00916770 modifier crossfade over `m_fModifierBlendDuration`.
+//! - 0x00916770 modifier crossfade over `m_fModifierBlendDuration`;
+//! - 0x009114A0 `m_bFootOnGround` per `m_Feet` entry from the group's sync position.
 
 use dishonored_ir::npc_anim::{LocoConfig, SpeedMode};
 use glam::Vec2;
@@ -97,6 +98,10 @@ pub struct LocoEntry {
     pub authored: f32,
     /// The mode has a single loop (idle modes).
     pub single: bool,
+    /// The speed mode's `m_fFootOnGroundPct` and whether the mode moves (its loops' authored
+    /// speed at least 0.1), for the feet (0x009114A0).
+    pub foot: f32,
+    pub moving: bool,
 }
 
 /// The loops of `modifier` for the node's smoothed velocity (angle from facing in degrees,
@@ -158,14 +163,36 @@ pub fn loco_entries(cfg: &LocoConfig, modifier: usize, vel: (f32, f32)) -> (Vec<
                 let w = mw * dw[d];
                 if w > 1e-3 {
                     // S and W are authored reversed: played with rate -1 (0x00910970).
-                    out.push(LocoEntry { name: m.move_anims[d].0.clone(), reversed: d < 2, weight: w, authored: m.move_anims[d].1, single: false });
+                    out.push(LocoEntry { name: m.move_anims[d].0.clone(), reversed: d < 2, weight: w, authored: m.move_anims[d].1, single: false, foot: m.foot_on_ground, moving: m.move_anims[0].1.abs() >= 0.1 });
                 }
             }
         } else if let Some(a) = m.move_anims.first() {
-            out.push(LocoEntry { name: a.0.clone(), reversed: false, weight: mw, authored: a.1, single: m.move_anims.len() == 1 });
+            out.push(LocoEntry { name: a.0.clone(), reversed: false, weight: mw, authored: a.1, single: m.move_anims.len() == 1, foot: m.foot_on_ground, moving: a.1.abs() >= 0.1 });
         }
     }
     (out, speed)
+}
+
+/// Half-width of a foot's planted window (0x009114A0): the weighted `m_fFootOnGroundPct` of the
+/// moving modes' loops (normalized when their weights sum below 1), halved; 0 at rest.
+pub fn foot_half(entries: &[LocoEntry]) -> f32 {
+    let (fw, ws) = entries.iter().filter(|e| e.moving).fold((0.0, 0.0), |a, e| (a.0 + e.foot * e.weight, a.1 + e.weight));
+    (if ws > 0.0 && ws < 1.0 { fw / ws } else { fw }) * 0.5
+}
+
+/// Feet planted at a sync position (`m_bFootOnGround`, 0x009114A0): foot k (`m_Feet[k]`, left
+/// then right) is on the ground while the circular distance between the position and its
+/// `m_fOnGroundPct` is within `half`.
+pub fn feet_on_ground(feet: &[f32], phase: f32, half: f32) -> [bool; 2] {
+    let mut out = [false; 2];
+    for (k, f) in feet.iter().take(2).enumerate() {
+        let mut d = (f - phase).abs();
+        if d > 0.5 {
+            d = 1.0 - d;
+        }
+        out[k] = half > 0.0 && d <= half;
+    }
+    out
 }
 
 /// The `LocoGroup` rate scale (0x00916950, `m_fMostRelevantRateScale` +0x21C): `master length *

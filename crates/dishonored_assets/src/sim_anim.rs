@@ -55,10 +55,18 @@ pub const NPC_SETS: &[&str] = &[
 ];
 
 /// A notify object's properties over its class defaults: numbers and bools into `payload`
-/// (nested structs and arrays flattened as `crate::gameplay::flatten` does), names, enums,
+/// (nested structs and arrays flattened as `crate::gameplay::flatten` does), the top-level
+/// vectors as `<name>.X` / `.Y` / `.Z` (`DisNotify_DropItem.m_DropVelocity`), names, enums,
 /// strings and object paths into `names`.
 fn notify_props(m: &TMap) -> (BTreeMap<String, f32>, BTreeMap<String, String>) {
-    let payload = crate::gameplay::flatten(m);
+    let mut payload = crate::gameplay::flatten(m);
+    for (k, v) in m {
+        if let TVal::Vec3(v) = v {
+            for (axis, c) in ["X", "Y", "Z"].iter().zip(v) {
+                payload.insert(format!("{k}.{axis}"), *c);
+            }
+        }
+    }
     let names = m
         .iter()
         .filter_map(|(k, v)| match v {

@@ -8,8 +8,11 @@ Implementation:
 - data: `crates/dishonored_ir/src/npc_anim.rs` (types), `crates/dishonored_assets/src/npc_anim.rs`
   (decoders), `crates/dishonored_assets/src/characters.rs::resolve_appearances` (per-tweak profile
   and material variations);
-- runtime: `crates/dishonored_runtime/src/npc_anim.rs` (bank, locomotion, chains, layering),
-  `characters.rs::animate_characters`;
+- simulation: `crates/dishonored_sim/src/anim.rs` (the layers, the requests, the notifies, the
+  NPC trees stepped with `crates/dishonored_anim`);
+- runtime (draws the simulation's state, research/ARCHITECTURE.md step 7):
+  `crates/dishonored_runtime/src/npc_anim.rs` (bank, the evaluator's clips, `pose_tree`),
+  `characters.rs::animate_characters`, `anim_notify.rs` (the notifies), `viewmodel.rs`;
 - tool: `npc_anim_dump defs <Class> | loco <pkg> <path> | sets <pkg> <set>... | names <pkg> <export> <prop>`.
 
 ## 1. What a pawn tweak says
@@ -60,12 +63,15 @@ AnimNodeBlendByPhysics "NPCPhysicsBlend"   (PHYS_RigidBody -> a sequence node; e
 The loco sequence nodes are in sync group `LocoGroup`; slots 1-4 have `Rate = -1` in the template.
 
 So an NPC is: locomotion loops, overridden by full-body actions, with upper-body actions from
-`spine_0_jnt` up, additive hit reactions and look-at on top. The port reproduces the locomotion,
-full-body, upper-body, blink, face and look-at layers (§3-§4, §9); foot placement and the
-additive small hit reactions are not reproduced (U-280). Matinee anim tracks (the
-`MatineeStackNode` channels) play over the result (`PawnAnim::scripted`); keys with
-`m_MatineeRootMotionMode` keep `root0_jnt` at its bind translation because their root
-translation moves the pawn on the server (CUTSCENES.md, U-085 / U-202).
+`spine_0_jnt` up, additive hit reactions and look-at on top. The port evaluates this tree
+(`dishonored_anim`) in the simulation, which steps every NPC's state from its requests
+(`dishonored_sim::anim`), and the renderer poses that state per part of the pawn's model
+(`npc_anim::pose_tree`, 2026-10-11); foot placement and the additive small hit reactions are not
+reproduced (U-280), and nothing requests the blink and face slots yet. Matinee anim tracks are
+the `MatineeStackNode` channels the renderer sets on its copy of the state (`PawnAnim::scripted`,
+`TreeState::present`); keys with `m_MatineeRootMotionMode` keep `root0_jnt` at its bind
+translation because their root translation moves the pawn on the server (CUTSCENES.md, U-085 /
+U-202).
 
 Node details read from the cooked tree:
 - `FaceFilter` has `m_bExcludeBranchBones`: the face slot drives the bones *below* `head_jnt`,
@@ -150,15 +156,14 @@ steps below in this order: 0x0090BC00, 0x00911230, 0x0090BDB0, 0x00916770, 0x009
   `Empty_Walk_StopLeft` / `StopRight`); every mode has turns (`Empty_TurnLeft180` ...,
   `Empty_TurnToWalkRight45` ...).
 
-Port (`npc_anim::loco_pose`, `smooth_velocity`, `diagonal_factor`): all of the above except the
+Port (`dishonored_anim::locomotion`, ticked by the simulation's tree): all of the above except the
 turn sequences. The pawn's velocity relative to its facing is smoothed with the node's
 parameters; directions blend linearly between the two neighbouring loops with the 0.98 snap; the
 diagonal ratio scales the speed used for the bracket and the rate; S and W play backwards; all
 loops share one normalized phase advanced at the sync-group rate; modifier changes crossfade over
 0.5 s and transitions wait for the speed to drop below `m_fVelocityToStopMoving`. The runtime's
-renderer still starts and stops on the pawn's speed crossing `m_fVelocityToStartToMove` (60)
-upward or `m_fVelocityToStopMoving` downward (SPECULATIVE, until it skins the simulation's state,
-ARCHITECTURE.md step 7).
+speed-crossing trigger went with its picker (2026-10-11, ARCHITECTURE.md step 7): the renderer
+draws the simulation's tree.
 
 The locomotion component's requests (2026-10-11, static decode; `dishonored_sim::npc_loco`, the
 simulation's tree through `LocoInput::specific`). The component (+0x218 state: 0 none, 1-5 turn,
@@ -206,11 +211,14 @@ notifies at all). The node instead keeps `m_bFootOnGround` per `m_Feet` entry (0
 foot is planted while the circular distance between the group's sync position and the foot's
 `m_fOnGroundPct` (class defaults: left 0.44, right 0.94; Boyle configs keep them) is at most half
 the weighted `m_fFootOnGroundPct` of the moving speed modes (guard walk 0.4, run 0.2; normalized
-when their weights sum below 1). The port evaluates the same and reports each foot touching down
-to `AnimSounds::foot_down`, which plays a footfall like the notify path (0.25 s per foot), so
-third-person NPC steps no longer use the per-stride fallback (LIKELY: the consumer of
-`m_bFootOnGround` that posts the original's NPC footstep was not traced). The sync-group master's clip window
-is also reported, for loops that do have notifies (player rigs, other sets).
+when their weights sum below 1). The port evaluates the same as an output of the simulation's
+tree (`TreeState::feet_on_ground`, against the config the node ticked with) and the renderer
+reports each foot touching down to `AnimSounds::foot_down`, which plays a footfall like the
+notify path (0.25 s per foot), so third-person NPC steps do not use the per-stride fallback
+(LIKELY: the consumer of `m_bFootOnGround` that posts the original's NPC footstep was not
+traced). A full-body action at full weight leaves the loops irrelevant: no foot is planted then.
+Notifies on the loops are not fired (the tree dispatches none; the simulation's layers fire
+theirs as `SimEvent::AnimNotify`).
 
 ## 4. Animation definitions (`DisAnimDefinitions`)
 
@@ -295,37 +303,41 @@ Cache: `<map>.appearance3.json`.
 
 ## 6. What drives selection in the port
 
-The host publishes `MatchView::npc_poses` (pawn id -> `NpcStance` from the brain state:
-Relaxed, Patrol, Search, Combat, Panic, Cower, Notice) and `MatchView::anim_profiles` + `Look::anim`
-(the pawn tweak's sets, locomotion config and definitions class). Clients see simulation events
-(`SessionView::anim_events`).
+The simulation picks (`dishonored_sim::anim`, since 2026-10-11): its states request the layers'
+sequences and its NPC trees take the requests, the physics, the velocity and the brain's
+awareness; the renderer draws that state (`SessionView::anim`) and plays the notifies the
+simulation fires (`SessionView::anim_events`, `anim_notify`), choosing nothing. The host still
+publishes `MatchView::npc_poses` (`NpcStance` from the brain state), `MatchView::npc_heads` (the
+look-at aims the renderer sets on the tree) and `MatchView::anim_profiles` + `Look::anim` (the
+pawn tweak's sets, locomotion config and definitions class: the sets the renderer resolves the
+simulation's sequence names in).
 
 | Situation | Original mechanism | Port |
 |---|---|---|
-| walking / running | locomotion modifier and speed modes | §3; modifier: guards `SwordPatrol` when relaxed, `SearchSword` searching, `Sword` in combat or noticing, `PanicSword`; civilians `Empty`, `SearchEmpty`, `PanicEmpty`; players `Sword` armed (`Aim` aiming a gun), `Empty` unarmed (Contracts disguise) |
-| modifier change | `m_Transitions` | same sequences (`Sword_SwordToPatrol` ...) |
-| standing still / patrolling | `AmbientIdle` subprocess of the behaviour | §4: patrol stance 30-60 s upper body, search stance 2-6 s full body, relaxed none |
-| melee swing (`SwordSwing`) | `AttackShort/Medium/Long` chains from the AI attack pattern | the simulation's `StateNPCMasterActionMelee` (`dishonored_sim::pawn_states`): the context's chain (`AttackShort`, `AttackStepBack`, `AttackMedium`, `AttackLong`, `JumpAttack`), random group, played whole with its root motion; the runtime's picker draws `AttackShort` until step 7 |
+| walking / running | locomotion modifier and speed modes | §3, the simulation's tree; modifier from the brain's awareness (`dishonored_sim::anim::modifier`): guards `SwordPatrol` when unaware, `SearchSword` surprised or suspicious, `Sword` in combat, `PanicSword` fearful or begging; civilians `Empty`, `SearchEmpty`, `PanicEmpty`; one profile's config (the doorman's) for every NPC (U-978); human players' bodies have no tree: they stand in `NPC_Human_at` as cooked |
+| modifier change | `m_Transitions` | not requested (the tree's "Specific anim" child stays unused) |
+| standing still / patrolling | `AmbientIdle` subprocess of the behaviour | not requested yet (pawn states, ARCHITECTURE step 6): the NPC stands in its locomotion idle |
+| melee swing (`SwordSwing`) | `AttackShort/Medium/Long` chains from the AI attack pattern | the simulation's `StateNPCMasterActionMelee` (`dishonored_sim::pawn_states`): the context's chain (`AttackShort`, `AttackStepBack`, `AttackMedium`, `AttackLong`, `JumpAttack`), random group, played whole with its root motion on `FullBodySlot` |
 | side / back step, GenericActions | `DisItemContext_NPCSideStep` / `BackStep`, the behaviours' `PlayAnim` requests | `StateNPCMasterPlayAnim` in the simulation (`SideStep` group by side, `JumpBack`; the behaviour's chain); `MatchView::npc_actions` from the pawn states |
-| start / stop / turn in place | `ArkComponentLocomotion` from the path (section 3) | the simulation's `npc_loco` (rules decoded); the runtime's renderer starts and stops on speed thresholds until step 7 |
-| blocking | `Parry_AwaitingImpact` | same, held while blocking |
-| parry (`SwordParried`) | `Parry` groups | defender: `Parry` group 0 |
-| stagger | `Stun` | `Stun` group 0, loop held while staggered |
-| hit (`Damage`) | `HitReactStrong` / `HitReactProjectile` / `HitReactWindblast` / additive small | directional step by attacker position; projectiles pick head (headshots) or body steps |
-| assassinated | `Assassination` (`_Slave` sequences synced to the player's) | directional step, then held as the corpse |
-| death | `Death` / `DeathFast` ... then `DishonoredNotify_Ragdoll` (e.g. 2.299 s into `Generic_DeathFrontA`) | `Death`, directional step, then the presentation ragdoll from the notify (§8) |
-| first seen dead (late join, corpse spawners) | the corpse is already a ragdoll at rest | the end of `Death`, then the ragdoll run to rest at once (§8, U-147) |
-| sleep dart | `m_bSlowDeathOnly`: the "death" is the knock-out | `Death`, then the ragdoll |
-| held in a choke | `StateNPCMasterBeingChoked`: the `Choke` chain, one group per choke state | `Generic_Choke_In_Slave` -> `Loop_Slave` held while choked; on the choke's end `Win_Slave` (then the ragdoll), `Lose_Slave` or `Cancel_Slave` |
-| carried | `CorpseBeingCarried` (steps = carry states: In, Idle, Walk, DropLow, DropLowSneak, DropHigh, DropNoMove, DropFetal) | In, then Idle or Walk with the carrier's speed, drawn at the carrier's root; on the drop the ragdoll starts from the carried pose |
-| panic start | `Panic` | same, then `PanicEmpty` locomotion |
-| cower | `DisAISubStateCower` (0x00B12840): body stance `PanicRecover` (`Equipped` when armed), face the enemy | `PanicRecoverEmpty` modifier (`Empty_Idle_Panic_Recover`), `Sword` when armed |
-| noticing | `ReactToNoticing` | same |
-| talking | the blurb's FaceFX animation on the face and head (§12); body gestures only from soiree matinees (U-142, resolved: blurbs carry no animation, `DisBehaviorBlockingDialog` only faces the listener, no `eDisNPCAnimations` chain is a gesture, and the FaceFX actors pose `head_jnt` and the face bones only) | FaceFX lip sync and head motion (§12); body: the soiree matinee's AI-group anim tracks (CUTSCENES.md) |
-| crouched armed player | no crouch locomotion in the NPC sets | `Sword_Cover_Loop` held |
-| thrown (Windblast, push) | `StateNPCMasterThrown`: `PushToRagdoll` group 1 by direction, ragdoll at its notify; at rest `StateNPCMasterStunned` (`eStunEnterAnim_RagdollFront`) | §13 |
-| special classes (item contexts 20-28, published as `last_input.npc_move`) | the item contexts' `m_MainAttack.m_Animation`, the minigame groups, the Tallboy aim sub-states, the music box's walk upper body | §13 |
-| plague / rat death | `DeathPlague` / `DeathSwarmAttack` (by name, U-890) | same |
+| start / stop / turn in place | `ArkComponentLocomotion` from the path (section 3) | the simulation's `npc_loco` (rules decoded) in the tree's "Specific anim" child |
+| blocking | `Parry_AwaitingImpact` | not requested |
+| parry (`SwordParried`) | `Parry` groups | not requested |
+| stagger | `Stun` | not requested |
+| hit (`Damage`) | `HitReactStrong` / `HitReactProjectile` / `HitReactWindblast` / additive small | not requested |
+| assassinated | `Assassination` (`_Slave` sequences synced to the player's) | not requested (the slaves' sets are not in the simulation's table): the victim's death without a sequence, the ragdoll at once |
+| death | `Death` / `DeathFast` ... then `DishonoredNotify_Ragdoll` (e.g. 2.299 s into `Generic_DeathFrontA`) | the simulation's `Death` step by the killer's direction on `NPC_Dead_at`'s `FullBodySlot` (blended in over 0.2 s from that tree's source, the reference pose), then the presentation ragdoll at the notify's event (§8) |
+| first seen dead (late join, corpse spawners) | the corpse is already a ragdoll at rest | the ragdoll run to rest at once from the pose drawn (§8, U-147) |
+| sleep dart | `m_bSlowDeathOnly`: the "death" is the knock-out | not requested: the ragdoll at once |
+| held in a choke | `StateNPCMasterBeingChoked`: the `Choke` chain, one group per choke state | not requested; the won choke's body goes to the ragdoll at once |
+| carried | `CorpseBeingCarried` (steps = carry states: In, Idle, Walk, DropLow, DropLowSneak, DropHigh, DropNoMove, DropFetal) | not requested: the body shows its tree (`NPC_Dead_at` after its death's slot blended out: the reference pose) at the carrier's root; on the drop the ragdoll starts from that pose |
+| panic start | `Panic` | not requested; the `PanicEmpty` / `PanicSword` locomotion |
+| cower | `DisAISubStateCower` (0x00B12840): body stance `PanicRecover` (`Equipped` when armed), face the enemy | not requested (the simulation's modifiers have no `PanicRecover`) |
+| noticing | `ReactToNoticing` | not requested |
+| talking | the blurb's FaceFX animation on the face and head (§12); body gestures only from soiree matinees (U-142, resolved: blurbs carry no animation, `DisBehaviorBlockingDialog` only faces the listener, no `eDisNPCAnimations` chain is a gesture, and the FaceFX actors pose `head_jnt` and the face bones only) | FaceFX lip sync and head motion on the tree's output (§12); body: the soiree matinee's AI-group anim tracks as the `MatineeStackNode` channels (CUTSCENES.md) |
+| crouched armed player | no crouch locomotion in the NPC sets | not drawn (players' bodies have no tree) |
+| thrown (Windblast, push) | `StateNPCMasterThrown`: `PushToRagdoll` group 1 by direction, ragdoll at its notify; at rest `StateNPCMasterStunned` (`eStunEnterAnim_RagdollFront`) | the simulation's throw (`play_throw`), the ragdoll at its notify's event; the get-up is not requested (§13) |
+| special classes (`npc_move` 20-28) | the item contexts' `m_MainAttack.m_Animation`, the minigame groups, the Tallboy aim sub-states, the music box's walk upper body | not requested: one profile for every NPC (U-978), the special classes' swings timed without a sequence (§13) |
+| plague / rat death | `DeathPlague` / `DeathSwarmAttack` (by name, U-890) | rats: `DeathSwarmAttack` (the simulation); plague: the directional `Death` |
 
 Directional steps (U-143): the step index is a direction enum's value. Groups of 4 follow
 `ECardinalDirection` (Forward, Left, Right, Back): `StateNPCMasterStrongHitReact` plays its
@@ -342,13 +354,14 @@ with stance `eDisNPCBodyStance_PanicRecover` (7), or `Equipped` (3) when the paw
 then a face-to request toward the enemy proxy (rotation speed -100: default). No chain is
 played: the cowering pose is the `PanicRecoverEmpty` idle loop (`Empty_Idle_Panic_Recover`).
 
-Layering: full-body chains blend in over their step's `m_fBlendInTime` and out over the group's
-`m_fBlendOutTime`; the upper-body slot is masked to `spine_0_jnt` and its descendants
-(`UpperBodyFilter.BranchStartBoneName`). Rotations retarget by bone name; translations are taken
-from the clip for the root and its children only (the pelvis drop of deaths, kneels and falls).
-That is the runtime's rule, not the original's: the Boyle NPC sets leave `bAnimRotationOnly`
-false, so every clip translation is used, which the face bones of the `stealth/detect_1300`
-capture confirm (`dishonored_anim`, LOG 2026-10-11).
+Layering: the tree's own (§2): the slots blend their channels in and out over the requested
+times (the simulation requests 0.2 s, `DisAnimation.m_fBlendInTime`'s class default, for every
+chain: the layers carry no other blend time), the upper-body slot is masked to `spine_0_jnt` and
+its descendants (`UpperBodyFilter.BranchStartBoneName`). Tracks bind by bone name and every clip
+translation is used (`dishonored_anim::bind_tracks` with the sets' flags: the Boyle NPC sets leave
+`bAnimRotationOnly` false, which the face bones of the `stealth/detect_1300` capture confirm,
+LOG 2026-10-11); the runtime's former rule (translations for the root and its children only) went
+with its layering.
 
 ## 7. Animation notifies and gameplay timing (for the simulation)
 
@@ -388,9 +401,10 @@ length it had at the hand-over; the child segment stays inside its joint's swing
 (max of `Swing1/Swing2LimitAngle`) around its direction at the hand-over, carried by the parent
 segment's turn; masses fall under the world gravity onto the floor under the corpse (the standing
 cylinder's bottom), with friction. Fixed 1/60 s steps, 8 constraint passes, 4 s then rest. It
-starts from the death sequence sampled at exactly the notify time (and one step earlier for the
-initial velocities) and catches up in fixed steps, so a corpse falls the same way on every run
-and frame rate. Bones are rebuilt from the masses (each body turned by the arc from its start
+starts from the pose drawn at the tick of the simulation's `DishonoredNotify_Ragdoll` event (the
+tick before, when a frame drew it, for the initial velocities; else at rest), at the end of a
+death or throw without one, or at once when the full body plays none, and steps by the
+simulation's ticks, so a corpse falls the same way on every run and frame rate. Bones are rebuilt from the masses (each body turned by the arc from its start
 segment to its current one, twist from its parent; the top body from two children); bones without
 a body keep their offset to their body. The simulation's corpse position is untouched.
 
@@ -419,9 +433,11 @@ aims are the AI's own (2026-10-08): the vision head (`dishonored_ai::head`, stea
 12: the HeadTrack request, the look-at cursor and the head / torso weights) is split by the node's
 rule (0x009176F0, `head::split_aim`) into a torso part and a head part, published per pawn
 (`MatchView::npc_heads`), and each grid is posed by its own part, so the visible head turns where
-the vision cone points. A pawn speaking a line without a HeadTrack request looks at the nearest
-player within 600 uu with both grids and eases in about 0.25 s (APPROXIMATION, U-281). Blinks
-play the profile's `Blink` sequence on those timings.
+the vision cone points. The renderer sets those aims on its copy of the simulation's tree state
+(`TreeState::present`, the mode from the locomotion node's modifier and smoothed speed). The
+former approximation for a pawn speaking a line without a HeadTrack request (the nearest player
+within 600 uu, eased in about 0.25 s, U-281) and the runtime's blinks went with its clock
+(2026-10-11): the simulation rolls no blink yet (the tree state can carry a `BlinkTimer`).
 
 ## 10. Bodies, chokes and carrying
 
@@ -432,8 +448,9 @@ Data (`DisNPCAnimDefinitions_*`, `Ply_Sword_Choke_as`, `Ply_Empty_CarryCorpse_as
   DropNoMove,DropFetal}_Slave`; the player's `Empty_CarryCorpse_{In,Idle,Walk,DropLow,
   DropLowSneak,DropHigh,DropNoMove}_Master`.
 
-Port (third person, driven by `PlayerState::condition`, `carried_by` and the choke / knock-out /
-drop events): see the §6 table. Carried bodies are drawn at their carrier's root (the slave
+Port (third person): see the §6 table; since 2026-10-11 the simulation requests none of these
+chains, so a choked or carried body shows its tree and a knocked-out or dropped one goes to the
+ragdoll at once. Carried bodies are drawn at their carrier's root (the slave
 sequences are authored there), also in the carrier's own first-person view, where the body hangs over the shoulder in front of the camera. Skinned bodies
 are no longer tipped over by the renderer (their sequences and ragdoll lay them down) and are
 placed on the standing cylinder's bottom whatever their collision height (this also fixes
@@ -444,7 +461,16 @@ crouched pawns standing below the floor). Weapons are hidden on unconscious and 
 Player sets in Startup: `Ply_Sword_{Idle,Locomotion,Attack,Versus,Hit,Assassination,Choke,
 Fatality}_as`, `Ply_Empty_{Idle,Locomotion,Hit,FullBody,CarryCorpse}_as`, `Ply_Pistol_as`,
 `Ply_Crossbow_as`, `Ply_Guns_as`, `Ply_Powers_as`, `Ply_Gadgets{,_Grenade,_Heart,_SpringRazor}_as`,
-`Ply_Generic_as`, `Ply_Head_Locomotion_as`. The viewmodel now plays:
+`Ply_Generic_as`, `Ply_Head_Locomotion_as`.
+
+Since 2026-10-11 the viewmodel poses the simulation's layers (ARCHITECTURE.md step 7): the swings
+and the block-in on the upper body, the casts (Bend Time, Swarm, the possession's out), gadget
+deploys, gun fire and reload stages on the left arm, the paired masters on the full body, the
+crossbow mesh's fire; each layer weighted from its playhead and the requesting state's blend time
+(`SeqPlay::blend`). Nothing else is requested yet, so the rig stands in `Sword_Ready_Idle`'s first
+frame for the navigation (and its head bob), the mantle, choke and carry masters, the stun, slide,
+climb and swim, the equips, jump and crouch reactions, the possession and Blink aims, the
+Windblast cast, the parries and the left hand's idles. Before, the viewmodel's pickers played:
 - choke: `Sword_Choke_{In,Loop,Win,Lose,Cancel}_Master` by choke state, whole rig;
 - carrying: `Empty_CarryCorpse_In_Master` on a lift (`Sword_Choke_CarryCorpse_Master` when the
   lift follows a won choke), `Idle_Master` / `Walk_Master`, `DropLow_Master` over the drop's
@@ -525,7 +551,8 @@ weights (U-780) and the locked arm FOV during zoom (U-784).
 ## 12. FaceFX (lip sync and facial animation)
 
 Reader: `crates/dishonored_assets/src/facefx.rs` (decoded from the data alone; no FaceFX SDK
-code). Runtime: `crates/dishonored_runtime/src/facefx.rs`, applied in `npc_anim::animate`. Tool:
+code). Runtime: `crates/dishonored_runtime/src/facefx.rs`, applied on the tree's pose in
+`characters::animate_characters`. Tool:
 `facefx_dump <package> <export-substring> [-v]`.
 
 **Where the data is.**
@@ -694,8 +721,9 @@ code). Runtime: `crates/dishonored_runtime/src/facefx.rs`, applied in `npc_anim:
     Time 0 is the line start, which is when its VO starts.
   - `runtime::facefx::face_bones` turns the blended transforms into additive offsets against
     each part's bind pose.
-  - `npc_anim::animate` applies them last: rotation = delta x animated rotation, position =
-    animated (or bind) position + delta. Bones are bound by name in every part.
+  - `characters::animate_characters` applies them on the tree's pose: rotation = delta x
+    animated rotation, position = animated position + delta. Bones are bound by name in every
+    part.
   - Masked party heads have no `FaceFXAsset`, so they do not lip sync.
 
 ## 13. NPC, world and map animation parity (2026-10-08)
@@ -706,7 +734,10 @@ Their definitions classes are cooked into the Boyle scripts (`DisNPCAnimDefiniti
 `_Weeper`: L_BoyleStreet_Ext_Script; `_MusicalOverseer`: L_Boyle_Int_Script) and the Overseer
 kennel scripts (`_Wolfhound`). Each AI move code (`dishonored_ir::ai::special_moves`) plays the
 chain its item context names (`DisTweaks_ItemContext.m_MainAttack.m_Animation`, read with
-`tweaks`):
+`tweaks`). Since 2026-10-11 the renderer draws the simulation's tree, which steps one NPC profile
+for every NPC (U-978) and requests none of these chains: the special classes stand in that
+profile's loops (sequence names their sets may lack, so the reference pose) and their moves are
+timed without a sequence. The runtime's former picker played them as below:
 
 | `npc_move` | context (tweak) | chain | sequences (this pawn's sets) |
 |---|---|---|---|
@@ -739,11 +770,12 @@ first modifier, so Tallboys and weepers use `Empty`, hounds `SwordPatrol` / `Swo
 
 ### Thrown NPCs
 
-`StateNPCMasterThrown` (physics.md 3.7; `movement::start_throw` / `step_thrown`): the port plays
-`PushToRagdoll` group 1 (`Generic_WindBlast_{Front,Left,Right,Back}`, step by
-`movement::throw_direction`), holds it to its `DishonoredNotify_Ragdoll` (0.455 / 0.390 / 0.448 /
-0.418 s) where the presentation ragdoll takes over, and when the simulation stands the pawn up
-plays `Stun` group 1: `Generic_RagdollToFront`, the stun loop for one tick
+`StateNPCMasterThrown` (physics.md 3.7; `movement::start_throw` / `step_thrown`): the simulation
+plays `PushToRagdoll` group 1 (`Generic_WindBlast_{Front,Left,Right,Back}`, step by the throw's
+direction, `dishonored_sim::anim::play_throw`) to its `DishonoredNotify_Ragdoll` (0.455 / 0.390 /
+0.448 / 0.418 s), whose event hands the drawn pose to the presentation ragdoll. The get-up is not
+requested (2026-10-11): the pawn stands up in its locomotion idle. The runtime's former picker
+then played `Stun` group 1: `Generic_RagdollToFront`, the stun loop for one tick
 (`m_fStunDuration` 0) and the recovery whose length matches the simulation's hold
 (`Sword_RecoveryA` 1.867 s / `_RecoveryB` 1.5 s for guards; `Patrol_Recovery` for hounds,
 `Empty_RecoveryA|B` for weepers). The get-up starts from the lying pose without blending from the
