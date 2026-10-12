@@ -173,13 +173,15 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<(OracleKey, T)> {
     Ok((key, payload))
 }
 
-/// Root of the oracle cache: `$DISHONORED_ORACLE_CACHE`, else `$DISHONORED_CACHE/oracle`, else
-/// `cache/oracle` (gitignored). Never inside the repository's tracked files.
+/// Root of the oracle cache: `$DISHONORED_ORACLE_CACHE`, else `$DISHONORED_CACHE/oracle`, else the
+/// install cache `%LOCALAPPDATA%/dishonored-rs/cache/oracle` (where `dishonored_content::cache_dir`
+/// keeps the rest; a `cache/oracle` beside the repository used to shadow it), else `cache/oracle`.
+/// Never inside the repository's tracked files.
 pub fn root() -> PathBuf {
     if let Some(p) = std::env::var_os("DISHONORED_ORACLE_CACHE") {
         return PathBuf::from(p);
     }
-    std::env::var_os("DISHONORED_CACHE").map(|p| PathBuf::from(p).join("oracle")).unwrap_or_else(|| PathBuf::from("cache").join("oracle"))
+    std::env::var_os("DISHONORED_CACHE").map(PathBuf::from).or_else(|| std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("dishonored-rs").join("cache"))).unwrap_or_else(|| PathBuf::from("cache")).join("oracle")
 }
 
 pub fn store<T: Serialize>(root: &Path, key: &OracleKey, payload: &T) -> Result<PathBuf> {
