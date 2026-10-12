@@ -805,9 +805,11 @@ fn window_handoff(
 fn main_entries(t: &MenuTexts, has_saves: bool) -> Vec<(&'static str, String)> {
     let mut v = Vec::new();
     // The original's Continue (`t_ContinueGame`: the newest save, `OnLoadLastSaveClicked`) and
-    // Load (`t_LoadGame`), shown when saves exist.
+    // Load (`t_LoadGame`), shown when saves exist. `t_ContinueGame` is a key of
+    // `[DisGFxMoviePlayerBase_Texts]` ("Continue"); looked up in the main menu's section it fell
+    // back to the key's name ("CONTINUEGAME", wider than its button).
     if has_saves {
-        v.push(("main:continue", t.t(SEC_MAIN, "t_ContinueGame")));
+        v.push(("main:continue", t.t(SEC_BASE, "t_ContinueGame")));
     }
     v.extend([("main:play", "Play".to_string()), ("main:missions", t.t(SEC_MAIN, "t_Missions")), ("main:freeroam", "Free Roam".to_string())]);
     if has_saves {
