@@ -1008,9 +1008,9 @@ mod tests {
         let cps = vec![Checkpoint {
             name: "apex".into(),
             expect: vec![
-                Expect { metric: Metric::Rise("pawn.z".into()), value: 106.67, tol: 0.5, source: "m".into(), cmp: Default::default(), status: Default::default() },
-                Expect { metric: Metric::TimeToReach("pawn.z".into(), 100.0), value: 2.0 / 60.0, tol: 1e-6, source: "m".into(), cmp: Default::default(), status: Default::default() },
-                Expect { metric: Metric::At("pawn.vz".into(), 1), value: 0.0, tol: 1.0, source: "m".into(), cmp: Default::default(), status: Default::default() },
+                Expect { metric: Metric::Rise("pawn.z".into()), value: 106.67, tol: 0.5, source: "m".into(), cmp: Default::default(), status: Default::default(), name: None },
+                Expect { metric: Metric::TimeToReach("pawn.z".into(), 100.0), value: 2.0 / 60.0, tol: 1e-6, source: "m".into(), cmp: Default::default(), status: Default::default(), name: None },
+                Expect { metric: Metric::At("pawn.vz".into(), 1), value: 0.0, tol: 1.0, source: "m".into(), cmp: Default::default(), status: Default::default(), name: None },
             ],
         }];
         let r = check_checkpoints(&t, &cps);

@@ -51,8 +51,9 @@ oracle collision [--map M]... [--ids 1,2,3]             cached original vs port
 oracle gen collision --map M --out Q [--sampling navmesh,prim] [--reach R]
 oracle densify collision --map M --out Q [--per N] [--radius R]
 oracle structure --map M                                port structure (vs a reflection dump)
-oracle scenario [NAME...] [--system S]... [--all] [--jobs N] [--json]
-                                                        scenarios on the port in parallel (+ original trace)
+oracle scenario [NAME...] [--system S]... [--all] [--anim] [--jobs N] [--json]
+                                                        scenarios on the port in parallel (+ original trace;
+                                                        --anim alone: every scenario recording animation)
 oracle sweep                                            everything cached -> one scorecard
 oracle bench import|queries --map M                     the port's costs
 oracle cache list
@@ -101,7 +102,9 @@ flags [target]`); `oracle import` turns a capture into a cache entry.
 health / mana, items, equips, powers, NPC placements by spawner or tweak with an AI state, story
 flags, seed, Kismet on/off, keep-alive); `tick_hz` (fixed step) and `ticks`; `input` (per tick:
 `Move`, `Look`, `Press(button)` with a hold, `Console`); `checkpoints` (metrics `At`, `Max`,
-`Min`, `Rise`, `RiseFrom`, `TimeToReach` with a value, tolerance and the reference's source);
+`Min`, `Rise`, `RiseFrom`, `TimeToReach` with a value, tolerance and the reference's source; the
+animation metrics `AnimBoneMean`, `AnimBoneMax`, `AnimSeq` with a `name`, `AnimSeqTime`, `AnimLag`:
+"Animation residuals in the scenario runner");
 `record` (`Pawn`, `Vitals`, `Camera`, `Npc`, `Kismet`, `ProcessEvent` filters, `SimEvents`);
 per-channel `tolerances` (longest prefix). A map sweep is a scenario with `sweep`: probe,
 generator, `structure` (run the structural diff first), `sampling` (`Navmesh`,
@@ -640,6 +643,67 @@ retargeting from the tree, the state machine and the clocks: a residual here is 
 playback itself. The search over clip-time offsets of -10..+10 ticks reports how far the baked
 clip runs ahead of or behind the capture (U-865). `--exclude-below head_jnt` leaves out the bones
 the face slot, the look-at additive and the blink drive on top of the body clip.
+
+**Animation residuals in the scenario runner (2026-10-11).** Every scenario that records
+`Bones("<npc>", ..)` / `AnimState("<npc>")` is compared with its sidecar on every run
+(`dishonored_oracle::anim`, `tools/oracle/src/port_anim.rs`), checkpoints or not:
+
+- *Port side.* After each recorded tick the runner reads the NPC's tree state from the
+  simulation (`WorldState::anim[id].tree`, the `dishonored_anim::TreeState` the simulation
+  evaluates with the install's `AnimSource`) in the capture's shape: per node (numbered by
+  `TickArrayIndex`, `TreeShape::tick_index`) `NodeTotalWeight`, a sequence node's sequence, time and
+  rate, a blend node's children weights; and, for the bones the capture refreshes on that tick,
+  the component-space pose (`TreeState::pose` with the simulation's clips, `pose::to_component`
+  over the profile's skeleton). The port's tracks are written beside the trace
+  (`traces/<system>__<name>.anim.json`). The player's tree is not sampled (U-972); a dead NPC's
+  `NPC_Dead_at` numbers its nodes otherwise.
+- *Original side.* The sidecar of the spec hash (`anim-<hash>.json` beside the trace), node states
+  carried forward, bones kept only where fresh: the reduced LOD set and the bones never rewritten
+  are fresh on a tick that rewrites anything, every bone on a tick that rewrites one outside that
+  set (full LOD), none on a tick that rewrites nothing. The last rule matters: in
+  `ai/boyle_patrol_speed` the guard's tree ticks for 20 ticks, then from tick 20 to 1008 neither a
+  node nor a bone changes while it walks 1000 uu (node 21 holds `Empty_TurnToWalkLeft45` at
+  0.445 s) and it ticks again at 1009, two ticks after its combat behaviour starts. LIKELY UE3 not
+  ticking or posing a skeletal mesh that is not rendered (the guard is 4900 uu away, below the
+  player; the flags that gate it are not read in this build). The port's trees always tick.
+- *Bones* are compared by name as the angle between the two component-space quaternions
+  (degrees, computed in double precision: an f32 `acos` near 1 is only good to 0.02 deg). Groups
+  as `dishonored_anim`'s replay test: `head` (`head_jnt` and below), `legs` (`upper_leg_*` and
+  below), `hands` (below `hand_L_jnt` / `hand_R_jnt`), `body` (the rest).
+- *The lag* is the offset `capture tick = port tick + lag` (-30..+30, tried from 0 outwards,
+  strictly better to move) that minimizes the body mean over the run, needing at least half of lag
+  0's ticks. Negative: the port shows at tick `t` what the original showed at `t + lag`, so it runs
+  behind; positive: ahead. A lag at the edge of the range means no alignment (the summary says so);
+  a lag of 0 over two different motions is not a timing either (it only names the least bad
+  offset), so read it with the sequences that play.
+- *Metrics* (`Metric`, the subject being the record's): `AnimBoneMean(subject, bones, from, to)` /
+  `AnimBoneMax(..)` (lag 0, the port's ticks `from..=to`; `bones` is `body` / `legs` / `hands` /
+  `head`, `all`, or names separated by commas), `AnimSeq(subject, node, tick)` (the sequence
+  playing on a node: on a sequence node its own while it weighs anything, on another node the
+  heaviest sequence of its subtree, e.g. `FullBodySlot` or `LocoBlender`; the node by number or
+  `NodeName`; compared as a name with the expectation's `name: Some("..")`),
+  `AnimSeqTime(subject, node, tick)` (that sequence's time) and `AnimLag(subject)`. The checks
+  table carries the capture's own value of `AnimSeq` / `AnimSeqTime` beside the port's ("Animation
+  checks"), which is what a Measured reference states.
+- *Scorecard.* The "Scenarios" table has an `anim` column per scenario (body mean / max at lag 0,
+  the best lag and its body mean); "Animation residuals" lists every recorded subject: ticks per
+  side and with fresh bones, every group's mean / max, the lag, the ticks both sides play the same
+  `FullBodySlot` sequence, and what plays there on each side (sequence and ticks). `oracle scenario
+  --anim` runs every scenario that records animation; `oracle sweep` includes both tables.
+- *Pinned ambient idles.* An `NpcSetup.ambient` pin is applied to the port's tree too: the
+  simulation's NPC trees take slot requests from its states' layers only and the ambient idle is
+  the AI's request (ARCHITECTURE.md step 6), so the runner requests it through the evaluator's
+  request API on the simulation's own tree state (`TreeState::request`, the same landing as the end
+  of an update) before tick 0's sample, from `ambient_age`: `FullBodySlot`, the `AmbientIdle`
+  chain step's blend-in (0.2 s) and its group's blend-out (0.3 s), with `<sequence>_Face` on
+  `FaceSlot` and the face filter raised over 0.1 s when the sets have it (the capture's face; the
+  chain's `m_FaceAnimName` is empty, U-974). The original requested it four ticks before tick 0
+  (node 22 at weight 0.333 on tick 0), the port on tick 0, so the port's blend-in from the idle
+  loop runs to tick 11 (the original's to tick 7), from `SwordPatrol`'s `Sword_Patrol_Idle` where
+  the original's loop was `Empty_Idle`. Nothing is requested when the tree already plays it.
+- *Notify events.* `Sim:AnimNotify` details name the sequence and the notify's class
+  (`sequence=Sword_Attack_StepBackA notify=DishonoredNotify_AttackZone index=2 t0=..`), so an
+  event pattern can time a notify against the capture's node times.
 
 **NPC locomotion needs the level's navigation mesh.** On the Playground (built at +20000 in
 Boyle, no navmesh there) placed NPCs never move: alerted guards attack in place

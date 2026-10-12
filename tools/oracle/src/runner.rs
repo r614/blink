@@ -10,14 +10,17 @@
 //! counters, every named NPC (position, health, AI state, attention on the player, stance),
 //! plus ordered events: simulation events, Kismet activations, effects, sounds, animation
 //! inputs and projectile spawns / ends. Enumerated channels carry their legend in the unit
-//! (`enum:Idle,Patrol,...`).
+//! (`enum:Idle,Patrol,...`). The NPCs a spec records with `Bones` / `AnimState` also get their
+//! tree's node states and bones per tick (`port_anim`), beside the trace.
 
+use crate::port_anim;
 use crate::present::{FxLibrary, Presenter};
 use anyhow::{Context, Result, bail};
 use dishonored_content::MapContents;
 use dishonored_mission::{Behavior, Loadout, MarkerDef, MissionDef, NpcDef, NpcKind, ObjectiveDef, OriginalKismet, Place, TaskDef, TaskState};
 use dishonored_multiplayer::game::Game;
 use dishonored_multiplayer::mission::MissionMatch;
+use dishonored_oracle::anim::AnimTrack;
 use dishonored_oracle::scenario::{Button, Scenario};
 use dishonored_oracle::trace::{Trace, TraceEvent};
 use dishonored_sim::input::{LeftHand, PlayerInput, actions, buttons};
@@ -37,6 +40,8 @@ pub struct RunOut {
     /// Setup notes: what the port could not set up as specified (never silent).
     pub notes: Vec<String>,
     pub seconds: f64,
+    /// The recorded subjects' animation (`Bones` / `AnimState`), by subject.
+    pub anim: BTreeMap<String, AnimTrack>,
 }
 
 fn button_bits(b: &[Button]) -> u16 {
@@ -330,8 +335,9 @@ fn mm_mut(g: &mut Game) -> &mut MissionMatch {
     }
 }
 
-/// Play a scenario on the port and record its trace.
-pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOut> {
+/// Play a scenario on the port and record its trace; `captures` are the original's animation
+/// sidecars by subject (their fresh bones are the ones the port's poses are sampled for).
+pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>, captures: &BTreeMap<String, AnimTrack>) -> Result<RunOut> {
     let t0 = std::time::Instant::now();
     if s.tick_hz != 60 {
         bail!("{}: the port steps at a fixed 60 Hz (tick_hz {})", s.name, s.tick_hz);
@@ -507,6 +513,31 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
     }
     let name_of = |id: u32| by_id.get(&id).cloned().unwrap_or_else(|| format!("#{id}"));
 
+    // Animation records (`Bones` / `AnimState`): the recorded NPCs' trees sampled per tick.
+    let subjects = s.anim_subjects();
+    let profile = match subjects.is_empty() {
+        true => None,
+        false => port_anim::profile().map_err(|e| notes.push(format!("animation records: no NPC animation profile ({e}): not sampled"))).ok(),
+    };
+    let mut recorders: Vec<port_anim::Recorder> = Vec::new();
+    for subj in subjects.iter().filter(|_| profile.is_some()) {
+        match tracked.iter().find(|t| t.0.eq_ignore_ascii_case(subj)) {
+            Some((_, id)) => recorders.push(port_anim::Recorder::new(subj, *id, profile.unwrap(), captures.get(subj))),
+            None if subj.eq_ignore_ascii_case("player") => notes.push("animation records: the player's tree is not evaluated (its picker nodes, U-972): not sampled".into()),
+            None => notes.push(format!("animation records: `{subj}` is not one of the scenario's NPCs: not sampled")),
+        }
+    }
+    // The pinned ambient idles in the NPCs' trees: playing for `ambient_age` s at tick 0, so
+    // requested before tick 0's sample from that time (from 0 before the sample of the tick a
+    // negative age starts it at); a tree made by the first step takes it then, that much later.
+    let dt = 1.0 / s.tick_hz.max(1) as f32;
+    let mut pins: Vec<(PlayerId, String, u32, f32)> = Vec::new();
+    for (i, n) in s.setup.npcs.iter().enumerate() {
+        let (Some(seq), Some((_, id))) = (&n.ambient, tracked.iter().find(|t| t.0 == npc_names[i].0)) else { continue };
+        let at = if n.ambient_age >= 0.0 { 0 } else { (-n.ambient_age / dt).round() as u32 };
+        pins.push((*id, seq.clone(), at, n.ambient_age.max(0.0)));
+    }
+
     // Channels.
     let mut chans: Vec<(String, &str)> = Vec::new();
     for (c, u) in [
@@ -638,6 +669,10 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         let w = &mm(&game).world;
         present.frame(&out.events, w, dishonored_sim::left_hand::dark_vision_reveals(w, ME, &cfg.tuning), 1.0 / 60.0);
     }
+    land_pins(&mut game, cfg, &mut pins, 0, dt, &name_of, &mut notes);
+    for r in &mut recorders {
+        r.sample(0, &mm(&game).world, cfg, profile.unwrap(), captures.get(&r.subject));
+    }
     let first = sample(&game, &mut leg, &present);
     trace.push(0, first);
     let mut seen_proj: BTreeMap<u32, (String, f32)> = BTreeMap::new();
@@ -674,9 +709,16 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         let before = mm(&game).world.player(ME).map(|p| (p.yaw, p.pitch, p.left.dispersion));
         let input = PlayerInput { tick, forward: ti.forward, right: ti.right, yaw: ti.yaw, pitch: ti.pitch, buttons: button_bits(&ti.held), left_hand: hand, action, npc_move: 0 };
         let out = game.step(&[(ME, input)], &maps.set, cfg);
-        // Simulation events.
+        // Simulation events (a notify by its sequence's name and its class: the table's ids are
+        // the config's, not stable).
         for e in &out.events {
-            let (name, detail) = event_detail(e, &name_of);
+            let (name, detail) = match *e {
+                dishonored_sim::events::SimEvent::AnimNotify { pawn, sequence, notify, t0 } => {
+                    let class = cfg.anim.info(sequence).and_then(|i| i.notifies.get(notify as usize)).map_or("None", |n| n.class.as_str());
+                    ("AnimNotify".to_string(), format!("pawn={} sequence={} notify={class} index={notify} t0={t0}", name_of(pawn), cfg.anim.name(sequence).unwrap_or("None")))
+                }
+                _ => event_detail(e, &name_of),
+            };
             let object = detail.split_whitespace().next().and_then(|f| f.split_once('=')).map(|x| x.1.to_string()).unwrap_or_default();
             trace.events.push(TraceEvent { tick: tk, kind: "Sim".into(), object, name, detail });
         }
@@ -799,8 +841,15 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
         for pe in present.frame(&out.events, w, dishonored_sim::left_hand::dark_vision_reveals(w, ME, &cfg.tuning), 1.0 / 60.0) {
             trace.events.push(TraceEvent { tick: tk, kind: pe.kind.into(), object: if pe.object == 0 { String::new() } else { name_of(pe.object) }, name: pe.name, detail: pe.detail });
         }
+        land_pins(&mut game, cfg, &mut pins, tk, dt, &name_of, &mut notes);
+        for r in &mut recorders {
+            r.sample(tk, &mm(&game).world, cfg, profile.unwrap(), captures.get(&r.subject));
+        }
         let v = sample(&game, &mut leg, &present);
         trace.push(tk, v);
+    }
+    for (id, seq, _, _) in &pins {
+        notes.push(format!("{}: ambient idle {seq} not pinned (the NPC never had a tree: no install animation)", name_of(*id)));
     }
     if s.system == dishonored_oracle::scenario::System::Conversation {
         let st = &mm(&game).state;
@@ -811,7 +860,25 @@ pub fn run(s: &Scenario, maps: &MapContents, fx: Arc<FxLibrary>) -> Result<RunOu
             trace.channels[i].unit = format!("enum:{}", names.join(","));
         }
     }
-    Ok(RunOut { trace, notes, seconds: t0.elapsed().as_secs_f64() })
+    let anim = recorders.into_iter().map(|r| (r.subject, r.track)).collect();
+    Ok(RunOut { trace, notes, seconds: t0.elapsed().as_secs_f64(), anim })
+}
+
+/// The ambient pins whose tick has come, requested in the NPCs' trees
+/// (`port_anim::pin_ambient`); a pin waits while its NPC has no tree yet.
+fn land_pins(game: &mut Game, cfg: &dishonored_sim::SimConfig, pins: &mut Vec<(PlayerId, String, u32, f32)>, tick: u32, dt: f32, name_of: &dyn Fn(u32) -> String, notes: &mut Vec<String>) {
+    pins.retain(|(id, seq, at, start)| {
+        let w = &mut mm_mut(game).world;
+        if tick < *at || w.anim.get(id).and_then(|a| a.tree.as_ref()).is_none() {
+            return true;
+        }
+        let start = start + (tick - at) as f32 * dt;
+        match port_anim::pin_ambient(w, cfg, *id, seq, start) {
+            Some(d) => notes.push(format!("{}: ambient idle pinned in its tree before tick {tick}'s sample: {d}", name_of(*id))),
+            None => notes.push(format!("{}: ambient idle {seq} already playing in its tree at tick {tick}: not pinned", name_of(*id))),
+        }
+        false
+    });
 }
 
 /// The port's console hooks for `Action::Console`.
