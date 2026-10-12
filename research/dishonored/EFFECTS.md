@@ -176,6 +176,7 @@ holds the recipes, each citing its shaders):
 | Look_Up_Fire (grenade fire) | translucent | gradient lookup (APPROXIMATION: `Tex#0` x `lookup_color`) | smoothstep of `Diffuse.r` (APPROXIMATION: `Diffuse.r`) |
 | Volume_Light_translu | translucent | `Color` x a | `A_Alpha.r` x `Opacity` |
 | Glow_PMAT | additive | `G_GlowColor` | procedural `max(1 - 2r, 0)^G_GlowPower` |
+| test_look_up (36313 / 36315; the pistol muzzle's smoke) | additive | vertex red x lerp(`diffuse_color2`, `diffuse_color`, vertex green); vertex blue unused | `smoothstep(saturate((Diffuse[alpha_channel] - (1 - vertex alpha)) / vertex alpha))` |
 
 The blood squares: `Blood_Splash_INST` / `Blood_Spray*_INST` are SubUV_HeightMap materials with
 an opaque DXT1 `D_diffuse_texture`; the port alpha-tested that alpha, so every sprite passed as
@@ -187,6 +188,33 @@ the original's shape shrinks instead). Bases without a recipe that are transluce
 masked take the first conventional opacity parameter (`OPACITY_PARAMS`). Checks:
 `dishonored_assets` test `particle_material` (recipes) and retail
 `gameplay_particle_sprites_have_an_opacity` (no gameplay sprite keeps an opaque alpha).
+
+The pistol smoke's cyan cloud (2026-10-12): the first-person muzzle `Ps_PlayerPistol_StdMuzzle_01`
+has two smoke emitters, `fast_smoke` (burst 3, life 0.35..0.5 s, size 100..125 uu, x 0.08..2.8 over
+life) and `old_smoke` (burst 5, life 1.5..2.5 s, size 100..200 uu, x 0..2.6), both camera-facing
+additive sprites, unsorted, on `tguichard_test_test.smoke_look_up.smoky_lookup` (Startup; base
+`test_look_up`, `BLEND_Additive`, `alpha_channel` = G by `mic_static`, `Diffuse` =
+`Vfx_Smoke.Textures.FXT_Steam_01`, an opaque grey DXT1; `diffuse_color` (0.406, 0.408, 0.368),
+`diffuse_color2` (1, 0.838, 0.401); `lookup_color` and the switches `Enable_colored_lookup` /
+`Enable_Distortion` are set but no compiled permutation reads them). The base had no recipe, so the
+port drew the opaque steam texture additively times the particle colour. That colour is not a
+colour: its ColorOverLife runs (0, 0, 1) -> (1, 0, 1) -> (0.4, 0.97, 1) -> (0, 1, 1) with the
+alpha 1 -> 0 (red the glow's strength, green the lookup position, blue a constant 1 the shader
+never reads), so the sprites turned cyan (G = B = 1, R -> 0) and, 200..560 uu wide at the gun,
+filled the screen for the old smoke's 2 s. The base's two shader maps (`shader_maps ...
+test_look_up`: particle vertex factory 36313 for `alpha_channel` R, 36315 for G; 36314 / 36316
+the static-mesh twins; uniforms `SelectionColor`, `diffuse_color2` (c6), `diffuse_color` (c7),
+`Texture2D_0` = `Diffuse`) compute, with v1 the particle colour (vertex shader 1 passes
+`TEXCOORD1` through, as for the other bases): `t = saturate((H - (1 - v1.w)) / v1.w)`,
+`rgb = t^2 (3 - 2t) x v1.r x lerp(c6, c7, v1.g)`, alpha 0. Now the recipe bakes `Diffuse[G]` as
+the sprite's alpha, the sprite shader takes the look-up smoothstep without the vertex-alpha factor
+(`ParticleShading::erode_bare`, `particle_soft.wgsl` soft.w) and the sprite builder turns the
+particle colour into `R x lerp(diffuse_color2, diffuse_color, G)` (`ParticleShading::vertex_lerp`,
+`effects::lookup_colour`). The smoke is now a short warm glow at the muzzle fading to a faint grey
+haze (red < 0.05 after a third of its life). Its only users in the gameplay set are these two
+emitters (the level script packages that name `smoky_lookup` cook the same muzzle). CONFIRMED from
+the disassembly; mesh emitters on the base (36314 / 36316) are not in the data and the mesh path
+does not apply the lookup.
 
 Particles without a Lifetime module live until their emitter is destroyed; an emitter that has
 played its `EmitterLoops` is destroyed with them (the pistol muzzle's five sprite emitters

@@ -106,8 +106,7 @@ Reported from play testing, not yet fixed:
 - **Effects**:
   - blood renders black;
   - the camera's lens blood renders as white blobs;
-  - particles start early or late against their events and stay too long;
-  - the first-person pistol's muzzle smoke (now drawn at the gun) renders as a large cyan cloud.
+  - particles start early or late against their events and stay too long.
 - **Audio**:
   - throwing a grenade plays a gunshot;
   - combat sounds are out of sync with their events;
