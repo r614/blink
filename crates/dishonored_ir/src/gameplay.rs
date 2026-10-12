@@ -868,6 +868,10 @@ pub struct NpcAnimConfig {
     /// The NPC master state machine's transition logic (`dishonored_sim::pawn_states`).
     #[serde(default)]
     pub fsm: crate::npc_anim::NpcFsm,
+    /// The tree's locomotion node (`dishonored_sim::npc_loco`: the start, stop and turn
+    /// sequences' blends, the move loops' phase).
+    #[serde(default)]
+    pub loco_node: crate::npc_anim::LocoNode,
 }
 
 impl GameplayConfig {

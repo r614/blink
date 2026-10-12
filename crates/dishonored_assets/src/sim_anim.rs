@@ -272,5 +272,38 @@ pub fn load_npc_anim(content: &Content, prov: &mut BTreeMap<String, String>) -> 
     prov.insert("npc_anim".into(), format!("{NPC_TWEAK}: m_pAnimDefClass {}, m_AnimSets {sets:?}, m_ItemPrefix {:?} / empty hands {:?}", profile.defs, profile.item_prefix, profile.empty_prefix));
     let fsm = load_npc_fsm(content)?;
     prov.insert("npc_anim.fsm".into(), format!("DishonoredGame.upk Default__DishonoredNPCPawn.MasterFSM.pMasterFSMTransitionLogic: {} rows, {} class parents", fsm.transitions.len(), fsm.parents.len()));
-    Ok(NpcAnimConfig { defs, sets, item_prefix: profile.item_prefix.clone(), empty_prefix: profile.empty_prefix.clone(), fsm })
+    let loco_node = load_loco_node(content)?;
+    prov.insert("npc_anim.loco_node".into(), format!("Startup.upk Npc_Common_at.NPC_Human_at.ArkAnimNodeLocomotion_0 over Engine.upk Default__ArkAnimNodeLocomotion: {loco_node:?}"));
+    Ok(NpcAnimConfig { defs, sets, item_prefix: profile.item_prefix.clone(), empty_prefix: profile.empty_prefix.clone(), fsm, loco_node })
+}
+
+/// The NPC tree's locomotion node tunables (`NPC_Human_at`'s node over the class defaults); every
+/// one must be found.
+pub fn load_loco_node(content: &Content) -> Result<dishonored_ir::npc_anim::LocoNode> {
+    const NAMES: [&str; 10] = [
+        "m_fVelocityMaxBlendSpeed",
+        "m_fVelocityMaxDif",
+        "m_fVelocityMinBlendSpeedRatio",
+        "m_fModifierBlendDuration",
+        "m_fSpeedMultiplier",
+        "m_fTurnFastBlendDuration",
+        "m_fTurnSlowBlendDuration",
+        "m_fStartBlendDuration",
+        "m_fStopBlendDuration",
+        "m_fTransitionBlendDuration",
+    ];
+    let f = crate::npc_anim::loco_node_floats(content, &NAMES);
+    let v = |k: usize| f[k].with_context(|| format!("ArkAnimNodeLocomotion.{} not found", NAMES[k]));
+    Ok(dishonored_ir::npc_anim::LocoNode {
+        velocity_rate: v(0)?,
+        velocity_range: v(1)?,
+        velocity_min_ratio: v(2)?,
+        modifier_blend: v(3)?,
+        speed_multiplier: v(4)?,
+        turn_fast_blend: v(5)?,
+        turn_slow_blend: v(6)?,
+        start_blend: v(7)?,
+        stop_blend: v(8)?,
+        transition_blend: v(9)?,
+    })
 }

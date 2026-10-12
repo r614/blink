@@ -231,6 +231,27 @@ pub struct LocoAnimProp {
     pub straight_dist: f32,
 }
 
+/// The NPC tree's locomotion node (`ArkAnimNodeLocomotion`, `NPC_Human_at`'s `LocoBlender` over
+/// `Engine.Default__ArkAnimNodeLocomotion`): the velocity smoothing (`m_fVelocityMaxBlendSpeed`
+/// +0x298, `m_fVelocityMaxDif` +0x29C, `m_fVelocityMinBlendSpeedRatio` +0x2A0), the modifier
+/// crossfade (`m_fModifierBlendDuration` +0x27C), the node's `m_fSpeedMultiplier`, and the blend
+/// times of the "Specific anim" child the locomotion component requests (`m_fTurnFastBlendDuration`
+/// +0x284, `m_fTurnSlowBlendDuration` +0x288, `m_fStartBlendDuration` +0x28C,
+/// `m_fStopBlendDuration` +0x290, `m_fTransitionBlendDuration`).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct LocoNode {
+    pub velocity_rate: f32,
+    pub velocity_range: f32,
+    pub velocity_min_ratio: f32,
+    pub modifier_blend: f32,
+    pub speed_multiplier: f32,
+    pub turn_fast_blend: f32,
+    pub turn_slow_blend: f32,
+    pub start_blend: f32,
+    pub stop_blend: f32,
+    pub transition_blend: f32,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct LocoConfig {
     pub name: String,
