@@ -461,12 +461,22 @@ pub enum HudTest {
         #[serde(default)]
         text: Option<String>,
     },
-    /// Show / close a choice menu; `select` moves the highlight.
+    /// Show / close a choice menu; `select` moves the highlight; `key` ("up", "down", "a") is a
+    /// key of the movie's `InputsManager`; `pointer` (stage pixels) moves the mouse there and
+    /// `click` presses and releases its left button; `gamepad` sets `_global.bUsingGamepad`.
     Choice {
         #[serde(default)]
         options: Option<Vec<String>>,
         #[serde(default)]
         select: Option<usize>,
+        #[serde(default)]
+        key: Option<String>,
+        #[serde(default)]
+        pointer: Option<[f32; 2]>,
+        #[serde(default)]
+        click: bool,
+        #[serde(default)]
+        gamepad: Option<bool>,
     },
     /// Show / clear the crosshair interactions window.
     Interaction {
@@ -570,15 +580,35 @@ pub fn apply_test(t: HudTest, q: &mut PopupQueue, w: &mut HudWidgets, st: &mut S
                 s.set_subtitles(st, text.as_deref());
             }
         }
-        HudTest::Choice { options, select } => {
+        HudTest::Choice { options, select, key, pointer, click, gamepad } => {
             if let Some(c) = w.choice.as_mut() {
+                if let Some(g) = gamepad {
+                    c.using_gamepad = g;
+                }
+                let input = select.is_some() || key.is_some() || pointer.is_some() || click || gamepad.is_some();
                 if let Some(o) = &options {
                     c.set_menu(st, &mut w.sounds, Some(o.as_slice()), None);
-                } else if select.is_none() {
+                } else if !input {
                     c.set_menu(st, &mut w.sounds, None, None);
                 }
                 if let Some(i) = select {
                     c.select(st, i);
+                }
+                let k = match key.as_deref() {
+                    Some("up") => Some(crate::hud_widgets::ChoiceKey::Up),
+                    Some("down") => Some(crate::hud_widgets::ChoiceKey::Down),
+                    Some("a") => Some(crate::hud_widgets::ChoiceKey::A),
+                    _ => None,
+                };
+                if let Some(k) = k {
+                    c.key(st, &mut w.sounds, k);
+                }
+                let p = pointer.map(|p| bevy::math::Vec2::new(p[0], p[1]));
+                if p.is_some() || click {
+                    c.mouse(st, &mut w.sounds, p, p.is_some(), click, false);
+                }
+                if click {
+                    c.mouse(st, &mut w.sounds, p, false, false, true);
                 }
             }
         }

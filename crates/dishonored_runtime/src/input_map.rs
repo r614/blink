@@ -25,7 +25,8 @@ pub struct LocalInput {
     /// When set (harness script / control socket), replaces keyboard input.
     pub override_input: Option<PlayerInput>,
     pub enabled: bool,
-    /// A dialog choice is open for the local player: number keys pick options instead of powers.
+    /// A dialog choice is open for the local player (the HUD movie has the arrows, Enter and the
+    /// mouse; the number keys do not open the shortcut dock).
     pub choice_open: bool,
     /// One-shot item action (`dishonored_sim::input::actions`) latched until the next tick.
     pub action: u8,
@@ -125,16 +126,10 @@ pub fn gather_input(
     } else if bind.just_pressed("GBA_ManaElixir", &keys, &mouse, wheel) {
         local.action = dishonored_sim::input::actions::DRINK_MANA;
     }
-    if local.choice_open {
-        for (k, b) in [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4].into_iter().zip(buttons::CHOICES) {
-            if keys.just_pressed(k) {
-                local.latched |= b;
-            }
-        }
-        return;
-    }
-    // The number keys and the mouse wheel select items through the shortcut dock
-    // (`hud_wheel.rs`): it equips the slot's item when the key is released.
+    // A dialog choice is picked on the HUD movie (`hud_dialogue.rs`: the arrows and Enter, the
+    // mouse), which sends the CHOICE button once it confirms. The number keys and the mouse
+    // wheel select items through the shortcut dock (`hud_wheel.rs`): it equips the slot's item
+    // when the key is released.
 }
 
 fn is_mouse(b: &crate::settings::Bindings, action: &str) -> bool {

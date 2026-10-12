@@ -1,0 +1,20 @@
+{"steps":[
+  {"wait_ticks": 240},
+  {"ticks": 30, "input": {"yaw": 90, "pitch": 0, "left_hand": "Empty"}},
+  {"hud": {"kind": "choice", "options": ["Ask about the party", "Ask about the sisters", "Leave"]}},
+  {"wait_ticks": 24}, {"screenshot": "hud_choice_00_open"},
+  {"hud": {"kind": "choice", "key": "up"}},
+  {"hud": {"kind": "choice", "key": "down"}},
+  {"wait_ticks": 18}, {"screenshot": "hud_choice_01_key_down"},
+  {"hud": {"kind": "choice", "pointer": [613, 513]}},
+  {"wait_ticks": 18}, {"screenshot": "hud_choice_02_mouse_over"},
+  {"hud": {"kind": "choice", "gamepad": true, "key": "down"}},
+  {"wait_ticks": 18}, {"screenshot": "hud_choice_03_gamepad_glyph"},
+  {"hud": {"kind": "choice", "gamepad": false}},
+  {"hud": {"kind": "choice", "pointer": [547, 585], "click": true}},
+  {"wait_ticks": 3}, {"screenshot": "hud_choice_04_click_valid"},
+  {"wait_ticks": 12},
+  {"hud": {"kind": "choice"}},
+  {"wait_ticks": 20}, {"screenshot": "hud_choice_05_closed"},
+  {"quit": true}
+]}

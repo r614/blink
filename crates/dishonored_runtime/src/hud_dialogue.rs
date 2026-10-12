@@ -9,14 +9,22 @@
 //!   builds `hud_plC_button`s bottom-up (`_offsetBtnY` 2.5), opens them one every 50 ms
 //!   (`Back.easeOut` 0.35 s to `_btnOutProps`), highlights the selection (`_btnOverProps`,
 //!   0.25 s); confirming plays `valid` and `Validation` and reports the choice 150 ms later;
-//!   closing folds the buttons one every 50 ms. The PC movie selects with the mouse; the port
-//!   picks with the choice keys (1-4), which highlight and confirm.
+//!   closing folds the buttons one every 50 ms. Opening gives the movie the focus
+//!   (`bAllowFocus`, 0x00B9F390; closing 0x00B8D260 takes it back), so its `InputsManager`
+//!   gets the keys: Up / Down move the selection (`Stop` at the ends), Enter confirms; the
+//!   number keys are its "DockBar" input, which the menu never takes. The mouse selects the
+//!   button it enters (`btn.onRollOver`) and confirms on a click (`onRelease`). On PC the
+//!   selected button's A glyph (`_a_mc`) shows only while `_global.bUsingGamepad`
+//!   ([`crate::hud_widgets::choice_a_icon_visible`]).
 //!
 //! Lines come from `MissionView.dialogue` and choices from `MissionView.choices` (shared with
 //! the travel-door confirmations), so online clients and replays show what the server decided.
 
 use crate::session::SessionView;
+use bevy::input::ButtonState;
+use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
+use dishonored_sim::input::buttons;
 
 pub struct DialoguePlugin;
 
@@ -91,8 +99,26 @@ pub fn current_line<'a>(view: &SessionView, mv: &'a MissionView) -> Option<&'a D
     pick(true).or_else(|| pick(false))
 }
 
+/// The mouse as the choice menu last saw it.
+#[derive(Default)]
+pub struct ChoiceMouse {
+    /// Last cursor position (window pixels).
+    at: Option<Vec2>,
+    /// The mission's choice last given to the menu (a harness menu stays until it changes).
+    shown: Option<Vec<String>>,
+}
+
 /// Feed the subtitle and the choice menu to their HUD widgets.
-pub fn update_dialogue_hud(view: Res<SessionView>, keys: Res<ButtonInput<KeyCode>>, local: Res<crate::input_map::LocalInput>, mut hud: ResMut<crate::gfx_hud::GfxHud>) {
+#[allow(clippy::too_many_arguments)]
+pub fn update_dialogue_hud(
+    view: Res<SessionView>,
+    mut typed: MessageReader<KeyboardInput>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut local: ResMut<crate::input_map::LocalInput>,
+    mut hud: ResMut<crate::gfx_hud::GfxHud>,
+    mut last: Local<ChoiceMouse>,
+) {
     let Some(m) = hud.hud.as_mut() else { return };
     let (st, w) = (&mut m.stage, &mut m.w);
     let mv = view.matchv.mission.as_ref();
@@ -105,17 +131,40 @@ pub fn update_dialogue_hud(view: Res<SessionView>, keys: Res<ButtonInput<KeyCode
     if let Some(s) = w.subtitles.as_mut() {
         s.set_subtitles(st, line.as_deref());
     }
-    if let Some(c) = w.choice.as_mut() {
-        let opts: Option<Vec<String>> = choice.map(|o| o.iter().take(4).map(|s| s.trim().to_string()).collect());
+    let keys: Vec<KeyboardInput> = typed.read().cloned().collect();
+    let Some(c) = w.choice.as_mut() else { return };
+    let opts: Option<Vec<String>> = choice.map(|o| o.iter().take(4).map(|s| s.trim().to_string()).collect());
+    if opts != last.shown {
         c.set_menu(st, &mut w.sounds, opts.as_deref(), None);
-        // The choice keys pick: highlight, then confirm (the selection itself goes to the
-        // simulation through the input map's CHOICE buttons).
-        if opts.is_some() && local.enabled {
-            for (i, k) in [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4].iter().enumerate() {
-                if keys.just_pressed(*k) {
-                    c.confirm(st, &mut w.sounds, i);
-                }
-            }
+        last.shown = opts;
+    }
+    // `OnPlayerChoiceConfirm(sel._curSelection)` (ExternalInterface, 150 ms after the press):
+    // the choice goes to the simulation as the CHOICE button of that index.
+    if let Some(i) = c.confirmed.take()
+        && let Some(b) = buttons::CHOICES.get(i)
+    {
+        local.latched |= b;
+    }
+    // While the choice is open (`SetMovieCanReceiveFocus`, 0x00B9F390) the HUD movie takes the
+    // keyboard through its `InputsManager` (`choice_key`) and the mouse over its buttons.
+    if c.options.is_none() || !local.enabled || local.override_input.is_some() {
+        last.at = None;
+        return;
+    }
+    for k in keys.iter().filter(|k| k.state == ButtonState::Pressed) {
+        if let Some(ck) = crate::hud_widgets::choice_key(k.key_code, k.repeat) {
+            c.key(st, &mut w.sounds, ck);
         }
     }
+    // The engine's mouse position is the window cursor's (FViewport::GetMousePos), hidden and
+    // confined to the window while the game has the mouse.
+    let cursor = windows.iter().next().and_then(|win| win.cursor_position().map(|p| (p, Vec2::new(win.width(), win.height()))));
+    let at = cursor.map(|c| c.0);
+    let moved = at.is_some() && at != last.at;
+    last.at = at;
+    let stage = cursor.map(|(p, size)| {
+        let (s, off) = crate::gfx_stage::stage_xform(size);
+        (p - off) / s
+    });
+    c.mouse(st, &mut w.sounds, stage, moved, mouse.just_pressed(MouseButton::Left), mouse.just_released(MouseButton::Left));
 }
