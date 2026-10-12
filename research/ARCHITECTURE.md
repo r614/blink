@@ -126,7 +126,27 @@ as events (`Effect` / `EffectEnd` ticks); the player's tree (U-972) is not sampl
    for every NPC and timed swings for the special classes (U-978); the runtime's pickers still
    draw (step 7).
 6. Pawn states and item contexts as one subsystem; the AI requests through them.
-7. The runtime's pickers deleted as the generic path covers each case.
+7. The runtime's pickers deleted as the generic path covers each case. **Done 2026-10-11**
+   (LOG.md): the runtime draws `WorldState::anim` (`SessionView::anim`) and plays
+   `SimEvent::AnimNotify`. Third person: every NPC is posed from its simulation `TreeState` with
+   `dishonored_anim` (`npc_anim::pose_tree`: the tree's shape per part of the pawn's model, the
+   pawn tweak's sets as the evaluator's clips over the `AnimBank`), the AI's look-at aims and the
+   matinee's `MatineeStackNode` channels set on a copy (`TreeState::present`), FaceFX on the
+   output; a pawn without a tree (a human player's body) stands in `NPC_Human_at` as cooked.
+   First person: the rig poses the simulation's full-body / upper-body / left-arm layers (and the
+   crossbow mesh's) through the decoded filters, each layer weighted from its own playhead and
+   the requesting state's blend time (`SeqPlay::blend`); with nothing on the full body the rig
+   stands in `Sword_Ready_Idle`'s first frame. Notifies: `anim_notify` resolves each event through
+   the sequence table (sounds, footfalls, the local lens effects; particles, drops, severs and the
+   ragdoll hand-over on the drawn mesh); trails read the simulation's open `DisNotify_Trails`
+   windows; the NPC feet are the tree's `m_bFootOnGround` (`TreeState::feet_on_ground`). Deleted:
+   `npc_anim::animate` and its chains, `present_rules::collect_hits` / `HitKind`, the runtime's
+   notify tables (`SetData::notifies`, `crossing`, the rig's particle / lens / trail tables), the
+   viewmodel's pickers (`full_body`, `upper_body`, `left_arm`, the transitions, `SWING_TAIL`) and
+   every animation clock (the `Local<u64>` tick accumulators, `AnimInput::dt`; the ragdoll steps
+   by the simulation's ticks). What the simulation does not request yet is not drawn (LOG.md:
+   the player's navigation and most of its states, the NPCs' hit reactions, blocks, stuns,
+   ambient idles, blinks, slaves and get-ups); waits on step 6.
 
 Two cautions: take the tick order from the exe, not from design (done for pawns, controllers and
 animation in [`tick_order.md`](dishonored/systems/tick_order.md); its open items are the components' tick groups
