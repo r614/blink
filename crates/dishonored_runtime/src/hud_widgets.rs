@@ -2120,6 +2120,46 @@ pub struct PlayerChoice {
     interval_close: Option<u32>,
     /// Confirmed choice waiting for `OnPlayerChoiceConfirm` (150 ms after the press).
     pub confirmed: Option<usize>,
+    /// `_global.bUsingGamepad`: the native copies `PlayerInput.bUsingGamepad` (the last input
+    /// device) into the movie whenever it changes (0x00B941F0, HUD vtable +0x1E8, the getter
+    /// 0x00B8C6E0). The port reads no gamepad: false.
+    pub using_gamepad: bool,
+    /// `_root.inputs.InputsEnabled` with the selection handler's `_handlerEnabledState`: on from
+    /// `InitInputs` (`SetMenu`), off from `RemoveInputs` (`APressed`, `Confirm`, `Close`).
+    inputs: bool,
+    /// The button the mouse is over: a button's `btn.onRollOver` fires as the mouse enters it.
+    hover: Option<usize>,
+    /// The button the mouse went down on: `btn.onRelease` fires for a release over it.
+    press: Option<usize>,
+}
+
+/// `PlayerChoice.playSelectionOn`: on PC (`_global.PlatformName == "PC"`) the selected
+/// button's `_a_mc` is forced to the Xenon glyph and shown only while `_global.bUsingGamepad`;
+/// on the consoles it is always shown. The PC movie has no keyboard glyph for the choices.
+pub fn choice_a_icon_visible(platform_pc: bool, using_gamepad: bool) -> bool {
+    !platform_pc || using_gamepad
+}
+
+/// What the HUD movie's `_common.InputsManager` makes of a key (`InputManager`, Flash key codes
+/// as the native forwards them while the movie has focus): Up (38) / Down (40) are the "up" /
+/// "down" inputs, held keys repeating (`holdEnabled`); Enter (13) is "A", once per press. The
+/// number keys (48-57) are "DockBar", which `PlayerChoice` never takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChoiceKey {
+    Up,
+    Down,
+    A,
+}
+
+pub fn choice_key(key: bevy::input::keyboard::KeyCode, repeat: bool) -> Option<ChoiceKey> {
+    use bevy::input::keyboard::KeyCode;
+    match key {
+        KeyCode::ArrowUp => Some(ChoiceKey::Up),
+        KeyCode::ArrowDown => Some(ChoiceKey::Down),
+        // Windows reports both Enter keys as VK_RETURN, the engine's `Enter`.
+        KeyCode::Enter | KeyCode::NumpadEnter if !repeat => Some(ChoiceKey::A),
+        _ => None,
+    }
 }
 
 /// `_btnOutProps` / `_btnOverProps` (alpha, x, xscale, yscale; the 3D `_z` / `_yrotation` of
@@ -2143,7 +2183,7 @@ impl PlayerChoice {
         // `_xscale = _yscale = 95`.
         st.set(mc, Prop::XScale, 95.0);
         st.set(mc, Prop::YScale, 95.0);
-        Self { mc, title, indic, title_props, container: None, buttons: Vec::new(), selection: 0, options: None, interval_open: None, interval_close: None, confirmed: None }
+        Self { mc, title, indic, title_props, container: None, buttons: Vec::new(), selection: 0, options: None, interval_open: None, interval_close: None, confirmed: None, using_gamepad: false, inputs: false, hover: None, press: None }
     }
 
     /// `SetMenu(menuContent | null, menuTitle)`.
@@ -2180,10 +2220,6 @@ impl PlayerChoice {
             st.set(b, Prop::X, 0.0);
             st.set(b, Prop::Y, i as f32 * (h + BTN_OFFSET_Y));
             st.set(b, Prop::Alpha, 0.0);
-            // PC: the `_a_mc` key icon is shown.
-            if let Some(a) = st.child(b, "_a_mc") {
-                st.set_visible(a, true);
-            }
             self.buttons.push(b);
         }
         // Bottom / left alignment.
@@ -2224,6 +2260,11 @@ impl PlayerChoice {
         self.selection = 0;
         self.open(st);
         self.play_selection_on(st, 0);
+        // `InitInputs`: "A" and the menu's `_inputsList` ("up", "down") go to this menu.
+        self.inputs = true;
+        self.hover = None;
+        self.press = None;
+        self.confirmed = None;
     }
 
     fn open(&mut self, st: &mut Stage) {
@@ -2259,8 +2300,118 @@ impl PlayerChoice {
         self.play_selection_on(st, idx);
     }
 
+    /// `UpPressed` -> `SelectionHandler.UpPressed`: the button above with `Move`; at the first
+    /// one `Stop` (`_bSelectionLoop` is never set for the choices).
+    pub fn up_pressed(&mut self, st: &mut Stage, snd: &mut SoundQueue) {
+        if !self.inputs {
+            return;
+        }
+        if self.selection > 0 {
+            self.select(st, self.selection - 1);
+            snd.0.push("Move");
+        } else {
+            snd.0.push("Stop");
+        }
+    }
+
+    /// `DownPressed` -> `SelectionHandler.DownPressed`: the button below with `Move`; at the
+    /// last one `Stop`.
+    pub fn down_pressed(&mut self, st: &mut Stage, snd: &mut SoundQueue) {
+        if !self.inputs {
+            return;
+        }
+        if self.selection + 1 < self.buttons.len() {
+            self.select(st, self.selection + 1);
+            snd.0.push("Move");
+        } else {
+            snd.0.push("Stop");
+        }
+    }
+
+    /// The "A" input (`InputsManager` -> `APressed`): confirm the selection.
+    pub fn a_pressed(&mut self, st: &mut Stage, snd: &mut SoundQueue) {
+        if self.inputs {
+            self.confirm(st, snd, self.selection);
+        }
+    }
+
+    pub fn key(&mut self, st: &mut Stage, snd: &mut SoundQueue, k: ChoiceKey) {
+        match k {
+            ChoiceKey::Up => self.up_pressed(st, snd),
+            ChoiceKey::Down => self.down_pressed(st, snd),
+            ChoiceKey::A => self.a_pressed(st, snd),
+        }
+    }
+
+    /// The button whose `btn` hit area holds `p` (stage pixels). `btn` is a DefineButton2 (91:
+    /// its hit state the 62 x 62 shape 90, placed at x 5.53, y 0.65 from (-40.9, -17.85) in
+    /// `hud_plC_button`); the hit test is the hit records' bounds through the stage transforms.
+    pub fn button_at(&self, st: &Stage, p: bevy::math::Vec2) -> Option<usize> {
+        self.buttons.iter().position(|&b| {
+            let Some(hit) = st.child(b, "btn") else { return false };
+            if !st.visible(b) || !st.visible(hit) {
+                return false;
+            }
+            let Some(n) = st.node(hit) else { return false };
+            let Some(mv) = st.movies.get(n.src).map(|m| &m.movie) else { return false };
+            let Some(recs) = mv.buttons.get(&n.character) else { return false };
+            let world = st.world_matrix(hit);
+            recs.iter().filter(|r| r.states & 8 != 0).any(|r| {
+                let Some(sh) = mv.shapes.get(&r.character) else { return false };
+                let m = world.mul(&r.matrix);
+                let c = [(sh.bounds.xmin, sh.bounds.ymin), (sh.bounds.xmax, sh.bounds.ymin), (sh.bounds.xmax, sh.bounds.ymax), (sh.bounds.xmin, sh.bounds.ymax)].map(|(x, y)| m.apply(x, y));
+                let (x0, x1) = c.iter().fold((f32::MAX, f32::MIN), |a, q| (a.0.min(q.0), a.1.max(q.0)));
+                let (y0, y1) = c.iter().fold((f32::MAX, f32::MIN), |a, q| (a.0.min(q.1), a.1.max(q.1)));
+                (x0..=x1).contains(&(p.x * 20.0)) && (y0..=y1).contains(&(p.y * 20.0))
+            })
+        })
+    }
+
+    /// The mouse (stage pixels; None off the stage): the movie gets a move when the position
+    /// changed (the GFx engine's mouse event, 0x00974F80) and the left button's press / release.
+    /// Entering a button runs `SelectionHandler.RollOver` (the selection with `Move`), a release
+    /// over the button it went down on runs `Click` (the selection, then the "A" input's
+    /// `APressed`).
+    pub fn mouse(&mut self, st: &mut Stage, snd: &mut SoundQueue, p: Option<bevy::math::Vec2>, moved: bool, down: bool, up: bool) {
+        let at = p.and_then(|p| self.button_at(st, p));
+        if moved && at != self.hover {
+            self.hover = at;
+            if let Some(i) = at {
+                self.roll_over(st, snd, i);
+            }
+        }
+        if down {
+            self.press = at;
+        }
+        if up {
+            if let Some(i) = self.press.take().filter(|&i| at == Some(i)) {
+                self.click(st, snd, i);
+            }
+        }
+    }
+
+    /// `SelectionHandler.RollOver`.
+    pub fn roll_over(&mut self, st: &mut Stage, snd: &mut SoundQueue, idx: usize) {
+        if idx != self.selection && idx < self.buttons.len() && self.inputs {
+            self.select(st, idx);
+            snd.0.push("Move");
+        }
+    }
+
+    /// `SelectionHandler.Click`: select (no sound), then the "A" input's target `APressed`.
+    pub fn click(&mut self, st: &mut Stage, snd: &mut SoundQueue, idx: usize) {
+        if !self.inputs || idx >= self.buttons.len() {
+            return;
+        }
+        self.select(st, idx);
+        self.a_pressed(st, snd);
+    }
+
     fn play_selection_on(&mut self, st: &mut Stage, idx: usize) {
         let Some(b) = self.buttons.get(idx).copied() else { return };
+        if let Some(a) = st.child(b, "_a_mc") {
+            st.set_visible(a, choice_a_icon_visible(true, self.using_gamepad));
+        }
         st.tween_end(b, false);
         st.tween_to(b, 0.25, &BTN_OVER, Ease::StrongOut, None);
         st.goto_and_play(b, "over");
@@ -2282,12 +2433,13 @@ impl PlayerChoice {
         st.goto_and_play(b, "out");
     }
 
-    /// `APressed` -> `Confirm`: the button plays `valid`, `Validation` sounds, and 150 ms later
-    /// `OnPlayerChoiceConfirm` reports the choice.
+    /// `APressed` -> `Confirm`: the inputs go (`RemoveInputs`), the button plays `valid`,
+    /// `Validation` sounds, and 150 ms later `OnPlayerChoiceConfirm` reports the choice.
     pub fn confirm(&mut self, st: &mut Stage, snd: &mut SoundQueue, idx: usize) {
         if idx >= self.buttons.len() {
             return;
         }
+        self.inputs = false;
         if idx != self.selection {
             self.select(st, idx);
         }
@@ -2299,6 +2451,7 @@ impl PlayerChoice {
     }
 
     pub fn close(&mut self, st: &mut Stage) {
+        self.inputs = false;
         clear(st, &mut self.interval_open);
         clear(st, &mut self.interval_close);
         if self.buttons.is_empty() {

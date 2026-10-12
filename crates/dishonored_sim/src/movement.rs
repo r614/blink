@@ -1214,6 +1214,45 @@ pub fn start_throw(p: &mut PlayerState, momentum: Vec3, th: &dishonored_ir::game
     }
 }
 
+/// The throw start of a requested `StateNPCMasterThrown` (0x00A81860, from the state's enter
+/// 0x00A86B90 once its chain plays): the pawn turns to face against the (clamped) momentum,
+/// plus 90 (`m_ThrowDirection` 1), -90 (2) or 180 degrees (3) of yaw (`+0x4000`, `-0x4000`,
+/// `+0x8000` on the rotator of `-momentum`); the velocity is `momentum /
+/// m_fEffectiveMassForThrowing` (0x00BEB6E0), `AirSpeed` its length, `PHYS_Flying`, until the
+/// throw sequence's `DishonoredNotify_Ragdoll` (`ragdoll_at`, read when no sequence plays). The
+/// pistol's and the grenade's knock-down (`crate::pawn_states::request_knockdown`).
+pub fn start_requested_throw(p: &mut PlayerState, momentum: Vec3, direction: u8, ragdoll_at: f32, by_notify: bool, th: &dishonored_ir::gameplay::ThrowConfig) {
+    let back = Vec2::new(-momentum.x, -momentum.y);
+    if back.length_squared() >= 1e-8 {
+        let turn = match direction {
+            1 => 90.0,
+            2 => -90.0,
+            3 => 180.0,
+            _ => 0.0,
+        };
+        p.yaw = (back.y.atan2(back.x).to_degrees() + turn).rem_euclid(360.0);
+    }
+    let v = momentum / th.effective_mass;
+    p.velocity = v;
+    p.mode = MoveMode::Falling;
+    p.fall_time = 0.0;
+    p.jump.active = false;
+    p.slide.active = false;
+    p.thrown = crate::state::ThrownState {
+        active: true,
+        time: 0.0,
+        ragdoll_at,
+        air_speed: v.length(),
+        friction: th.fluid_friction * 0.5,
+        ragdoll: false,
+        rest_timer: THROW_REST_TEST_DELAY,
+        prev_scale: 0.0,
+        by_notify,
+        direction,
+        getup: 0,
+    };
+}
+
 /// `m_fBodyAtRestTestTimer` as the throw state's enter sets it (0x00A9FAA0: 0.5, a constant of
 /// the code).
 pub const THROW_REST_TEST_DELAY: f32 = 0.5;

@@ -153,8 +153,9 @@ as events (`Effect` / `EffectEnd` ticks); the player's tree (U-972) is not sampl
    the face slot and its filter, the blinks; the player's states' sequences on its layers
    (`dishonored_sim::player_anim`: the navigation trees' decoded speed blends, the full-body
    states, the block, the transitions' one-shots, the left hand's aims, casts and navigation, the
-   step-up's head) and a human player's third-person body. Stays: the pistol's and the grenade's
-   Knockdown, the NPC block and the defender's parry (U-987), the minigames (U-893), the body
+   step-up's head) and a human player's third-person body. Since 2026-10-12 also the pistol's and the grenade's
+   Knockdown (a requested `StateNPCMasterThrown`) and the NPC's parry context (AwaitingParry, the
+   neutral clash). Stays: the parry context's AI choice and the versus (U-987), the minigames (U-893), the body
    stances (U-892), the stand-ins of U-985; the choke's gameplay timing (U-101).
 7. The runtime's pickers deleted as the generic path covers each case. **Done 2026-10-11**
    (LOG.md): the runtime draws `WorldState::anim` (`SessionView::anim`) and plays

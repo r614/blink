@@ -282,6 +282,20 @@ pub struct PawnStates {
     /// `StateNPCMasterAim`'s sub-state (+0x68, [`aim`]).
     #[serde(default)]
     pub aim: u8,
+    /// The pending `StateNPCMasterThrown` request's momentum and the point its zero momentum is
+    /// taken away from ([`ThrowParams`]); its group and `m_ThrowDirection` are the request's.
+    #[serde(default)]
+    pub throw: Option<ThrowParams>,
+}
+
+/// A `StateNPCMasterThrown` request's parameters (the request object 0x00A86B00 copied into the
+/// state by 0x00A81740 when its momentum is no smaller than the state's): `m_vMomentum` (+0x70),
+/// and the point the state's enter pushes a zero momentum away from (0x00B6E160 on the pawn's
+/// last hit, +0x8CC: the damage causer's location, else the instigator's, else the stored point).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct ThrowParams {
+    pub momentum: Vec3,
+    pub source: Vec3,
 }
 
 /// `StateNPCMasterAim`'s sub-states: the chain each plays is `0x60 +` its value (`AimShoot` 96,
@@ -813,6 +827,21 @@ fn take_request(state: &mut WorldState, i: usize, cfg: &SimConfig, out: &mut Ste
     if req.context == context::FIRE_PISTOL && state.pawn_states[&p.id].current.state == Master::Walk && state.pawn_states[&p.id].pending.is_none() {
         try_request(state, p.id, StateRequest::new(Master::Aim, NpcAnim::AimIn as u8, -1, 0, context::FIRE_PISTOL), cfg);
     }
+    // The NPC's parry (`DisItemContext_ParryNPC`; the NPC block context's own hit handler,
+    // `DisItemContext_MeleeBlock` 0x00C13C10, only ever answers Blocked and no NPC attack pattern
+    // holds it): on an incoming attack its slot 85 (0x00C34200) takes the chance of its
+    // attributes and, by slot 99 (0x00C2F750), requests its action with the context at
+    // AwaitingParry (0x00C07E40(5) -> the pawn's slot 0x68C 0x00B536C0 -> `StateNPCActionParry`:
+    // `Parry_AwaitingImpact`), response PreParry. The port's brain holds BLOCK while its target
+    // swings (`dishonored_ai`): that is the parry's start here, and letting go of it ends the
+    // context (LIKELY: the AI's choice of the parry context and its chance are not decoded).
+    let (walking, pending) = state.pawn_states.get(&p.id).map_or((false, true), |s| (s.current.state == Master::Walk, s.pending.is_some()));
+    let blocking = state.players[i].sword.phase == SwordPhase::Blocking;
+    if blocking && walking && !pending {
+        try_request(state, p.id, StateRequest::new(Master::ActionParry, NpcAnim::ParryAwaitingImpact as u8, 0, 0, context::NONE), cfg);
+    } else if !blocking && awaiting_parry(state, p.id) && !pending {
+        request_exit(state.pawn_states.get_mut(&p.id).unwrap());
+    }
     // The subprocess's stop (slot 76, 0x00B39580) exits the play state when it plays its chain: the
     // brain dropped its ambient idle (the NPC left its routine or moved; LIKELY: the brain's stop
     // conditions stand for the subprocess's).
@@ -911,13 +940,15 @@ fn enter(state: &mut WorldState, i: usize, cfg: &SimConfig, out: &mut StepOut) {
                 request_exit(state.pawn_states.get_mut(&id).unwrap());
             }
         }
-        // The parry state's chain (0x00A6A330): `m_MeleeState` 7 (Parried_Lose) plays `Parry`
-        // group 2 on the full body, its step from the swing directions of the two contexts
-        // (0x00C174C0); the defender's side is not modelled: the attack's own direction picks
-        // Right* (steps 0, 1) or Left* (2, 3) (LIKELY).
+        // The parry state's chain (0x00A6A330) by the context's `eDisWeaponMeleeState`: 5
+        // (AwaitingParry) plays `Parry_AwaitingImpact` group 0 step 0 (`Sword_Ready_ParryIdle`,
+        // looping), 6 (Parried_Neutral) `Parry` group 0 and 7 (Parried_Lose) `Parry` group 2, at
+        // the step of the two contexts' swing sides (0x00C174C0: own Right 0 / 1, Left 2 / 3,
+        // the second of each pair against an opponent swinging left). The request carries the
+        // chain, group and step.
         Master::ActionParry => {
-            let step = parried_step(state, i, cfg);
-            if !play_chain(state, i, NpcAnim::Parry as u8, 2, step, token::PARRY, cfg) {
+            let step = if cur.anim == NpcAnim::Parry as u8 && cur.group == 2 { parried_step(state, i, cfg) } else { cur.step };
+            if !play_chain(state, i, cur.anim, cur.group, step, token::PARRY, cfg) {
                 request_exit(state.pawn_states.get_mut(&id).unwrap());
             }
         }
@@ -992,7 +1023,57 @@ fn enter(state: &mut WorldState, i: usize, cfg: &SimConfig, out: &mut StepOut) {
                 request_exit(state.pawn_states.get_mut(&id).unwrap());
             }
         }
-        Master::Thrown => {}
+        // A requested throw's enter (0x00A86B90; the Windblast's throw is forced instead,
+        // `enter_thrown`): with the request taken (flag 0x10), a zero momentum (each component
+        // under 1e-4) becomes the unit vector from the last hit's source to the pawn, then the
+        // minimum momentum (0x00BE8710: `m_fMinMomentum2DMagnitude` 800, `m_fMinMomentumZ` 0;
+        // the stunned pair needs flag 0x20, which no request sets). Not ragdolled at once
+        // (flag 0: the knock-down's request passes 0), the `PushToRagdoll` chain plays its group
+        // (flag 0x80: 0 for the knock-down, `Generic_PushToRagdoll_*`) at the step
+        // `m_ThrowDirection` with blend-out 0; then the throw start (0x00A81860,
+        // `movement::start_requested_throw`) and `RMM_Ignore`. A chain that does not play
+        // ragdolls the pawn at once (flag 1, the pawn's slot 352). The state's slot 110 choosing
+        // `ThrownKnockDown` (chain 12) instead is not decoded; the elite guard's profile has no
+        // group in it.
+        Master::Thrown => {
+            let Some(params) = state.pawn_states.get_mut(&id).and_then(|s| s.throw.take()) else { return };
+            let th = &cfg.gameplay.throw;
+            let p = state.players[i];
+            let mut m = params.momentum;
+            if m.x.abs() < 1e-4 && m.y.abs() < 1e-4 && m.z.abs() < 1e-4 {
+                m = (p.position - params.source).normalize_or_zero();
+            }
+            let m = crate::movement::clamp_throw_momentum(m, th.min_momentum_2d, th.min_momentum_z);
+            let chain = cfg.gameplay.npc_anim.defs.chain(NpcAnim::PushToRagdoll);
+            let grp = chain.and_then(|c| c.groups.get(cur.group.max(0) as usize));
+            let step = grp.and_then(|g| g.steps.get(cur.step as usize).or(g.steps.first()));
+            let roll = state.anim.get_mut(&id).map_or(0.0, |a| a.roll());
+            let seq = step.and_then(|s| step_sequence(cfg, s, roll, false));
+            if let Some(s) = state.pawn_states.get_mut(&id) {
+                s.rm_mode = root_mode::IGNORE;
+                s.loco_off = true;
+            }
+            match (seq, grp, step) {
+                (Some(seq), Some(g), Some(st)) => {
+                    let ragdoll_at = cfg.anim.info(seq).and_then(|n| n.notify("DishonoredNotify_Ragdoll").map(|r| r.time / n.rate_scale_or_one())).unwrap_or(0.0);
+                    crate::movement::start_requested_throw(&mut state.players[i], m, cur.step, ragdoll_at, true, th);
+                    let yaw = state.players[i].yaw;
+                    if let Some(a) = state.anim.get_mut(&id) {
+                        a.play(layer::FULL_BODY, seq, token::THROWN, 1.0, false, yaw);
+                        if let Some(l) = a.layers[layer::FULL_BODY].as_mut() {
+                            l.blend_in = st.blend_in;
+                            l.blend_out = g.blend_out;
+                        }
+                    }
+                }
+                _ => {
+                    crate::movement::start_requested_throw(&mut state.players[i], m, cur.step, 0.0, false, th);
+                    let t = &mut state.players[i].thrown;
+                    t.active = false;
+                    t.ragdoll = true;
+                }
+            }
+        }
     }
 }
 
@@ -1107,15 +1188,71 @@ const STUN_DURATION: f32 = 0.0;
 /// swings right, Left* when it swings left (`m_SwingDirection`), the defender's side the first of
 /// each pair (LIKELY: the opponent's direction 0x00C03980 is not modelled).
 fn parried_step(state: &WorldState, i: usize, cfg: &SimConfig) -> u8 {
-    let p = &state.players[i];
-    let left = cfg.anim.info(p.sword.swing_seq).and_then(|s| s.notify("DishonoredNotify_AttackZone")).and_then(|n| n.names.get("m_SwingDirection")).is_some_and(|d| d.to_ascii_lowercase().contains("left"));
-    if left { 2 } else { 0 }
+    if swing_left(cfg, state.players[i].sword.swing_seq) { 2 } else { 0 }
 }
 
 /// Requests from the step's own rules (pending until the pawn's next machine tick): a parried
 /// NPC attacker's Parried_Lose, a death, a throw.
 pub fn request_parried(state: &mut WorldState, id: PlayerId, cfg: &SimConfig) {
     try_request(state, id, StateRequest::new(Master::ActionParry, NpcAnim::Parry as u8, 2, 0, context::NONE), cfg);
+}
+
+/// A swing met an NPC awaiting it in its parry (the attack contexts' slot 106 0x00C18640 ->
+/// 0x00C13A10, response PostParry_Neutral): the NPC's context goes Parried_Neutral (0x00C07E40(6):
+/// `Parry` group 0) and the attacker's too (its slot 124, 0x00C07F30). The NPC's own side is the
+/// parry context's roll (+0xC5, 0x00C2F750: not decoded); the port takes the side the blow comes
+/// from, the attack zone's `m_SwingDirection` of the attacker's swing (`attack_seq`): Right ->
+/// `Ready_Parry_RightRight` (0), Left -> `Ready_Parry_LeftLeft` (3) (LIKELY).
+pub fn request_parry_neutral(state: &mut WorldState, id: PlayerId, attack_seq: SeqId, cfg: &SimConfig) {
+    let left = swing_left(cfg, attack_seq);
+    try_request(state, id, StateRequest::new(Master::ActionParry, NpcAnim::Parry as u8, 0, if left { 3 } else { 0 }, context::NONE), cfg);
+}
+
+/// Whether a swing's attack zone swings left (`DishonoredNotify_AttackZone.m_SwingDirection`).
+fn swing_left(cfg: &SimConfig, seq: SeqId) -> bool {
+    cfg.anim.info(seq).and_then(|s| s.notify("DishonoredNotify_AttackZone")).and_then(|n| n.names.get("m_SwingDirection")).is_some_and(|d| d.to_ascii_lowercase().contains("left"))
+}
+
+/// Whether an NPC holds its parry awaiting a blow (`StateNPCActionParry` playing
+/// `Parry_AwaitingImpact`, `eDisWeaponMeleeState_AwaitingParry`).
+pub fn awaiting_parry(state: &WorldState, id: PlayerId) -> bool {
+    state.pawn_states.get(&id).is_some_and(|s| s.current.state == Master::ActionParry && s.current.anim == NpcAnim::ParryAwaitingImpact as u8)
+}
+
+/// The Knockdown reaction (`eDisPawnHitReactionType_Knockdown`, the NPC pawn's slot 423
+/// 0x00B736E0: `DishonoredDamageType_Bullet`, `DisDamageType_Grenade`): a `StateNPCMasterThrown`
+/// request (0x00A86B00: ragdoll-at-once flag 0, the damage type's +0x58 bit 5 as flag 0x40,
+/// `m_ThrowDirection` [`knockdown_direction`], the hit's momentum and location, 1000 and 0.8 for
+/// the ragdoll's impulse at the location, group 0, flag 0x100), pending until the pawn's next
+/// machine tick, whose enter flies it (`enter`). `source` is where a zero momentum pushes away
+/// from. Returns whether the request is pending.
+pub fn request_knockdown(state: &mut WorldState, id: PlayerId, location: Vec3, momentum: Vec3, source: Vec3, cfg: &SimConfig) -> bool {
+    let Some(p) = state.player(id).copied() else { return false };
+    let dir = knockdown_direction(&p, location, momentum);
+    if !try_request(state, id, StateRequest::new(Master::Thrown, NpcAnim::PushToRagdoll as u8, 0, dir, context::NONE), cfg) {
+        return false;
+    }
+    if let Some(s) = state.pawn_states.get_mut(&id) {
+        s.throw = Some(ThrowParams { momentum, source });
+    }
+    true
+}
+
+/// The knock-down's `m_ThrowDirection` (0x00BBE6D0): with a momentum, the point `location -
+/// momentum_2d / |momentum_2d| x max(|Location - location|, 88888)` (the side the push came from,
+/// far away), else the hit location itself, in the pawn's cardinal sectors (0x00BBA970,
+/// [`cardinal_step`]: 0 front, 1 left, 2 right, 3 back).
+pub fn knockdown_direction(p: &PlayerState, location: Vec3, momentum: Vec3) -> u8 {
+    let mut at = location;
+    if momentum.x.abs() >= 1e-4 || momentum.y.abs() >= 1e-4 || momentum.z.abs() >= 1e-4 {
+        let far = (p.position - location).length().max(88888.0);
+        let h = glam::Vec2::new(momentum.x, momentum.y).normalize_or_zero();
+        at = location - Vec3::new(h.x, h.y, 0.0) * far;
+    }
+    let d = (at - p.position).truncate();
+    let fwd = crate::movement::forward_vector(p.yaw).truncate();
+    let right = crate::movement::right_vector(p.yaw).truncate();
+    cardinal_step(d.dot(fwd), d.dot(right))
 }
 
 /// A death (`StateNPCMasterDead_Limp`, its chain and direction step: 0x00B77E20 / 0x00BC6FC0).

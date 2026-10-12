@@ -180,6 +180,44 @@ staggered target) whatever the move. **Wrong**: damage 14 vs 15; jump attack and
 damage in the port; no offscreen reduction; no difficulty. Timing of the NPC clips is unmeasured
 (U-124 / U-600).
 
+### 2.7a NPC block and parry (decoded 2026-10-12, U-987)
+
+Static (the dumped decompile, Capstone on the functions missing from it, the class table of
+`scripts/audit/exe_classes.py`, `enum_dump`). The context states are `eDisWeaponMeleeState`
+{0 Attack, 1 BigHit, 2 HitEnvironment, 3 BigHit_Chained, 4 HitEnvironment_Chained, 5 AwaitingParry,
+6 Parried_Neutral, 7 Parried_Lose} (context +0xC4, set by 0x00C07E40, which calls the pawn's slot
+0x68C 0x00B536C0: 0-4 re-request `StateNPCMasterActionMelee` with the state as the chain step, 5-7
+`StateNPCActionParry`); the response byte +0xC7 is `eDisMeleeResponse` (3 PreParry, 4
+PostParry_Neutral, 5 PostParry_Lose, 6 Versus). CONFIRMED:
+
+- The attack contexts' slots 122 / 123 / 124 (0x00C07E90 / 0x00C07EE0 / 0x00C07F30) are blocked
+  (BigHit), parried (Parried_Lose, response 5) and neutral (Parried_Neutral, response 4).
+- `StateNPCActionParry`'s enter (0x00A6A330): AwaitingParry plays `Parry_AwaitingImpact` (chain 61)
+  group 0 step 0 (`Sword_Ready_ParryIdle`, looping, blend 0.1); Parried_Neutral `Parry` (62) group
+  0, Parried_Lose `Parry` group 2, at the step of 0x00C174C0 (own side +0xC5 Right 0 / 1, Left
+  2 / 3, the second of a pair against an opponent swinging left). Group 1 (`Ready_ParryWin_*`) is
+  never requested for an NPC. The elite guard's set has no `Sword_Ready_Parry_RightLeft`.
+- `DisItemContext_MeleeBlock` (the player's block's base) answers a blow with Blocked only (its
+  slot 107, 0x00C13C10, returns 2; the parry decision, 0x00C22B60, is `MeleeBlockPlayer`'s). No NPC
+  attack pattern holds it (AI.md "Blocking").
+- `DisItemContext_ParryNPC` (< `MeleeAttackNPCBase`): on an incoming attack (its slot 85
+  0x00C34200, event 2) with its response at PreParry / PostParry_Neutral and the chance of two pawn
+  attributes (0x00C34150, `rand()`), slot 99 (0x00C2F750) requests its action (tweak +0x128) and
+  sets AwaitingParry (response PreParry, its side +0xC5 rolled from an attribute); its tick (slot
+  77, 0x00C1F8A0) keeps it while the attacker's context says so (slot 0x1E4).
+- A swing meeting an attack context (the parry context included) goes through the victim's slot
+  106 (0x00C18640 -> 0x00C13A10): PostParry_Neutral for both (the victim Parried_Neutral, the
+  attacker its slot 124), or Versus (0x00C087A0: both in `ParryVersus`'s minigame).
+
+The NPCs carry no `DisNotify_BlockParryZone` (none in `Npc_EliteGuard_Sword_as`): an NPC never
+parries the player the way the player parries an NPC.
+Port (`dishonored_sim::pawn_states`, `combat.rs`): the brain's held BLOCK starts the parry
+context's AwaitingParry (`Parry_AwaitingImpact` while it holds, LIKELY: the AI's choice of the
+context and its chance are not decoded); a swing meeting it is the neutral clash (the NPC's
+`Parry` group 0, the side the blow comes from, LIKELY; the attacker recoils as from a block, no
+damage, no stagger, `SwordBlocked`). Not ported: the versus minigame, the player's own
+Parried_Neutral animation.
+
 ### 2.8 Friendly fire (U-660)
 
 Re-read: the NPC hit gather (0x00C338C0) keeps every actor of the weapon trace (flags 0x4002092, callback

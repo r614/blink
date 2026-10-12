@@ -93,7 +93,6 @@ Not yet ported, or ported only in part:
 
 Reported from play testing and seen in the HUD / menu captures, not yet fixed:
 
-- **Input**: conversation choices only respond to the gamepad (the prompt shows the A button).
 - **Window**: the mouse cursor appears and the game loses focus when a match starts from the
   menu, when going back to it, and when opening or closing the pause menu. The window also minimizes on the way back to the main menu.
 - **Settings**: the resolution cannot be changed.
@@ -109,7 +108,6 @@ Reported from play testing and seen in the HUD / menu captures, not yet fixed:
   - the camera's lens blood renders as white blobs;
   - particles start early or late against their events and stay too long.
 - **Audio**:
-  - throwing a grenade plays a gunshot;
   - combat sounds are out of sync with their events;
   - game sounds keep playing while the game is paused or minimized. The original pauses when
     its window loses focus (`BaseEngine.ini` `[Engine.Engine] bPauseOnLossOfFocus=TRUE`).
@@ -119,8 +117,8 @@ Reported from play testing and seen in the HUD / menu captures, not yet fixed:
   - death animations and their particles look incomplete.
 - **Animation not yet requested by the simulation**: the renderer only draws what the
   simulation plays, so these are missing:
-  - NPCs: the block and the defender's won parry, the pistol bullet's and the grenade's
-    knock-down (a shot NPC does not react), the cowering pose, the special classes' own moves.
+  - NPCs: the cowering pose, the special classes' own moves, the sword clash's versus minigame;
+    an NPC killed by a bullet plays its directional death instead of being thrown.
 - **Performance**: frame rates are very low in Free Roam.
 
 ## Platforms

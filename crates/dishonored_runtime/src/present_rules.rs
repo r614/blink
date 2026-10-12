@@ -502,6 +502,13 @@ impl SoundEventState {
             SimEvent::Fired { kind: dishonored_sim::state::ProjectileKind::TallboyArrow, .. } => {}
             // A launcher's shot (`m_pSoundEvent_InAir`, the launch's own sounds) is not in the cue set.
             SimEvent::Fired { kind, .. } if kind.is_launcher_shot() => {}
+            // A grenade leaves the hand at the throw's `DishonoredNotify_FireProjectile`; its sound
+            // is the throw sequence's own `AnimNotify_AkEvent` (`Ply_Gadgets_Grenade_as`
+            // `Gadgets_Grenade_Deploy`: `Snd_P_Bash_Light_cue_ak` at 0.299 s, the projectile at
+            // 0.300 s; `_Low_Deploy`: `Snd_P_Clothes_Mvt_14_Cue_ak` at 0.007 s), which the
+            // simulation's notifies play (`crate::anim_notify`). The projectile spawn posts
+            // nothing: a grenade is not a bolt, and the pistol's shot was posted for it.
+            SimEvent::Fired { kind, .. } if kind.is_grenade() => {}
             SimEvent::Fired { id, bolt, projectile, .. } => {
                 self.projectiles.insert(projectile, bolt);
                 // One shot, one sound: skipped when a fire animation's AkEvent notify already

@@ -61,3 +61,21 @@ fn look_up_glow_colour_comes_from_its_lookup() {
     assert!(lookup_colour(Vec3::new(0.5, 1.0, 0.0), &lerp).abs_diff_eq(lerp[1] * 0.5, 1e-6));
     assert_eq!(lookup_colour(Vec3::new(0.0, 1.0, 1.0), &lerp), Vec3::ZERO);
 }
+
+/// A grenade's spawn posts no sound of its own: the throw's sound is its sequence's
+/// `AnimNotify_AkEvent` (`Gadgets_Grenade_Deploy`: `Snd_P_Bash_Light_cue_ak`), which the
+/// simulation's notifies play. The pistol's spawn still posts the shot.
+#[test]
+fn a_grenade_throw_does_not_post_the_pistol_shot() {
+    use dishonored_runtime::present_rules::SoundEventState;
+    use dishonored_sim::events::SimEvent;
+    use dishonored_sim::state::ProjectileKind;
+    let world = dishonored_world::CollisionWorld::from_triangles(Vec::new(), Vec::new());
+    let mut s = SoundEventState::default();
+    let fired = |kind, projectile| SimEvent::Fired { id: 1, bolt: false, projectile, kind, origin: glam::Vec3::ZERO, velocity: glam::Vec3::X };
+    assert!(s.posts(&fired(ProjectileKind::Grenade, 1), &[], Some(1), None, &world, 0.0).is_empty());
+    assert!(s.posts(&fired(ProjectileKind::StickyGrenade, 2), &[], Some(1), None, &world, 1.0).is_empty());
+    let shot = s.posts(&fired(ProjectileKind::Bullet, 3), &[], Some(1), None, &world, 2.0);
+    assert_eq!(shot.len(), 1);
+    assert_eq!(shot[0].0, dishonored_audio::cues::cue_event("pistol_fire").unwrap());
+}

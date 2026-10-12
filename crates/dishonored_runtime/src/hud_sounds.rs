@@ -27,6 +27,8 @@ pub const THEME: &[(&str, &str)] = &[
     ("H_windowNotification", "UI_H_windowNotification"),
     ("Validation", "UI_Validation"),
     ("Move", "UI_Move"),
+    // The choice menu's end of list (`SelectionHandler`), from the common theme.
+    ("Stop", "UI_Stop"),
     // The power wheel (`Twk_GFxMoviePlayerPowerWheel`: `m_pShowSound` / `m_pHideSound` and
     // its `DisUISoundTheme_0`), in `Bank_UI_Ingame_Wheel`.
     ("W_show", "Snd_UI_Ingame_Wheel_Hand_In"),
