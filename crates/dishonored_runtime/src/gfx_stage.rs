@@ -1434,7 +1434,7 @@ fn transform_rect(m: &Matrix, r: Rect) -> Rect {
 /// masks: each mask parallelogram is expressed in the quad's (u, v) space and the quad keeps
 /// the part inside its bounding box there (exact for masks aligned with the quad, the HUD's
 /// case). None when nothing is left.
-fn clip_quad(src: [f32; 4], dst: [Vec2; 4], masks: &[[Vec2; 4]]) -> Option<([f32; 4], [Vec2; 4])> {
+pub(crate) fn clip_quad(src: [f32; 4], dst: [Vec2; 4], masks: &[[Vec2; 4]]) -> Option<([f32; 4], [Vec2; 4])> {
     if masks.is_empty() {
         return Some((src, dst));
     }

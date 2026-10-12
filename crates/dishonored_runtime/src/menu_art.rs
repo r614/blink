@@ -326,6 +326,16 @@ impl MovieArt {
     /// (paths are relative to `character`, e.g. `_menu_mc/_lineUp_mc`).
     #[allow(clippy::too_many_arguments)]
     pub fn walk(&self, character: u16, m: Matrix, color: ColorTransform, path: &str, states: &States, ovr: Ovr, out: &mut Vec<Flat>) {
+        self.walk_masked(character, m, color, path, states, ovr, &mut Vec::new(), out);
+    }
+
+    /// [`MovieArt::walk`] inside the timeline masks in effect (stage parallelograms): a
+    /// placement with a `clipDepth` is a mask layer, never drawn; the depths above it up to its
+    /// `clipDepth` are cropped to its extent (the mask's bounds in its own space, placed by its
+    /// matrix: exact for the rectangular masks the menus use, as `gfx_stage` does). Text fields
+    /// are not cropped.
+    #[allow(clippy::too_many_arguments)]
+    fn walk_masked(&self, character: u16, m: Matrix, color: ColorTransform, path: &str, states: &States, ovr: Ovr, masks: &mut Vec<[Vec2; 4]>, out: &mut Vec<Flat>) {
         let mv = &self.movie;
         if let Some(t) = mv.edit_texts.get(&character) {
             out.push(Flat::Text(TextPlacement { id: character, text: t.clone(), matrix: m, color, path: path.to_string() }));
@@ -353,12 +363,17 @@ impl MovieArt {
                         let (s0x, s0y) = inv.apply(b.xmin, b.ymin);
                         let (s1x, s1y) = inv.apply(b.xmax, b.ymax);
                         let texture = tex.trim_end_matches(".tga").trim_end_matches(".dds").to_string();
-                        out.push(Flat::Quad(Quad { texture, src: [s0x.min(s1x) + off.0, s0y.min(s1y) + off.1, s0x.max(s1x) + off.0, s0y.max(s1y) + off.1], dst, color, path: path.to_string(), character }));
+                        let src = [s0x.min(s1x) + off.0, s0y.min(s1y) + off.1, s0x.max(s1x) + off.0, s0y.max(s1y) + off.1];
+                        if let Some((src, dst)) = crop(src, dst, masks) {
+                            out.push(Flat::Quad(Quad { texture, src, dst, color, path: path.to_string(), character }));
+                        }
                         break;
                     }
                     Fill::Solid(c) => {
                         let rgba = std::array::from_fn(|i| (c[i] as f32 / 255.0 * color.mul[i] + color.add[i]).clamp(0.0, 1.0));
-                        out.push(Flat::Solid(dst, rgba, path.to_string()));
+                        if let Some((_, dst)) = crop([0.0, 0.0, 1.0, 1.0], dst, masks) {
+                            out.push(Flat::Solid(dst, rgba, path.to_string()));
+                        }
                         break;
                     }
                     Fill::Gradient(_) => {}
@@ -368,7 +383,13 @@ impl MovieArt {
         }
         let Some(sprite) = mv.sprites.get(&character) else { return };
         let frame = states.frame(path, character, sprite, self);
+        // Mask layers in effect in this timeline: (last depth they clip, its extent).
+        let mut clip_until: Vec<u16> = Vec::new();
         for p in mv.display_list(sprite, frame) {
+            while clip_until.last().is_some_and(|e| p.depth > *e) {
+                clip_until.pop();
+                masks.pop();
+            }
             let Some(ch) = p.character else { continue };
             let child = match &p.name {
                 Some(n) if path.is_empty() => n.clone(),
@@ -389,9 +410,49 @@ impl MovieArt {
             };
             let pm = m.mul(&local);
             let pc = ColorTransform { mul: std::array::from_fn(|i| color.mul[i] * local_color.mul[i]), add: std::array::from_fn(|i| color.add[i] + local_color.add[i] * color.mul[i]) };
-            self.walk(ch, pm, pc, &child, states, ovr, out);
+            if let Some(cd) = p.clip_depth {
+                // The mask's extent: its own bounds (flattened in its space) placed by its matrix.
+                let mut inner = Vec::new();
+                self.walk_masked(ch, Matrix::default(), ColorTransform::default(), &child, states, ovr, &mut Vec::new(), &mut inner);
+                let mut r: Option<Rect> = None;
+                for f in &inner {
+                    let pts: &[(f32, f32)] = match f {
+                        Flat::Quad(q) => &q.dst,
+                        Flat::Solid(d, _, _) => d,
+                        Flat::Text(_) => continue,
+                    };
+                    for c in pts {
+                        let v = Vec2::new(c.0, c.1);
+                        r = Some(r.map_or(Rect::from_corners(v, v), |r| r.union_point(v)));
+                    }
+                }
+                let q = r.map(|r| {
+                    [(r.min.x, r.min.y), (r.max.x, r.min.y), (r.max.x, r.max.y), (r.min.x, r.max.y)].map(|(x, y)| {
+                        let (px, py) = pm.apply(x * 20.0, y * 20.0);
+                        Vec2::new(px, py) / 20.0
+                    })
+                });
+                // An empty mask shows nothing below it.
+                masks.push(q.unwrap_or([Vec2::ZERO; 4]));
+                clip_until.push(cd);
+                continue;
+            }
+            self.walk_masked(ch, pm, pc, &child, states, ovr, masks, out);
+        }
+        for _ in clip_until {
+            masks.pop();
         }
     }
+}
+
+/// Crop a flattened quad to the masks in effect (`gfx_stage::clip_quad`): None when nothing
+/// of it is left.
+fn crop(src: [f32; 4], dst: [(f32, f32); 4], masks: &[[Vec2; 4]]) -> Option<([f32; 4], [(f32, f32); 4])> {
+    if masks.is_empty() {
+        return Some((src, dst));
+    }
+    let (src, d) = crate::gfx_stage::clip_quad(src, dst.map(|(x, y)| Vec2::new(x, y)), masks)?;
+    Some((src, d.map(|p| (p.x, p.y))))
 }
 
 /// One flattened element of a movie, in drawing order.
