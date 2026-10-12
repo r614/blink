@@ -7,9 +7,10 @@
 //! kept out of the level's walls (the steep collision triangles around the corpse, copied into
 //! pawn space at the hand-over; each body is a sphere of its physics radius, U-282).
 //!
-//! It runs at a fixed step from the pose sampled exactly at the notify time, so a corpse settles
-//! the same way on every run. The simulation's corpse position stays authoritative: the ragdoll
-//! only moves bones inside the pawn's frame.
+//! It runs at a fixed step from the pose drawn at the tick of the simulation's notify (the tick
+//! before gives the velocities), advanced by the simulation's ticks, so a corpse settles the same
+//! way on every run. The simulation's corpse position stays authoritative: the ragdoll only moves
+//! bones inside the pawn's frame.
 //!
 //! A joint's swing cone is centred on the child's direction in the reference pose (a PhysX joint
 //! limits the bodies' relative turn from the constraint frames, which UE3 sets from the reference
@@ -18,8 +19,8 @@
 //! [`MAX_TIME`].
 
 use crate::characters::PartGpu;
+use dishonored_anim::Pose;
 use dishonored_ir::BoneAsset;
-use crate::npc_anim::{Key, Pose};
 use dishonored_ir::npc_anim::PhysicsAssetData;
 use glam::{Mat4, Quat, Vec3};
 
@@ -452,25 +453,24 @@ impl Ragdoll {
             .collect()
     }
 
-    /// The ragdoll as a pose: local rotations for every bone of every part (bones matched by
-    /// name with part 0), translations for the root level, like sampled sequences.
-    pub fn pose(&self, parts: &[PartGpu]) -> Pose {
+    /// The ragdoll as a pose: every bone's local transform for every part (bones matched by name
+    /// with part 0; a bone part 0 does not have keeps its reference transform).
+    pub fn locals(&self, parts: &[PartGpu]) -> Vec<Pose> {
         let p0 = &parts[0];
         let g = self.globals();
         let inv = p0.mesh_to_pawn.inverse();
         let mesh: Vec<Mat4> = g.iter().map(|m| inv * *m).collect();
-        let local: Vec<Key> = (0..p0.bones.len())
+        let local: Vec<(Quat, Vec3)> = (0..p0.bones.len())
             .map(|k| {
                 let par = p0.bones[k].parent;
                 let l = if par >= 0 && (par as usize) < mesh.len() && par as usize != k { mesh[par as usize].inverse() * mesh[k] } else { mesh[k] };
                 let (_, q, t) = l.to_scale_rotation_translation();
-                let shallow = k == 0 || par <= 0 || p0.bones.get(par as usize).is_some_and(|x| x.parent < 0);
-                Key { q: q.normalize(), t: shallow.then_some(t) }
+                (q.normalize(), t)
             })
             .collect();
         parts
             .iter()
-            .map(|part| part.bones.iter().map(|b| p0.bones.iter().position(|x| x.name.eq_ignore_ascii_case(&b.name)).map(|i| local[i])).collect())
+            .map(|part| part.bones.iter().map(|b| p0.bones.iter().position(|x| x.name.eq_ignore_ascii_case(&b.name)).map_or((b.rotation, b.translation), |i| local[i])).collect())
             .collect()
     }
 }

@@ -1,8 +1,7 @@
 //! Skinned Dishonored character models for player bodies.
 //!
 //! Each part is uploaded once; every player gets a joint hierarchy (flat, children of the
-//! body root) driven by decoded Edge animation selected the way the original does
-//! (`crate::npc_anim`).
+//! body root) posed from the simulation's animation state (`crate::npc_anim::pose_tree`).
 
 use crate::coords;
 use crate::map_render::to_image;
@@ -441,40 +440,6 @@ fn pawn_profile(bank: &mut crate::npc_anim::AnimBank, model: usize, p: &PlayerSt
     bank.model_profile.get(&model).copied().unwrap_or(guard)
 }
 
-/// Clip and time of the full-body and upper-body chains (for the sound notifies).
-fn chain_clips(st: &crate::npc_anim::PawnAnim) -> Vec<(String, f32)> {
-    [st.full.as_ref(), st.upper.as_ref()].into_iter().flatten().filter_map(|c| c.steps.get(c.i).map(|s| (s.0.clone(), c.t))).collect()
-}
-
-/// What an NPC looks at while it speaks a line (APPROXIMATION, U-281: the conversation's
-/// look-at requests were not decoded): the nearest living human player within 600 uu. The
-/// AI's attention look-at (HeadTrack) comes from the host (`MatchView::npc_heads`, the vision
-/// head's cursor), so alert pawns no longer use this.
-fn look_target(p: &PlayerState, _stance: Option<dishonored_ir::npc_anim::NpcStance>, talking: bool, all: &[&PlayerState]) -> Option<glam::Vec3> {
-    use dishonored_sim::state::PawnKind;
-    if p.kind == PawnKind::Human || !p.alive || p.incapacitated() {
-        return None;
-    }
-    let range = if talking { 600.0 } else { return None };
-    all.iter()
-        .filter(|o| o.kind == PawnKind::Human && o.alive && o.id != p.id)
-        .map(|o| (o.position.distance(p.position), o))
-        .filter(|(d, _)| *d < range)
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, o)| o.position + glam::Vec3::Z * 60.0)
-}
-
-/// Pawns speaking a conversation line right now (mission NPC ids resolved to pawns).
-fn talking_pawns(view: &crate::session::SessionView) -> Vec<u32> {
-    let Some(m) = view.matchv.mission.as_ref() else { return Vec::new() };
-    m.dialogue
-        .iter()
-        .filter(|l| l.remaining > 0.0)
-        .filter_map(|l| l.npc.as_ref())
-        .filter_map(|n| m.npc_ids.iter().find(|x| x.0 == *n).map(|x| x.1))
-        .collect()
-}
-
 /// Lines being spoken by pawns: (pawn, line id, blurb GUID, seconds into the line).
 fn speaking_lines(view: &crate::session::SessionView) -> Vec<(u32, u32, String, f32)> {
     let Some(m) = view.matchv.mission.as_ref() else { return Vec::new() };
@@ -488,7 +453,7 @@ fn speaking_lines(view: &crate::session::SessionView) -> Vec<(u32, u32, String, 
         .collect()
 }
 
-/// FaceFX bone offsets per speaking pawn this frame (ANIMATION.md §12): the speaker's head
+/// FaceFX bone offsets per speaking pawn this frame (ANIMATION.md Â§12): the speaker's head
 /// actor driven by the blurb's animation at the time since the line started.
 fn face_frames(bank: &mut crate::npc_anim::AnimBank, lib: &CharacterLibrary, view: &crate::session::SessionView, roots: &[(u32, usize)], now: f64, cached: &mut Option<(String, Vec<String>)>) -> HashMap<u32, Vec<crate::facefx::FaceBone>> {
     let lines = speaking_lines(view);
@@ -540,12 +505,39 @@ impl Default for AnimDebug {
     }
 }
 
+/// The kind of state a simulation layer plays its sequence for (`dishonored_sim::anim::token`).
+fn token_kind(token: u32) -> &'static str {
+    use dishonored_sim::anim::token as k;
+    match token & k::KIND {
+        k::SWING => "swing",
+        k::BLOCK => "block",
+        k::PAIRED => "paired",
+        k::LEFT => "left",
+        k::WEAPON => "weapon",
+        k::THROWN => "thrown",
+        k::DEATH => "dead",
+        _ => "",
+    }
+}
+
+/// What a dump line says about the animation playing: the locomotion node's modifier and
+/// smoothed velocity, and the full-body and upper-body slots as drawn.
+#[derive(Default)]
+pub struct DumpAnim {
+    pub modifier: Option<String>,
+    pub vel: Option<[f32; 2]>,
+    pub full: Option<serde_json::Value>,
+    pub upper: Option<serde_json::Value>,
+}
+
 /// One JSON line per frame for the animation diff against the original's per-tick bone capture
-/// (fixtures/oracle/capture_queue.txt, `session bones`): the sim tick, the pawn's location and
-/// yaw, the slots playing, and every bone of the body in component space (the skeletal mesh's
-/// own space, before its `Origin` / `RotOrigin`, like UE3's `SpaceBases`): rotation (x, y, z,
-/// w) and translation, Dishonored units.
-pub fn dump_bones(file: &std::path::Path, tick: u64, p: &PlayerState, st: Option<&crate::npc_anim::PawnAnim>, part: &PartGpu, globals: &[glam::Mat4]) {
+/// (fixtures/oracle/capture_queue.txt, `session bones`; `oracle anim compare`): the sim tick, the
+/// pawn's location and yaw, the locomotion node's modifier and smoothed velocity, the full-body and
+/// upper-body slots as drawn (the tree's channel: `seq`, `t` its time, `w` its weight; `key` the
+/// kind of state the simulation's layer plays it for), whether the ragdoll has the body, and every
+/// bone of the body in component space (the skeletal mesh's own space, before its `Origin` /
+/// `RotOrigin`, like UE3's `SpaceBases`): rotation (x, y, z, w) and translation, Dishonored units.
+pub fn dump_bones(file: &std::path::Path, tick: u64, p: &PlayerState, anim: &DumpAnim, ragdoll: bool, part: &PartGpu, globals: &[glam::Mat4]) {
     use std::io::Write;
     let inv = part.mesh_to_pawn.inverse();
     let bones: Vec<serde_json::Value> = part
@@ -557,11 +549,10 @@ pub fn dump_bones(file: &std::path::Path, tick: u64, p: &PlayerState, st: Option
             serde_json::json!({"name": b.name, "q": [q.x, q.y, q.z, q.w], "t": [t.x, t.y, t.z]})
         })
         .collect();
-    let slot = |c: Option<&crate::npc_anim::Chain>| c.map(|c| serde_json::json!({"key": c.key, "seq": c.steps[c.i].0, "t": c.t, "w": c.weight}));
     let line = serde_json::json!({
         "tick": tick, "id": p.id, "pos": [p.position.x, p.position.y, p.position.z], "yaw": p.yaw,
-        "modifier": st.map(|s| s.modifier.clone()), "vel": st.map(|s| [s.vel.0, s.vel.1]), "phase": st.map(|s| s.phase),
-        "full": slot(st.and_then(|s| s.full.as_ref())), "upper": slot(st.and_then(|s| s.upper.as_ref())), "ragdoll": st.is_some_and(|s| s.ragdoll.is_some()),
+        "modifier": anim.modifier, "vel": anim.vel, "phase": serde_json::Value::Null,
+        "full": anim.full, "upper": anim.upper, "ragdoll": ragdoll,
         "bones": bones,
     });
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
@@ -569,6 +560,10 @@ pub fn dump_bones(file: &std::path::Path, tick: u64, p: &PlayerState, st: Option
     }
 }
 
+/// Pose and skin every drawn pawn from the simulation's animation state (`npc_anim::pose_tree`),
+/// place what its notifies ask for on its mesh (`anim_notify`: particles, item drops, severed
+/// limbs, the ragdoll hand-over), hand its planted feet to the audio, and drive its sockets,
+/// accessories and weapons.
 #[allow(clippy::too_many_arguments)]
 pub fn animate_characters(
     bank: Option<ResMut<crate::npc_anim::AnimBank>>,
@@ -576,9 +571,9 @@ pub fn animate_characters(
     mut states: Query<&mut crate::npc_anim::PawnAnim>,
     lib: Option<Res<CharacterLibrary>>,
     weapons: Option<Res<WeaponLibrary>>,
-    mut view: ResMut<crate::session::SessionView>,
+    view: Res<crate::session::SessionView>,
     // (Grouped: a system takes at most 16 parameters.)
-    (time, mut face_packages, anim_debug, body_frames, mut last_tick): (Res<Time>, Local<Option<(String, Vec<String>)>>, Local<AnimDebug>, Option<Res<crate::viewmodel::BodyFrames>>, Local<u64>),
+    (time, mut face_packages, anim_debug, body_frames, notes): (Res<Time>, Local<Option<(String, Vec<String>)>>, Local<AnimDebug>, Option<Res<crate::viewmodel::BodyFrames>>, Res<crate::anim_notify::AnimNotifies>),
     roots: Query<(Entity, &CharacterRoot, &crate::players::PlayerBody, &Children, &GlobalTransform, Option<&InheritedVisibility>)>,
     mut joints: Query<(&Joint, &mut Transform), (Without<TpWeaponJoint>, Without<AccessoryJoint>)>,
     mut wjoints: Query<(&TpWeaponJoint, &mut Transform), (Without<Joint>, Without<AccessoryJoint>)>,
@@ -587,42 +582,29 @@ pub fn animate_characters(
     mut anim_sounds: Option<ResMut<crate::audio::AnimSounds>>,
     session: Res<crate::session::Session>,
     mut sockets: Option<ResMut<crate::effects::EffectSockets>>,
-    (mut pawn_points, mut pawn_fx, mut drops, mut trails, mut ash, mut limbs): (Option<ResMut<crate::cutscene::PawnPoints>>, Option<ResMut<crate::effects::PawnEffects>>, Option<ResMut<crate::dropped_weapons::DroppedWeapons>>, Option<ResMut<crate::weapon_trails::WeaponTrails>>, Option<ResMut<crate::ash_bodies::AshBodies>>, Option<ResMut<crate::severed_limbs::SeveredLimbs>>),
+    (mut pawn_points, mut pawn_fx, mut drops, mut trails, mut limbs): (Option<ResMut<crate::cutscene::PawnPoints>>, Option<ResMut<crate::effects::PawnEffects>>, Option<ResMut<crate::dropped_weapons::DroppedWeapons>>, Option<ResMut<crate::weapon_trails::WeaponTrails>>, Option<ResMut<crate::severed_limbs::SeveredLimbs>>),
 ) {
-    let events = std::mem::take(&mut view.anim_events);
-    // Bodies the sim removed, for their burn (`ash_bodies`).
-    if let Some(ash) = ash.as_mut() {
-        for (_, e) in &events {
-            if let dishonored_sim::events::SimEvent::BodyRemoved { body, ash: burnt } = e {
-                ash.removed.insert(*body, (*burnt, time.elapsed_secs_f64()));
-            }
-        }
-    }
+    use crate::anim_notify::Notify;
+    use dishonored_sim::anim::{layer, token};
+    use dishonored_sim::state::Condition;
     let (Some(lib), Some(mut bank)) = (lib, bank) else { return };
     let contracts = view.matchv.mode.eq_ignore_ascii_case("contracts");
     let all: Vec<&PlayerState> = view.others.iter().chain(view.me.iter()).collect();
-    let hits = crate::present_rules::collect_hits(&events[..], &all);
-    let talking = talking_pawns(&view);
     let root_models: Vec<(u32, usize)> = roots.iter().map(|r| (r.2.0, r.1.archetype)).collect();
     let faces = face_frames(&mut bank, &lib, &view, &root_models, time.elapsed_secs_f64(), &mut face_packages);
-    // Each pawn's chains tick with its dilated time (`PlayerState::time_scale`: Bend Time, a
-    // finisher's slow motion).
-    // Advance animation by fixed simulation steps: on the first run set the last tick to the
-    // view tick; then advance by the ticks since last presentation, clamped to avoid large jumps.
-    if *last_tick == 0 {
-        *last_tick = view.tick;
-    }
-    let ticks = view.tick.saturating_sub(*last_tick).min(6);
-    *last_tick = view.tick;
-    let dt = ticks as f32 * dishonored_sim::movement::DT;
     let mv = &session.content.sim.gameplay.movement;
+    let table = session.content.sim.anim.clone();
+    let source = session.content.sim.anim_source.clone();
     for (entity, root, body, children, root_gt, root_vis) in &roots {
         let Some(p) = all.iter().find(|p| p.id == body.0).copied() else { continue };
         let model = &lib.models[root.archetype];
+        let parts = &model.parts;
         let (right_w, left_w) = shown_weapons(p, contracts);
         let armed = right_w.is_some() || left_w.is_some() || p.kind == dishonored_sim::state::PawnKind::Guard;
         let profile = pawn_profile(&mut bank, root.archetype, p, armed);
-        let stance = view.matchv.npc_poses.iter().find(|x| x.0 == p.id).map(|x| x.1);
+        // The simulation's animation state of the pawn: its layers and, for an NPC, its tree.
+        let sim = view.anim.get(&p.id);
+        let tree = sim.and_then(|a| a.tree.as_ref());
         // The level floor under a pawn-space point (pawn space: origin at the pawn, turned by its
         // yaw), for the ragdoll's floor grid.
         // A body left in its choker's or carrier's frame is drawn at that anchor
@@ -656,92 +638,152 @@ pub fn animate_characters(
                 .map(|t| [to_pawn(t.a), to_pawn(t.b), to_pawn(t.c)])
                 .collect()
         };
-        let action = view.matchv.npc_actions.iter().find(|x| x.0 == p.id).map(|x| (x.1, x.2));
-        let input = crate::npc_anim::AnimInput { p, stance, action, armed, talking: talking.contains(&p.id), dt: dt * p.time_scale.max(0.0), tick: view.tick, hits: hits.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), look_target: look_target(p, stance, talking.contains(&p.id), &all), head: view.matchv.npc_heads.iter().find(|h| h.id == p.id).copied(), face: faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]), floor: -mv.collision_half_height, ground: Some(&ground), walls: Some(&walls), gravity: mv.gravity_z, carrier_speed: p.carried_by.and_then(|c| all.iter().find(|x| x.id == c)).map(|c| c.velocity.truncate().length()).unwrap_or(0.0) };
-        // Particle notifies the chains crossed this frame: (system, socket or bone, attached).
-        let mut fired: Vec<(String, String, bool)> = Vec::new();
-        // A `DisNotify_DropItem` crossed this frame; the limp death started (the ragdoll took the
-        // body) or the dead pawn plays nothing more: what drops its weapons.
-        let mut drop_notify: Option<crate::npc_anim::DropNotify> = None;
-        let mut limp = false;
-        // A `DisNotify_Trails` window of a chain covers its time: the held swords trail.
-        let mut trailing = false;
-        // `DishonoredNotify_SeverLimb`s crossed this frame.
-        let mut severs: Vec<crate::npc_anim::SeverNotify> = Vec::new();
-        let pose = match states.get_mut(entity) {
-            Ok(mut st) => {
-                let before = chain_clips(&st);
-                let was_limp = st.ragdoll.is_some();
-                let pose = crate::npc_anim::animate(&mut bank, &lib, root.archetype, profile, &mut st, &input);
-                limp = (!was_limp && st.ragdoll.is_some()) || (st.full.is_none() && st.ragdoll.is_none());
-                trailing = chain_clips(&st).iter().any(|(clip, t)| bank.trailing(profile, clip, *t));
-                // `AnimNotify_PlayParticleEffect` of the full-body and upper-body chains: a clip
-                // started this frame fires from its start (a notify at 0 too).
-                for (clip, t1) in chain_clips(&st) {
-                    let t0 = before.iter().find(|b| b.0 == clip).map(|b| b.1);
-                    for n in bank.crossed(profile, &clip, t0, t1) {
-                        match n.kind {
-                            crate::npc_anim::NotifyKind::PlayParticleEffect { template, point, attach } => {
-                                fired.push((template, point, attach));
-                            }
-                            crate::npc_anim::NotifyKind::DropItem(d) => {
-                                drop_notify = Some(d);
-                            }
-                            crate::npc_anim::NotifyKind::SeverLimb(s) => {
-                                severs.push(s);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                // A sever with `m_bGoToRagdoll` hands a dead body to the ragdoll.
-                if !p.alive && st.ragdoll.is_none() && severs.iter().any(|s| s.ragdoll) {
-                    st.dropped = true;
-                }
-                // Sound notifies (AnimNotify_AkEvent, footfalls) of the clip windows advanced.
-                if let Some(snd) = anim_sounds.as_mut() {
-                    for (clip, t1) in chain_clips(&st) {
-                        if let Some((_, t0)) = before.iter().find(|b| b.0 == clip) {
-                            snd.advance(p.id, &clip, *t0, t1, false);
-                        }
-                    }
-                    // Locomotion feet touching down (`m_bFootOnGround`).
-                    for (k, down) in st.feet_down.iter().enumerate() {
-                        if *down {
-                            snd.foot_down(p.id, k as i32);
-                        }
-                    }
-                    // Locomotion: the sync group's master fires the notifies (footfalls).
-                    // Reversed loops play from the end backwards.
-                    if let Some((clip, rev, p0, p1)) = st.loco_master.clone() {
-                        if let Some(d) = bank.duration(profile, &clip) {
-                            let full_body = st.full.as_ref().is_some_and(|c| c.weight > 0.5);
-                            if !full_body {
-                                if rev { snd.advance(p.id, &clip, d * (1.0 - p1), d * (1.0 - p0), true) } else { snd.advance(p.id, &clip, p0 * d, p1 * d, true) }
-                            }
-                        }
-                    }
-                }
-                pose
-            }
-            Err(_) => {
-                let mut st = crate::npc_anim::PawnAnim::default();
-                let pose = crate::npc_anim::animate(&mut bank, &lib, root.archetype, profile, &mut st, &input);
-                commands.entity(entity).insert(st);
-                pose
-            }
+        let down = !p.alive || p.condition == Condition::Unconscious;
+        let mut found = states.get_mut(entity).ok();
+        let mut fresh = None;
+        let st: &mut crate::npc_anim::PawnAnim = match found.as_mut() {
+            Some(s) => s,
+            None => fresh.insert(crate::npc_anim::PawnAnim::default()),
         };
-        let globals: Vec<Vec<glam::Mat4>> = model.parts.iter().zip(&pose).map(|(part, pp)| crate::npc_anim::globals(part, pp)).collect();
-        // DISH_ANIM_DUMP=<pawn id>:<file>: the pawn's bones every frame (animation diff).
-        if let Some((_, file)) = anim_debug.1.as_ref().filter(|d| d.0 == p.id) {
-            dump_bones(file, view.tick, p, states.get(entity).ok(), &model.parts[0], &globals[0]);
+        if !st.init {
+            st.init = true;
+            st.tick = view.tick;
+            // Already down when first seen: the ragdoll at rest at once.
+            st.settle = down && p.carried_by.is_none();
         }
-        // Diagnostics: DISH_ANIM_DEBUG=<pawn id> logs the pawn's slots and root.
-        if anim_debug.0 == Some(p.id) {
-            if let Ok(st) = states.get(entity) {
-                let slot = |c: &Option<crate::npc_anim::Chain>| c.as_ref().map(|c| format!("{}:{}@{:.2}w{:.2}", c.key, c.steps[c.i].0, c.t, c.weight)).unwrap_or_default();
-                info!("anim {} mod={} vel={:.0},{:.0} full={} upper={} ragdoll={} root={:?} pelvis={:?}", p.id, st.modifier, st.vel.0, st.vel.1, slot(&st.full), slot(&st.upper), st.ragdoll.is_some(), pose[0].first().copied().flatten().map(|k| k.t), globals[0].get(1).map(|m| m.w_axis.truncate()));
+        let ticks = view.tick.saturating_sub(st.tick);
+        st.tick = view.tick;
+        // The notifies the simulation fired for this pawn this frame.
+        let mut fired: Vec<(String, String, bool)> = Vec::new();
+        let mut drop_notify: Option<crate::anim_notify::DropNotify> = None;
+        let mut severs: Vec<crate::anim_notify::SeverNotify> = Vec::new();
+        for n in notes.of(p.id) {
+            match n {
+                // The first-person rig places the local player's own (`viewmodel`).
+                Notify::Particle { template, point, attach } if notes.first_person != Some(p.id) => fired.push((template.clone(), point.clone(), *attach)),
+                Notify::DropItem(d) => drop_notify = Some(*d),
+                Notify::SeverLimb(s) => severs.push(s.clone()),
+                Notify::Ragdoll => st.to_ragdoll = true,
+                _ => {}
             }
+        }
+        // A sever with `m_bGoToRagdoll` hands a dead body to the ragdoll.
+        if !p.alive && severs.iter().any(|s| s.ragdoll) {
+            st.to_ragdoll = true;
+        }
+        // The tree's pose: the simulation's state, or `NPC_Human_at` as cooked for a pawn the
+        // simulation steps no tree for (a human player's body).
+        let dead_tree = tree.is_some_and(|t| t.tree == 1);
+        let shape0 = bank.tree_shape(&lib, root.archetype, 0, dead_tree);
+        let cooked = if tree.is_none() { shape0.as_ref().map(|s| s.initial_state()) } else { None };
+        let state = tree.map(|t| &t.state).or(cooked.as_ref());
+        let loco = state.zip(shape0.as_ref()).and_then(|(s, sh)| s.locomotion(sh).map(|(m, v)| (m.to_string(), v)));
+        // The AI's look-at (`MatchView::npc_heads`): the vision head's cursor split into the torso
+        // and head parts as `ArkAnimNodeLookAt` (0x009176F0) poses them, in the look-at mode for
+        // the locomotion's stance and gait.
+        let lookat = bank.profiles[profile].lookat.clone();
+        let head = view.matchv.npc_heads.iter().find(|h| h.id == p.id).filter(|_| p.alive && !down);
+        let mode = lookat.as_ref().and_then(|c| crate::npc_anim::lookat_mode(c, loco.as_ref().map_or("", |l| l.0.as_str()), loco.as_ref().map_or(0.0, |l| l.1.1)));
+        let look = head.zip(mode).map(|(h, mode)| dishonored_anim::LookInput { mode, head: [h.head[0].to_degrees(), h.head[1].to_degrees()], torso: [h.torso[0].to_degrees(), h.torso[1].to_degrees()], weight: 1.0 });
+        // [interp] The matinee's anim tracks on the pawn (`MatineeStackNode`).
+        let stacks = crate::npc_anim::matinee_channels(&st.scripted);
+        let stack_sets = st.scripted.first().map(|s| s.sets.clone()).unwrap_or_default();
+        let mut pose: Vec<dishonored_anim::Pose> = state
+            .and_then(|s| crate::npc_anim::pose_tree(&mut bank, &lib, root.archetype, profile, s, dead_tree, look.as_ref(), &stacks, &stack_sets))
+            .unwrap_or_else(|| parts.iter().map(|p| dishonored_anim::pose::bind_pose(&p.bones)).collect());
+        // A key extracting root motion keeps the root at its bind translation: its travel moves
+        // the pawn on the server (`m_MatineeRootMotionMode`).
+        if st.scripted.iter().any(|s| s.root_motion && s.weight > 1e-3) {
+            for (pp, part) in pose.iter_mut().zip(parts) {
+                if let (Some(r), Some(b)) = (pp.first_mut(), part.bones.first()) {
+                    r.1 = b.translation;
+                }
+            }
+        }
+        // FaceFX (Â§12): the spoken line's bones, added after the AnimTree (UE3 `UpdateFaceFX`,
+        // 0x00725EA0, runs on the tree's output; additive blend mode).
+        for &(pi, bi, dp, dq) in faces.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]) {
+            if let Some(slot) = pose.get_mut(pi).and_then(|pp| pp.get_mut(bi)) {
+                *slot = ((dq * slot.0).normalize(), slot.1 + dp);
+            }
+        }
+        let mut globals: Vec<Vec<glam::Mat4>> = parts.iter().zip(&pose).map(|(part, pp)| crate::npc_anim::local_globals(part, pp)).collect();
+        // A body on the ground hands over to the ragdoll at its sequence's
+        // `DishonoredNotify_Ragdoll` (the simulation's event: the pose drawn at that tick, the tick
+        // before for the velocities), at the end of a death or throw without one, or at once when
+        // the full body plays none (a knock-out, a dropped body, a body first seen down).
+        let thrown = p.alive && (p.thrown.active || p.thrown.ragdoll);
+        let lying = (down || thrown) && p.carried_by.is_none() && !p.no_body;
+        let full = sim.and_then(|a| a.layers[layer::FULL_BODY].as_ref());
+        let playing_out = full.is_some_and(|l| matches!(l.token & token::KIND, token::DEATH | token::THROWN) && l.playing);
+        let mut limp = false;
+        if !lying {
+            st.ragdoll = None;
+            st.to_ragdoll = false;
+        } else if st.ragdoll.is_none() {
+            if st.to_ragdoll || st.settle || !playing_out {
+                if let Some(phys) = bank.profiles[profile].physics.clone() {
+                    let g0 = &globals[0];
+                    let g1 = st.at(view.tick.wrapping_sub(1)).map(<[glam::Mat4]>::to_vec).unwrap_or_else(|| g0.clone());
+                    let bind = crate::npc_anim::local_globals(&parts[0], &dishonored_anim::pose::bind_pose(&parts[0].bones));
+                    if let Some(mut rd) = crate::ragdoll::Ragdoll::new(&phys, &parts[0].bones, &bind, g0, &g1, &ground, &walls(), mv.gravity_z) {
+                        if st.settle {
+                            rd.settle();
+                        }
+                        st.ragdoll = Some(rd);
+                        limp = true;
+                    }
+                }
+                st.to_ragdoll = false;
+                st.settle = false;
+            }
+        } else if let Some(rd) = st.ragdoll.as_mut() {
+            // The ragdoll steps by the simulation's ticks since the last frame (Bend Time slows
+            // it with the pawn).
+            rd.advance(ticks as f32 * dishonored_sim::movement::DT * p.time_scale.max(0.0));
+        }
+        if let Some(rd) = st.ragdoll.as_ref() {
+            pose = rd.locals(parts);
+            globals = parts.iter().zip(&pose).map(|(part, pp)| crate::npc_anim::local_globals(part, pp)).collect();
+        }
+        st.remember(view.tick, &globals[0]);
+        // A dead pawn whose full body plays nothing more lets go of its items too.
+        limp |= !p.alive && full.is_none_or(|l| !l.playing);
+        // The locomotion node's planted feet (`m_bFootOnGround`, a tree output; the NPC loops
+        // carry no footfall notify): each foot touching down is a footfall.
+        if let Some(t) = tree {
+            let on = if p.alive && !p.incapacitated() { source.npc_tree(t.tree == 1).and_then(|a| t.state.feet_on_ground(&a.shape, a.clips.as_ref(), &a.loco)).unwrap_or([false; 2]) } else { [false; 2] };
+            if let Some(snd) = anim_sounds.as_mut() {
+                for (k, (now, was)) in on.iter().zip(st.feet).enumerate() {
+                    if *now && !was {
+                        snd.foot_down(p.id, k as i32);
+                    }
+                }
+            }
+            st.feet = on;
+        }
+        // A `DisNotify_Trails` window open on the full or upper body: the held swords trail.
+        let trailing = sim.is_some_and(|a| [layer::FULL_BODY, layer::UPPER_BODY].iter().any(|l| a.window_open(*l, &table, "DisNotify_Trails")));
+        let ragdolled = st.ragdoll.is_some();
+        // DISH_ANIM_DUMP=<pawn id>:<file>: the pawn's bones every frame (animation diff).
+        if anim_debug.1.as_ref().is_some_and(|d| d.0 == p.id) || anim_debug.0 == Some(p.id) {
+            let slot = |name: &str, l: usize| -> Option<serde_json::Value> {
+                let (seq, t, w) = state?.slot(shape0.as_ref()?, name)?;
+                let key = sim.and_then(|a| a.layers[l].as_ref()).map_or("", |s| token_kind(s.token));
+                Some(serde_json::json!({"key": key, "seq": seq, "t": t, "w": w}))
+            };
+            let d = DumpAnim { modifier: loco.as_ref().map(|l| l.0.clone()), vel: loco.as_ref().map(|l| [l.1.0, l.1.1]), full: slot("FullBodySlot", layer::FULL_BODY), upper: slot("UpperBodySlot", layer::UPPER_BODY) };
+            if let Some((_, file)) = anim_debug.1.as_ref().filter(|d| d.0 == p.id) {
+                dump_bones(file, view.tick, p, &d, ragdolled, &parts[0], &globals[0]);
+            }
+            // Diagnostics: DISH_ANIM_DEBUG=<pawn id> logs the pawn's slots and layers.
+            if anim_debug.0 == Some(p.id) {
+                let layers: Vec<String> = sim.map(|a| a.layers.iter().flatten().map(|l| format!("{}:{}@{:.2}", token_kind(l.token), table.name(l.seq).unwrap_or("?"), l.time)).collect()).unwrap_or_default();
+                info!("anim {} mod={:?} vel={:?} full={:?} upper={:?} layers={layers:?} ragdoll={ragdolled} pelvis={:?}", p.id, d.modifier, d.vel, d.full, d.upper, globals[0].get(1).map(|m| m.w_axis.truncate()));
+            }
+        }
+        if let Some(s) = fresh {
+            commands.entity(entity).insert(s);
         }
         // Limbs cut off now (0x00B6CC10): a limb the mesh's physics asset has a body for, not
         // already cut (nor a limb above it); its particles "when severed", and the severed piece.

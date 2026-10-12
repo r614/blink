@@ -65,9 +65,12 @@ pub struct SessionView {
     pub target_info: Option<TargetInfo>,
     /// Simulation events for audio presentation (see `crate::audio`).
     pub audio_events: Vec<SimEvent>,
-    /// Simulation events for third-person animation (hits, deaths, swings; `crate::npc_anim`).
-    /// Tuples of (tick produced, event) for tick-stamped reactions.
+    /// Simulation events stamped with the tick that produced them: the animation notifies
+    /// (`SimEvent::AnimNotify`) and the removed bodies, taken each frame by `crate::anim_notify`.
     pub anim_events: Vec<(u64, SimEvent)>,
+    /// Each pawn's animation state as the simulation stepped it (`WorldState::anim`: its layers,
+    /// an NPC's AnimTree state), drawn by `characters` and `viewmodel`.
+    pub anim: std::collections::BTreeMap<PlayerId, dishonored_sim::anim::PawnAnim>,
 }
 
 impl Session {
@@ -225,7 +228,10 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
             }
             let me = client.player_id;
             for (tick, e) in client.events.drain(..) {
-                view.anim_events.push((tick, e));
+                // The local player's animation notifies come from its own prediction.
+                if !matches!(e, SimEvent::AnimNotify { pawn, .. } if Some(pawn) == me) {
+                    view.anim_events.push((tick, e));
+                }
                 if !crate::audio::predicted_locally(&e, me) {
                     view.audio_events.push(e);
                 }
@@ -272,6 +278,16 @@ pub fn fixed_tick(mut session: ResMut<Session>, mut local: ResMut<LocalInput>, m
     if n > 6 {
         view.feed.drain(0..n - 6);
     }
+}
+
+/// The pawns' animation state as the simulation last stepped it (`SessionView::anim`), copied
+/// once per frame after the frame's fixed ticks (the renderer draws the last one).
+pub fn sync_anim(session: Res<Session>, mut view: ResMut<SessionView>) {
+    let anim = match &session.kind {
+        SessionKind::Offline { game, .. } => &game.world().anim,
+        SessionKind::Online { client, .. } => &client.predicted.anim,
+    };
+    view.anim.clone_from(anim);
 }
 
 /// Level travel: make the server's active persistent map the collision world and the

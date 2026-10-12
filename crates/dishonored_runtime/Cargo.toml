@@ -33,6 +33,7 @@ dishonored_assets.workspace = true
 ue3_package.workspace = true
 ue3_shader = { path = "../ue3_shader" }
 dishonored_ir.workspace = true
+dishonored_anim.workspace = true
 dishonored_fx.workspace = true
 dishonored_sim.workspace = true
 dishonored_world.workspace = true

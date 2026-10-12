@@ -1,74 +1,72 @@
-//! Tests of `dishonored_runtime::npc_anim` (integration tests, so they link the normal library build
-//! instead of recompiling the whole crate in test mode).
+//! Tests of the runtime's animation drawing (integration tests, so they link the normal library
+//! build instead of recompiling the whole crate in test mode): the simulation's notify records
+//! resolved for the presentation (`anim_notify::resolve`, as the config's sequence table records
+//! them), the look-at mode and the matinee channels the tree posing sets (`npc_anim`).
 
-use dishonored_runtime::npc_anim::*;
+use dishonored_ir::gameplay::NotifyInfo;
+use dishonored_ir::npc_anim::{LookatConfig, LookatMode};
+use dishonored_runtime::anim_notify::{DropNotify, Notify, SeverNotify, resolve};
+use dishonored_runtime::npc_anim::{Scripted, lookat_mode, matinee_channels};
 
-#[test]
-fn diagonal_ratio() {
-    // Straight ahead and the snapped neighbourhood: no correction.
-    assert!((diagonal_factor(0.0) - 1.0).abs() < 1e-5);
-    assert!((diagonal_factor(1.0) - 1.0).abs() < 1e-5);
-    // Halfway between N and E: the chord is 1/sqrt(2) from the centre.
-    assert!((diagonal_factor(45.0) - std::f32::consts::SQRT_2).abs() < 1e-4);
-    assert!((diagonal_factor(-135.0) - std::f32::consts::SQRT_2).abs() < 1e-4);
+fn record(class: &str, names: &[(&str, &str)], payload: &[(&str, f32)]) -> NotifyInfo {
+    NotifyInfo { class: class.into(), names: names.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(), payload: payload.iter().map(|(k, v)| (k.to_string(), *v)).collect(), ..Default::default() }
 }
 
 #[test]
-fn direction_weights_snap() {
-    let (w, both) = dir_weights(1.0);
-    assert!(!both && w[2] == 1.0);
-    let (w, both) = dir_weights(45.0);
-    assert!(both && (w[2] - 0.5).abs() < 1e-5 && (w[3] - 0.5).abs() < 1e-5);
+fn sound_and_footfall_notifies() {
+    // `Sword_Ready_AttackRight_A_Small`'s whoosh: the AkEvent's object name.
+    let whoosh = record("AnimNotify_AkEvent", &[("AkEvent", "Snd_Weapon.Snd_Weapon_Sword_Whooshe_ak"), ("BoneName", "handAttachment_R_jnt")], &[("PitchMultiplier", 1.1)]);
+    assert_eq!(resolve(&whoosh), Notify::Sound { event: "Snd_Weapon_Sword_Whooshe_ak".into() });
+    assert_eq!(resolve(&record("AnimNotify_AkEvent", &[("AkEvent", "None")], &[])), Notify::Other, "no event");
+    assert_eq!(resolve(&record("DishonoredNotify_Footfall", &[], &[("m_iFootIndex", 1.0)])), Notify::Footfall { foot: 1 });
+    assert_eq!(resolve(&record("DishonoredNotify_Footfall", &[], &[])), Notify::Footfall { foot: 0 });
 }
 
 #[test]
-fn velocity_smoothing_rate() {
-    let p = LocoNodeParams::default();
-    // 300 uu/s apart: full rate (2000 uu/s^2), 1/60 s moves 33.3 uu/s.
-    let v = smooth_velocity((0.0, 0.0), (0.0, 300.0), 1.0 / 60.0, &p);
-    assert!((v.1 - 2000.0 / 60.0).abs() < 1e-3);
-    // 50 apart: half the rate.
-    let v = smooth_velocity((0.0, 100.0), (0.0, 150.0), 1.0 / 60.0, &p);
-    assert!((v.1 - (100.0 + 1000.0 / 60.0)).abs() < 1e-3);
-    // Small gaps close at the minimum ratio, never overshooting.
-    let v = smooth_velocity((0.0, 100.0), (0.0, 101.0), 1.0, &p);
-    assert!((v.1 - 101.0).abs() < 1e-4);
+fn particle_drop_sever_ragdoll_and_lens_notifies() {
+    // `Powers_Cast_BendTime`'s glow on the Mark's socket, attached.
+    let glow = record("AnimNotify_PlayParticleEffect", &[("PSTemplate", "Vfx_GamePlay.Powers.Ps_Tattoo_Glow_01"), ("SocketName", "Tattoo")], &[("bAttach", 1.0)]);
+    assert_eq!(resolve(&glow), Notify::Particle { template: "Vfx_GamePlay.Powers.Ps_Tattoo_Glow_01".into(), point: "Tattoo".into(), attach: true });
+    // Without a socket, on the bone.
+    let on_bone = record("AnimNotify_PlayParticleEffect", &[("PSTemplate", "Fx.Splash"), ("SocketName", "None"), ("BoneName", "index_1_L_jnt")], &[]);
+    assert_eq!(resolve(&on_bone), Notify::Particle { template: "Fx.Splash".into(), point: "index_1_L_jnt".into(), attach: false });
+    // `Generic_DeathFrontA`'s drop has no property over the class defaults: every equipped item,
+    // no velocity.
+    assert_eq!(resolve(&record("DisNotify_DropItem", &[], &[])), Notify::DropItem(DropNotify { which: 0, primary: true, velocity: glam::Vec3::ZERO }));
+    let by_usage = record("DisNotify_DropItem", &[("m_WhichItem", "DisWhichEquippedItemToDrop_ByEquipUsage"), ("m_ByUsage", "EDisEquipUsage_Secondary")], &[("m_DropVelocity.X", 10.0), ("m_DropVelocity.Z", 50.0)]);
+    assert_eq!(resolve(&by_usage), Notify::DropItem(DropNotify { which: 2, primary: false, velocity: glam::Vec3::new(10.0, 0.0, 50.0) }));
+    // A sever: the class defaults where the record has none (blood, ragdoll, impulse 300).
+    let chop = record("DishonoredNotify_SeverLimb", &[("m_SeverBoneName", "neck_jnt"), ("m_ImpulseMode", "SeverImpulse_SeverBoneZ")], &[("m_bHideLimb", 1.0)]);
+    assert_eq!(resolve(&chop), Notify::SeverLimb(SeverNotify { bone: "neck_jnt".into(), blood: true, hide: true, ragdoll: true, mode: 3, strength: 300.0 }));
+    assert_eq!(resolve(&record("DishonoredNotify_SeverLimb", &[], &[])), Notify::Other, "no bone to cut");
+    assert_eq!(resolve(&record("DishonoredNotify_Ragdoll", &[], &[])), Notify::Ragdoll);
+    // `Sword_Ready_Assassination_Front_Master`'s blood on the lens: the class's object name.
+    let lens = record("AnimNotify_CameraEffect", &[("CameraLensEffect", "DishonoredGame.DisEmitterCameraLensEffect_blood_medium")], &[]);
+    assert_eq!(resolve(&lens), Notify::CameraEffect { class: "DisEmitterCameraLensEffect_blood_medium".into() });
+    // The simulation's own classes ask nothing of the presentation.
+    assert_eq!(resolve(&record("DishonoredNotify_AttackZone", &[], &[("m_fDamageZoneMaxTime", 0.05)])), Notify::Other);
 }
 
 #[test]
-fn feet_windows() {
-    // Walk (m_fFootOnGroundPct 0.4): left foot planted within 0.2 of 0.44, right of 0.94.
-    let feet = [0.44, 0.94];
-    assert_eq!(feet_on_ground(&feet, 0.30, 0.2), [true, false]);
-    assert_eq!(feet_on_ground(&feet, 0.05, 0.2), [false, true]);
-    assert_eq!(feet_on_ground(&feet, 0.69, 0.2), [false, false]);
-    assert_eq!(feet_on_ground(&feet, 0.3, 0.0), [false, false]);
+fn lookat_mode_follows_the_locomotion_stance_and_gait() {
+    let mode = |n: &str| LookatMode { name: n.into(), ..Default::default() };
+    let cfg = LookatConfig { modes: vec![mode("EmptyIdle"), mode("SwordIdle"), mode("SwordWalk"), mode("SearchRun")], ..Default::default() };
+    let name = |m: &str, speed: f32| lookat_mode(&cfg, m, speed).map(|x| x.name.clone()).unwrap();
+    assert_eq!(name("SwordPatrol", 0.0), "SwordIdle");
+    assert_eq!(name("Sword", 100.0), "SwordWalk");
+    assert_eq!(name("Aim", 10.0), "SwordIdle");
+    assert_eq!(name("SearchSword", 400.0), "SearchRun");
+    // A mode the config does not have: its first.
+    assert_eq!(name("PanicEmpty", 400.0), "EmptyIdle");
 }
 
 #[test]
-fn hit_directions() {
-    assert_eq!(cardinal(10.0), 0);
-    assert_eq!(cardinal(-90.0), 1);
-    assert_eq!(cardinal(90.0), 2);
-    assert_eq!(cardinal(170.0), 3);
-    assert_eq!(eight_way(-45.0), 1);
-    assert_eq!(eight_way(45.0), 2);
-    assert_eq!(eight_way(-135.0), 6);
-    assert_eq!(eight_way(135.0), 7);
-    assert_eq!(eight_way(180.0), 5);
-}
-
-#[test]
-fn notify_crossing_window() {
-    let n = |t: f32| Notify { t, duration: 0.0, kind: NotifyKind::Ragdoll };
-    let notifies = vec![n(0.0), n(0.5), n(1.0)];
-    let times = |t0: Option<f32>, t1: f32| -> Vec<f32> { crossing(&notifies, t0, t1).iter().map(|n| n.t).collect() };
-    // The original's window is half-open at the end, [t0, t1) (tick_order.md section 4): a
-    // clip started this frame fires from its start, the notify at 0 included, once it advances.
-    assert_eq!(times(None, 0.0), Vec::<f32>::new());
-    assert_eq!(times(None, 0.6), vec![0.0, 0.5]);
-    assert_eq!(times(Some(0.0), 1.0), vec![0.0, 0.5]);
-    assert_eq!(times(Some(0.4), 0.5), Vec::<f32>::new());
-    assert_eq!(times(Some(0.5), 0.6), vec![0.5]);
-    assert_eq!(times(Some(0.4), 0.9), vec![0.5]);
+fn matinee_tracks_are_the_stack_channels() {
+    let s = |n: &str, w: f32| Scripted { name: n.into(), time: 1.5, weight: w, ..Default::default() };
+    let tracks: Vec<Scripted> = (0..7).map(|k| s(&format!("Gesture{k}"), 0.5)).collect();
+    let ch = matinee_channels(&tracks);
+    assert_eq!(ch.len(), 6, "the node's six channels");
+    for (k, c) in ch.iter().enumerate() {
+        assert_eq!((c.stack.as_str(), c.channel, c.sequence.as_str(), c.time, c.weight), ("MatineeStackNode", k, format!("Gesture{k}").as_str(), 1.5, 0.5));
+    }
 }

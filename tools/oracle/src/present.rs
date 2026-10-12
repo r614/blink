@@ -9,13 +9,14 @@
 //!   simulation `step` with the one-shot end rule `one_shot_finished`, over the gameplay
 //!   ParticleSystems the runtime decodes (`GAMEPLAY_PARTICLES`);
 //! - sounds: `SoundEventState::posts` (cue names, contact-system sounds);
-//! - animation: `collect_hits` (the reactions `npc_anim` plays).
+//! - animation: the simulation's own notifies (`SimEvent::AnimNotify`, which the runtime's
+//!   `anim_notify` plays), recorded by sequence and class.
 //!
 //! The session forwards every step's events to all three (`session::fixed_tick`); one rendered
 //! frame per tick here. What only the Bevy side does (drawing, sockets of animated meshes) is
-//! not reproduced: animation-driven sound notifies and footfalls are absent (no skeletal
-//! animation runs headless, so the simulation's sword-swing cue is posted), the third-person
-//! muzzle socket falls back to the eye point, placed level emitters are not simulated.
+//! not reproduced: the notifies' sounds and footfalls are not posted here (the simulation's
+//! sword-swing cue is), the third-person muzzle socket falls back to the eye point, placed level
+//! emitters are not simulated.
 
 #![allow(dead_code)]
 
@@ -337,15 +338,13 @@ impl Presenter {
                 out.push(PresentEvent { kind: "Sound", object, name, detail });
             }
         }
-        // Animation reactions.
-        let all: Vec<&PlayerState> = players.iter().collect();
-        let stamped_events: Vec<(u64, SimEvent)> = events.iter().map(|e| (world.tick, *e)).collect();
-        let mut hits: Vec<(u32, Vec<(HitKind, Vec3, u64)>)> = collect_hits(&stamped_events, &all).into_iter().collect();
-        hits.sort_by_key(|h| h.0);
-        for (id, v) in hits {
-            for (k, _, _) in v {
-                out.push(PresentEvent { kind: "Anim", object: id, name: format!("{k:?}"), detail: String::new() });
-            }
+        // The animation notifies the simulation fired (the runtime plays them, `anim_notify`): the
+        // sequence and the notify's class.
+        for ev in events {
+            let SimEvent::AnimNotify { pawn, sequence, notify, .. } = *ev else { continue };
+            let table = &content.sim.anim;
+            let Some(n) = table.info(sequence).and_then(|s| s.notifies.get(notify as usize)) else { continue };
+            out.push(PresentEvent { kind: "AnimNotify", object: pawn, name: format!("{}.{}", table.name(sequence).unwrap_or("?"), n.class), detail: format!("t={:.3}", n.time) });
         }
         self.now += dt;
         out
