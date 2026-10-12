@@ -249,3 +249,126 @@ fn a_choked_guard_plays_the_choke_slaves() {
     assert_eq!(r.master(), Master::Dead);
     assert!(r.state.pawn_states[&GUARD].ragdoll);
 }
+/// One step with the player's and the guard's own inputs (the requests empty).
+fn step_inputs(r: &mut Run, player: PlayerInput, guard_buttons: u16) -> u64 {
+    let t = r.state.tick;
+    r.state.requests.clear();
+    let ins = [(1, PlayerInput { tick: t, ..player }), (GUARD, PlayerInput { tick: t, yaw: 180.0, buttons: guard_buttons, ..Default::default() })];
+    let out = step_world(&mut r.state, &ins, &r.world, &r.cfg);
+    r.events.extend(out.events.into_iter().map(|e| (t, e)));
+    t
+}
+
+/// The player's bullet knocks a guard down (`Twk_Proj_Bullet.m_pDamageType` =
+/// `DishonoredDamageType_Bullet`, `eDisPawnHitReactionType_Knockdown`, slot 423): a
+/// `StateNPCMasterThrown` request taken at the guard's next machine tick, whose enter plays
+/// `PushToRagdoll` group 0 at the shot's side (`Generic_PushToRagdoll_Front` from the front) and
+/// flies the guard away from the shooter at the minimum momentum over the throw mass (800 / 2), so
+/// that it moves from the tick after; its ragdoll notify (0.296 s) ends the flight on the 18th
+/// update, as the capture of `combat/pistol_hit` shows (hit tick 8, `PHYS_Flying` from tick 9,
+/// 6.6 uu a tick from tick 10, `PHYS_RigidBody` at tick 26); at rest it gets up through the stun
+/// chain.
+#[test]
+fn a_pistol_hit_knocks_a_guard_down() {
+    use dishonored_sim::input::{LeftHand, buttons};
+    let mut r = Run::new(600.0);
+    r.state.player_mut(GUARD).unwrap().vitals.health = 500.0;
+    let gun = |b| PlayerInput { yaw: 0.0, pitch: -5.0, buttons: b, left_hand: LeftHand::Pistol, ..Default::default() };
+    for _ in 0..40 {
+        step_inputs(&mut r, gun(0), 0);
+    }
+    r.events.clear();
+    let mut hit = None;
+    for k in 0..10 {
+        let t = step_inputs(&mut r, gun(if k == 0 { buttons::SECONDARY } else { 0 }), 0);
+        if r.events.iter().any(|(_, e)| matches!(e, SimEvent::Damage { victim: GUARD, .. })) {
+            hit = Some(t);
+            break;
+        }
+    }
+    let hit = hit.expect("the shot hits the guard");
+    assert!(r.guard().alive);
+    assert_eq!(r.master(), Master::Walk, "the request waits for the next machine tick");
+    let x0 = r.guard().position.x;
+    step_inputs(&mut r, gun(0), 0);
+    assert_eq!(r.master(), Master::Thrown);
+    assert!(r.chain_seq().unwrap().ends_with("Generic_PushToRagdoll_Front"), "{:?}", r.chain_seq());
+    let g = r.guard();
+    assert!(g.thrown.active && g.thrown.by_notify);
+    assert!((g.velocity.x - 400.0).abs() < 1.0 && g.velocity.y.abs() < 40.0, "flies away from the shooter at 800 / 2: {:?}", g.velocity);
+    assert_eq!(g.position.x, x0, "it moves from the next tick");
+    let mut ragdoll = None;
+    let mut x1 = None;
+    for k in 0..40 {
+        step_inputs(&mut r, gun(0), 0);
+        if k == 0 {
+            x1 = Some(r.guard().position.x);
+        }
+        if ragdoll.is_none() && r.guard().thrown.ragdoll {
+            ragdoll = Some(r.state.tick - 1 - hit);
+        }
+    }
+    let step1 = x1.unwrap() - x0;
+    assert!((step1 - 400.0 * 0.995 * DT).abs() < 0.2, "the first flight step {step1}");
+    assert_eq!(ragdoll, Some(18), "the ragdoll notify on the 18th update");
+    let mut seen = Vec::new();
+    for _ in 0..900 {
+        step_inputs(&mut r, gun(0), 0);
+        seen.push(r.master());
+    }
+    assert!(seen.contains(&Master::Stunned), "the get-up");
+    assert_eq!(r.master(), Master::Walk);
+}
+
+/// `m_ThrowDirection` of a knock-down (0x00BBE6D0): the cardinal sector the push came from, far
+/// along its horizontal direction; without a momentum, the hit location's own sector.
+#[test]
+fn a_knockdown_falls_away_from_the_side_it_was_hit_on() {
+    let r = Run::new(600.0);
+    let g = r.guard();
+    let fwd = dishonored_sim::movement::forward_vector(g.yaw);
+    let right = dishonored_sim::movement::right_vector(g.yaw);
+    let dir = |loc: Vec3, m: Vec3| dishonored_sim::pawn_states::knockdown_direction(&g, loc, m);
+    assert_eq!(dir(g.position + fwd * 30.0, -fwd * 500.0), 0, "shot from the front");
+    assert_eq!(dir(g.position - fwd * 30.0, fwd * 500.0), 3, "shot from behind");
+    assert_eq!(dir(g.position + right * 30.0, -right * 500.0), 2, "from the right");
+    assert_eq!(dir(g.position - right * 30.0, Vec3::ZERO), 1, "no momentum: the hit's side");
+}
+
+/// An NPC's block is its parry context awaiting the blow (`DisItemContext_ParryNPC`,
+/// `eDisWeaponMeleeState_AwaitingParry`): `Parry_AwaitingImpact` (`Sword_Ready_ParryIdle`) plays
+/// while it holds; the player's swing meets it as a clash (PostParry_Neutral): the guard plays its
+/// `Parry` group 0 step, takes no damage, the player is not staggered and no parry is reported;
+/// letting go of the block ends the context.
+#[test]
+fn a_blocking_guard_awaits_the_blow_and_parries_it_neutral() {
+    use dishonored_sim::input::buttons;
+    let mut r = Run::new(110.0);
+    let hold = |r: &mut Run, b: u16, g: u16| step_inputs(r, PlayerInput { buttons: b, ..Default::default() }, g);
+    hold(&mut r, 0, buttons::BLOCK);
+    hold(&mut r, 0, buttons::BLOCK);
+    assert_eq!(r.guard().sword.phase, SwordPhase::Blocking);
+    assert_eq!(r.master(), Master::ActionParry);
+    assert!(r.chain_seq().unwrap().ends_with("Sword_Ready_ParryIdle"), "{:?}", r.chain_seq());
+    let h0 = r.guard().vitals.health;
+    r.events.clear();
+    hold(&mut r, buttons::PRIMARY, buttons::BLOCK);
+    let mut seqs = Vec::new();
+    for _ in 0..40 {
+        hold(&mut r, 0, buttons::BLOCK);
+        if let Some(k) = r.chain_seq() {
+            if seqs.last() != Some(&k) {
+                seqs.push(k);
+            }
+        }
+    }
+    assert!(r.events.iter().any(|(_, e)| matches!(e, SimEvent::SwordBlocked { defender: GUARD, .. })), "the clash");
+    assert!(!r.events.iter().any(|(_, e)| matches!(e, SimEvent::SwordParried { .. })), "no parry window on an NPC");
+    assert_eq!(r.guard().vitals.health, h0);
+    assert_ne!(r.state.player(1).unwrap().sword.phase, SwordPhase::Staggered);
+    assert!(seqs.iter().any(|k| k.contains("Sword_Ready_Parry_")), "the neutral parry: {seqs:?}");
+    for _ in 0..80 {
+        hold(&mut r, 0, 0);
+    }
+    assert_eq!(r.master(), Master::Walk);
+}

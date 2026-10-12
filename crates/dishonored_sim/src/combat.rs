@@ -164,9 +164,9 @@ pub fn parries(s: &crate::state::SwordState, t: &CombatTuning, zone: bool) -> bo
 }
 
 /// Whether a blocking pawn's `DisNotify_BlockParryZone` window is open: on its block sequence's
-/// layer (the player's `Sword_Ready_ParryIdle_In`); a pawn whose block plays no sequence (the
-/// NPCs: their block sets are not in the table) takes the player's window by its block time
-/// (`CombatTuning::parry_zone`, read from the table: an approximation, U-600).
+/// layer (the player's `Sword_Ready_ParryIdle_In`); a player whose block plays no sequence takes
+/// the window by its block time (`CombatTuning::parry_zone`, read from the table). An NPC's block
+/// never parries (`resolve_sword_hits`: its parry context answers the clash).
 pub fn parry_zone(v: &PlayerState, anim: Option<&PawnAnim>, table: &SeqTable, t: &CombatTuning) -> bool {
     match anim.and_then(|a| a.layers[layer::UPPER_BODY].as_ref()).filter(|l| l.token & token::KIND == token::BLOCK && l.out.is_none()) {
         Some(_) => anim.is_some_and(|a| a.window_open(layer::UPPER_BODY, table, "DisNotify_BlockParryZone")),
@@ -386,6 +386,21 @@ pub fn resolve_sword_hits(state: &mut WorldState, world: &dyn WorldQuery, cfg: &
                     if a.layers[l].as_ref().is_some_and(|s| s.token & token::KIND == token::SWING) {
                         a.stop(l);
                     }
+                }
+                // An NPC's block is its parry context awaiting the blow (`crate::pawn_states`,
+                // `DisItemContext_ParryNPC`): the swing meets it as a clash (0x00C18640 ->
+                // 0x00C13A10), PostParry_Neutral for both: the NPC plays its `Parry` group 0, the
+                // attacker's context goes Parried_Neutral (its slot 124) and deals no damage. No
+                // parry window and no stagger (the player's block rules, 0x00C22B60, are the
+                // player's context's). The versus outcome (0x00C087A0, `ParryVersus`) is not ported.
+                if crate::pawn_states::has_states(&victim) {
+                    crate::pawn_states::request_parry_neutral(state, victim.id, attacker.sword.swing_seq, cfg);
+                    let a = &mut state.players[ai];
+                    a.sword.phase = SwordPhase::Recovery;
+                    a.sword.timer = -t.blocked_recoil;
+                    events.push(SimEvent::SwordBlocked { attacker: attacker.id, defender: victim.id });
+                    crate::noise::emit(events, &noise.sword_weapon, victim.position, SoundCategory::SwordBlock, attacker.id, 0.0);
+                    continue;
                 }
                 if parries(&victim.sword, t, zone) {
                     let a = &mut state.players[ai];

@@ -712,10 +712,16 @@ pub fn after_group(state: &mut WorldState, cfg: &SimConfig, events: &[SimEvent],
 ///   (or on a leg) plays `StateNPCMasterProjectileHitReact` with the hit region (head for a
 ///   headshot, else the torso: the hit bone is not in the event), else StrongHitReact;
 /// - Strong (`DisDamageType_Slide`): slot 422 (0x00B73630 -> 0x00A78920): StrongHitReact, the step
-///   `m_Direction` (0x00A6D5F0's cardinal sectors).
-///
-/// The pistol bullet's Knockdown (`DishonoredDamageType_Bullet`: slot 423 -> a Thrown request
-/// 0x00A86B00 with the momentum) is not modelled (the sim's throw is the Windblast's).
+///   `m_Direction` (0x00A6D5F0's cardinal sectors);
+/// - Knockdown (the player's bullet, `Twk_Proj_Bullet.m_pDamageType` =
+///   `DishonoredDamageType_Bullet`; `DisDamageType_Grenade`): slot 423 (0x00B736E0) requests
+///   `StateNPCMasterThrown` (`crate::pawn_states::request_knockdown`) with the hit's location and
+///   momentum. The bullet's location is its impact on the pawn and its momentum `m_fMass x
+///   m_fSpeed x m_fHitMomentumFactor` along its flight (LIKELY); an explosion's (the damage of
+///   `gadgets::explode_with`) the pawn's own location and the explosion's radial momentum (LIKELY:
+///   the momentum the port gives players, `m_fRadialMomentum x k` out from the blast plus
+///   `m_fExtraUpForce x k`). The sticky grenade's types (`DisDamageType_StickyGrenade`,
+///   `_StickyGrenadeExplosion`) set no reaction: Weak.
 fn hit_reactions(state: &mut WorldState, cfg: &SimConfig, events: &[SimEvent]) {
     use crate::events::DamageCause as C;
     use crate::pawn_states::{Master, StateRequest, context};
@@ -732,7 +738,7 @@ fn hit_reactions(state: &mut WorldState, cfg: &SimConfig, events: &[SimEvent]) {
         });
         let angle = local.y.atan2(local.x).to_degrees();
         match cause {
-            C::Sword | C::SwordCounter | C::Windblast => {
+            C::Sword | C::SwordCounter | C::Windblast | C::StickyGrenade => {
                 let Some(a) = state.anim.get_mut(&victim) else { continue };
                 let r = a.roll();
                 if let Some(seq) = chain_step(cfg, NpcAnim::HitReactSmallAdditive, 0, eight_way(angle), r, v.kind == PawnKind::Guard) {
@@ -756,6 +762,37 @@ fn hit_reactions(state: &mut WorldState, cfg: &SimConfig, events: &[SimEvent]) {
             C::Slide => {
                 let req = StateRequest::new(Master::StrongHitReact, NpcAnim::HitReactStrong as u8, -1, crate::pawn_states::cardinal_step(local.x, local.y), context::NONE);
                 crate::pawn_states::try_request(state, victim, req, cfg);
+            }
+            C::Pistol | C::PistolHeadshot => {
+                // The bullet's impact on this pawn and its flight: the spawn this tick
+                // (`SimEvent::Fired`, a bullet at `m_fSpeed` 100000 hits within its launch tick
+                // inside 1667 uu), else from the shooter's eye.
+                let impact = events.iter().rev().find_map(|e| match *e {
+                    SimEvent::ProjectileImpact { projectile, point, victim: Some(v) } if v == victim => Some((projectile, point)),
+                    _ => None,
+                });
+                let Some((projectile, point)) = impact else { continue };
+                let fired = events.iter().find_map(|e| match *e {
+                    SimEvent::Fired { projectile: p, velocity, .. } if p == projectile => Some(velocity),
+                    _ => None,
+                });
+                let eye = attacker.and_then(|k| state.player(k)).map(|k| crate::movement::eye_position(k, &cfg.gameplay.movement));
+                let dir = fired.map(|v| v.normalize_or_zero()).or_else(|| eye.map(|e| (point - e).normalize_or_zero())).unwrap_or(Vec3::ZERO);
+                let t = &cfg.tuning;
+                let momentum = dir * t.bullet_mass * t.bullet_speed * t.bullet_hit_momentum;
+                let source = from.unwrap_or(point);
+                crate::pawn_states::request_knockdown(state, victim, point, momentum, source, cfg);
+            }
+            C::Grenade => {
+                let Some(blast) = events.iter().filter_map(|e| match *e {
+                    SimEvent::Explosion { position, sticky: false, .. } => Some(position),
+                    _ => None,
+                }).min_by(|a, b| a.distance_squared(v.position).total_cmp(&b.distance_squared(v.position))) else { continue };
+                let e = &crate::gadgets::grenade_cfg(&cfg.gameplay, crate::state::ProjectileKind::Grenade).explosion;
+                let d = v.position.distance(blast);
+                let k = (1.0 - d / e.damage_radius.max(1.0)).clamp(0.0, 1.0);
+                let momentum = (v.position - blast).normalize_or_zero() * e.radial_momentum * k + Vec3::Z * e.extra_up_force * k;
+                crate::pawn_states::request_knockdown(state, victim, v.position, momentum, blast, cfg);
             }
             _ => {}
         }

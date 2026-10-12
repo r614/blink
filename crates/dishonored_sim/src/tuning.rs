@@ -264,6 +264,14 @@ pub struct CombatTuning {
     pub bullet_pierce_chance: f32,
     #[serde(default)]
     pub bullet_post_pierce_ratio: f32,
+    /// `DisTweaks_Projectile.m_fMass` and `m_fHitMomentumFactor` of the bullet (1 and 0.005): the
+    /// momentum its hit hands the damage path is taken as `mass x speed x factor` along the
+    /// flight (LIKELY: the formula's code was not found; under the throw's minimum momentum the
+    /// knock-down only reads its direction, `crate::pawn_states::request_knockdown`).
+    #[serde(default)]
+    pub bullet_mass: f32,
+    #[serde(default)]
+    pub bullet_hit_momentum: f32,
     /// `DisTweaks_FirePistol.m_fBulletSpawnDistance` / `DisTweaks_FireCrossbow.m_fArrowSpawnDistance`
     /// (`+0x420` of the fire tweak): the projectile starts this far in front of the camera
     /// (0x00C2A3E0, 0x00C38230).
@@ -595,6 +603,8 @@ impl CombatTuning {
             bullet_stealth_mult: v(pb, "projectile.m_fDamageMultiplier_Stealth", 1.0),
             bullet_pierce_chance: v(pb, "projectile.m_fPiercingChance", 1.0),
             bullet_post_pierce_ratio: v(pb, "projectile.m_fPostPiercingDamageRatio", 0.5),
+            bullet_mass: v(pb, "projectile.m_fMass", 1.0),
+            bullet_hit_momentum: v(pb, "projectile.m_fHitMomentumFactor", 0.005),
             bullet_spawn_distance: v(pb, "fire.m_fBulletSpawnDistance", 150.0),
             bolt_spawn_distance: v(cb, "fire.m_fArrowSpawnDistance", 150.0),
             // `EAINoiseLoudness4` = `m_LoudnessDistanceArray[15]` when the config predates the field.
